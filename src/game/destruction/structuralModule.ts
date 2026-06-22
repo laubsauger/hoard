@@ -247,6 +247,24 @@ export class StructuralModule {
     return { breached: footprint, collapsed };
   }
 
+  /**
+   * Add structural strength to a cell (board/reinforce/brace/weld — T25 functional-mod). Strength may
+   * rise ABOVE the base maxStrength: that extra buffer means more damage is needed to cross the family
+   * breach threshold (reinforcement = more effective HP). The new strength persists in the compact
+   * delta (V18). Returns the resulting strength.
+   */
+  reinforce(index: number, addedStrength: number): number {
+    if (addedStrength < 0 || Number.isNaN(addedStrength)) {
+      throw new Error(`reinforce amount must be non-negative, got ${addedStrength}`);
+    }
+    const cell = this.cells.get(index);
+    if (!cell) throw new Error(`cannot reinforce empty cell ${index}`);
+    if (cell.breached) throw new Error(`cannot reinforce a breached cell ${index}`);
+    cell.strength += addedStrength;
+    this.recordDelta(cell);
+    return cell.strength;
+  }
+
   /** Current compact modification delta (V18) — what a save would persist on top of the base package. */
   modificationDelta(): CellDelta[] {
     return [...this.delta.values()].map((d) => ({ ...d }));

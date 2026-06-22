@@ -52,7 +52,7 @@ export const combatConfig = registerDomain('combat', {
   /** Horde locomotion speed toward the shared flow-field target (world meters per second). */
   hordeMoveSpeed: num({
     owner: 'combat',
-    unit: 'meters',
+    unit: 'metersPerSecond',
     doc: 'Horde locomotion speed in world meters per simulation second (steering integrate step).',
     default: 1.4,
     min: 0.1,
@@ -103,5 +103,140 @@ export const combatConfig = registerDomain('combat', {
     default: 14,
     min: 1,
     max: 200,
+  }),
+
+  // ---- T16 full pipeline: player melee attack-volume windows (V16) ----
+  /** Ticks the player melee damage volume stays OPEN (only window in which melee damage applies, V16). */
+  meleeActiveWindowTicks: num({
+    owner: 'combat',
+    unit: 'ticks',
+    doc: 'Ticks the player melee attack volume is active — the only window damage applies (V16).',
+    default: 4,
+    min: 1,
+    max: 120,
+    integer: true,
+  }),
+  /** Wind-up ticks before the melee attack volume opens (no damage during wind-up). */
+  meleeWindupTicks: num({
+    owner: 'combat',
+    unit: 'ticks',
+    doc: 'Ticks of swing wind-up before the melee attack volume opens (no damage yet).',
+    default: 3,
+    min: 0,
+    max: 120,
+    integer: true,
+  }),
+  /** Recovery ticks after the melee window closes before another swing may start. */
+  meleeRecoverTicks: num({
+    owner: 'combat',
+    unit: 'ticks',
+    doc: 'Recovery ticks after the melee window closes before another swing can begin.',
+    default: 5,
+    min: 0,
+    max: 240,
+    integer: true,
+  }),
+  /** Whether a target struck with detailed anatomy is force-promoted to hero fidelity (V13/V16). */
+  promoteOnDetailedHit: bool({
+    owner: 'combat',
+    doc: 'Promote a struck target to hero fidelity when detailed anatomy/anim is required (V13/V16).',
+    default: true,
+  }),
+  /** Damage multiplier applied when the target posture is downed/crawling (exposed/limited, V16). */
+  postureDownDamageMultiplier: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Damage multiplier when the target is downed/crawling (posture term in hit resolution, V16).',
+    default: 1.25,
+    min: 0.1,
+    max: 10,
+  }),
+
+  // ---- T17 dismemberment: detached-part pooling + missing-limb consequences (V17) ----
+  /** Pool capacity for active detached-part handles before they must settle to props (V17/V18). */
+  detachedPartPoolCapacity: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Maximum simultaneously-active detached-part handles in the pool (V17/V18).',
+    default: 256,
+    min: 1,
+    max: 100_000,
+    integer: true,
+  }),
+  /** Ticks a detached part stays "active" (physics-ish) before settling to a cheap static prop (V17/V18). */
+  detachedPartSettleTicks: num({
+    owner: 'combat',
+    unit: 'ticks',
+    doc: 'Ticks a detached part is active before it settles to a cheap static prop (V17/V18).',
+    default: 90,
+    min: 1,
+    max: 3600,
+    integer: true,
+  }),
+  /** Per-missing-arm locomotion-speed penalty fraction (balance consequence, V17). */
+  armLossLocomotionPenalty: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Fraction of locomotion speed lost per missing arm (balance consequence, V17).',
+    default: 0.1,
+    min: 0,
+    max: 1,
+  }),
+  /** Per-missing-leg locomotion-speed penalty fraction (V17). */
+  legLossLocomotionPenalty: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Fraction of locomotion speed lost per missing leg (V17).',
+    default: 0.45,
+    min: 0,
+    max: 1,
+  }),
+  /** Per-missing-arm threat reduction fraction (reach/attack consequence, V17). */
+  armLossThreatPenalty: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Fraction of threat lost per missing arm (reduced reach/attack, V17).',
+    default: 0.35,
+    min: 0,
+    max: 1,
+  }),
+  /** Leg-loss count at/above which a zombie can no longer walk and must crawl (posture change, V17). */
+  legsLostToCrawl: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Number of legs lost at/above which the zombie transitions to a crawl posture (V17).',
+    default: 2,
+    min: 1,
+    max: 2,
+    integer: true,
+  }),
+
+  // ---- T20 horde group action: structural pressure on barricades/doors (V19) ----
+  /** Pressure one member contributes per tick while pressing a barricade/door (V19). */
+  barricadePressurePerMemberPerTick: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Pressure one crowd member adds per tick while pressing a barricade/door (V19).',
+    default: 1,
+    min: 0,
+    max: 1000,
+  }),
+  /** Accumulated pressure at/above which one structural-damage increment is released (V19). */
+  barricadePressureThreshold: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Accumulated crowd pressure at/above which a structural-damage increment is applied (V19).',
+    default: 40,
+    min: 1,
+    max: 100_000,
+  }),
+  /** Structural damage applied each time the pressure threshold is crossed (V19). */
+  barricadeDamagePerThreshold: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Structural damage applied to the barricade each time accumulated pressure is released (V19).',
+    default: 10,
+    min: 0.1,
+    max: 100_000,
   }),
 });

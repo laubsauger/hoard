@@ -70,4 +70,32 @@ export const zombiesConfig = registerDomain('zombies', {
     min: 0,
     max: 1,
   }),
+
+  // ---- T21 archetype stats (data-composed; every tunable typed — V4/V7) ----
+  // shambler — slow, durable baseline.
+  shamblerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Shambler locomotion speed.', default: 1.2, min: 0.1, max: 12 }),
+  shamblerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Shambler base health.', default: 100, min: 1, max: 10_000 }),
+  shamblerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Shambler flat armor.', default: 10, min: 0, max: 1000 }),
+  shamblerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler sight range.', default: 18, min: 1, max: 200 }),
+  shamblerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler hearing range.', default: 36, min: 1, max: 500 }),
+  shamblerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Shambler melee attack damage.', default: 8, min: 0, max: 10_000 }),
+  shamblerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler sever-threshold scale (anatomical damage variation).', default: 1, min: 0.1, max: 10 }),
+
+  // runner — fast, fragile, agitated.
+  runnerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Runner locomotion speed.', default: 4.2, min: 0.1, max: 12 }),
+  runnerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Runner base health.', default: 70, min: 1, max: 10_000 }),
+  runnerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Runner flat armor.', default: 4, min: 0, max: 1000 }),
+  runnerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner sight range.', default: 28, min: 1, max: 200 }),
+  runnerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner hearing range.', default: 48, min: 1, max: 500 }),
+  runnerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Runner melee attack damage.', default: 12, min: 0, max: 10_000 }),
+  runnerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner sever-threshold scale (fragile — easier to sever).', default: 0.7, min: 0.1, max: 10 }),
+
+  // crawler — already legless, low/ground posture, durable torso.
+  crawlerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Crawler locomotion speed (low to ground).', default: 0.7, min: 0.1, max: 12 }),
+  crawlerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Crawler base health.', default: 90, min: 1, max: 10_000 }),
+  crawlerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Crawler flat armor.', default: 8, min: 0, max: 1000 }),
+  crawlerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Crawler sight range (eyes near ground).', default: 10, min: 1, max: 200 }),
+  crawlerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Crawler hearing range.', default: 30, min: 1, max: 500 }),
+  crawlerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Crawler melee attack damage (grab/bite).', default: 10, min: 0, max: 10_000 }),
+  crawlerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Crawler sever-threshold scale (tough torso/arms).', default: 1.4, min: 0.1, max: 10 }),
 });

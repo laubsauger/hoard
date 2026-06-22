@@ -1,6 +1,7 @@
 // T42 — frozen contract barrel. Downstream lanes import from here.
 
 export * from './ids';
+export * from './stimulus';
 export * from './commands';
 export * from './events';
 export * from './soa';

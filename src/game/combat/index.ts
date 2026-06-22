@@ -1,4 +1,4 @@
-// T41 — combat lane barrel (forward-pulled firearm hit subset for GATE-0).
+// Combat lane barrel — full T16 pipeline + T17 dismemberment + T18 weapons.
 
 export {
   ANATOMY_REGIONS,
@@ -15,3 +15,33 @@ export {
   type ShotOrigin,
   type ShotResult,
 } from './hitPath';
+export {
+  Posture,
+  buildSegments,
+  severedCount,
+  limbConsequences,
+  DetachedPartPool,
+  type AnatomySegment,
+  type ConsequenceConfig,
+  type LimbConsequences,
+  type DetachedPart,
+} from './segments';
+export {
+  regionsForTier,
+  tierExposes,
+  needsDetail,
+  coarsenRegion,
+  regionFromGeometry,
+} from './hitVolume';
+export {
+  MeleeSwing,
+  type SwingPhase,
+  type SwingConfig,
+} from './attackWindow';
+export {
+  WeaponSystem,
+  Magazine,
+  type WeaponDeps,
+  type FireOutcome,
+  type MeleeOutcome,
+} from './weapons';

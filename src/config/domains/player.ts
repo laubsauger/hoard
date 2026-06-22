@@ -33,6 +33,33 @@ export const playerConfig = registerDomain('player', {
     min: 0.1,
     max: 3,
   }),
+  /** Player walk speed (m/s) applied to WASD movement intent (T38 vertical slice). */
+  moveSpeedMetersPerSecond: num({
+    owner: 'player',
+    unit: 'metersPerSecond',
+    doc: 'Player ground movement speed applied to normalized WASD intent each frame.',
+    default: 4.5,
+    min: 0.1,
+    max: 20,
+  }),
+  /** Rendered player body capsule height (m). */
+  bodyHeightMeters: num({
+    owner: 'player',
+    unit: 'meters',
+    doc: 'Rendered height of the player avatar capsule.',
+    default: 1.8,
+    min: 0.5,
+    max: 3,
+  }),
+  /** Rendered player body capsule radius (m). */
+  bodyRadiusMeters: num({
+    owner: 'player',
+    unit: 'meters',
+    doc: 'Rendered radius of the player avatar capsule.',
+    default: 0.35,
+    min: 0.1,
+    max: 1,
+  }),
   /** Initial hunger pressure (0 = sated). */
   initialHunger: num({
     owner: 'player',

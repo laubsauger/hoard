@@ -27,6 +27,8 @@ export type Unit =
   | 'hz'
   | 'degrees'
   | 'radians'
+  | 'metersPerSecond'
+  | 'radiansPerSecond'
   | 'ratio'
   | 'count'
   | 'bytes'

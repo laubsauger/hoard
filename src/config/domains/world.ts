@@ -33,4 +33,31 @@ export const worldConfig = registerDomain('world', {
     min: 8,
     max: 128,
   }),
+  /** Authored building wall height (m) for the M1 block scene (T38). Drives wall + cutaway geometry. */
+  buildingWallHeightMeters: num({
+    owner: 'world',
+    unit: 'meters',
+    doc: 'Height of authored building/interior walls in the city-block scene.',
+    default: 3,
+    min: 0.5,
+    max: 20,
+  }),
+  /** Authored floor slab thickness (m) for the M1 block scene. */
+  floorThicknessMeters: num({
+    owner: 'world',
+    unit: 'meters',
+    doc: 'Thickness of authored floor/street slabs in the city-block scene.',
+    default: 0.2,
+    min: 0.05,
+    max: 2,
+  }),
+  /** Authored roof slab thickness (m) for the M1 block scene (the cutaway-faded layer). */
+  roofThicknessMeters: num({
+    owner: 'world',
+    unit: 'meters',
+    doc: 'Thickness of authored building roof slabs (the cutaway-faded layer) in the block scene.',
+    default: 0.3,
+    min: 0.05,
+    max: 2,
+  }),
 });

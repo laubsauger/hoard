@@ -51,6 +51,40 @@ export const renderingConfig = registerDomain('rendering', {
     },
   }),
 
+  // ---- V25 startup micro-benchmark gates (measured perf, NOT browser name) ----
+  // detectTierFromProbe combines these with the adapter-limit gates above: a device qualifies for a
+  // tier only if it BOTH satisfies that tier's minimum adapter limits AND its measured probe frame is
+  // within budget AND its measured fill-rate score clears the floor. Measured perf can only DEMOTE
+  // below the limit ceiling, never promote above it. Below the mobile floor → explicit error (V4).
+  probeGpuFrameBudgetMs: num({
+    owner: 'rendering',
+    unit: 'ms',
+    doc: 'Max measured GPU frame time (ms) at the fixed reference probe scene to qualify for a tier (V25).',
+    default: 24, // mobile-webgpu ceiling — slower than this fails every tier
+    min: 1,
+    max: 100,
+    tiers: {
+      'desktop-high': 6,
+      'desktop-medium': 10,
+      'desktop-compat': 16,
+      'mobile-webgpu': 24,
+    },
+  }),
+  probeMinFillRateScore: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Min measured device-independent fill/throughput score from the startup probe to qualify for a tier (V25).',
+    default: 10, // mobile floor
+    min: 0,
+    max: 1000,
+    tiers: {
+      'desktop-high': 100,
+      'desktop-medium': 60,
+      'desktop-compat': 30,
+      'mobile-webgpu': 10,
+    },
+  }),
+
   // ---- Output / frame ----
   pixelRatioMax: num({
     owner: 'rendering',
@@ -108,5 +142,176 @@ export const renderingConfig = registerDomain('rendering', {
     min: 0,
     max: 10,
     integer: true,
+  }),
+
+  // ---- Crowd render paths (T30 / V2): hero / instanced / horde-LOD / impostor selected by tier+distance ----
+  crowdHeroBudget: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Max simultaneously promoted hero (skinned-mesh) zombies — detailed hero band (V13/§V-gates 20-40).',
+    default: 30,
+    min: 0,
+    max: 120,
+    integer: true,
+    tiers: { 'desktop-high': 40, 'desktop-medium': 30, 'desktop-compat': 16, 'mobile-webgpu': 8 },
+  }),
+  crowdHeroMaxDistanceMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Beyond this distance a hero-tier zombie is downgraded to the instanced animated path.',
+    default: 18,
+    min: 1,
+    max: 200,
+    tiers: { 'desktop-high': 24, 'desktop-compat': 12, 'mobile-webgpu': 9 },
+  }),
+  crowdInstancedMaxDistanceMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Beyond this distance the instanced animated path downgrades to the horde-LOD path.',
+    default: 45,
+    min: 2,
+    max: 400,
+    tiers: { 'desktop-high': 60, 'desktop-compat': 32, 'mobile-webgpu': 24 },
+  }),
+  crowdHordeLodMaxDistanceMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Beyond this distance the horde-LOD path downgrades to the far impostor/cluster path.',
+    default: 110,
+    min: 4,
+    max: 800,
+    tiers: { 'desktop-high': 150, 'desktop-compat': 80, 'mobile-webgpu': 55 },
+  }),
+  crowdMaterialFamilyCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Number of shared crowd material families (flesh/clothing/armor/burned ...); NO per-zombie material (V2).',
+    default: 4,
+    min: 1,
+    max: 16,
+    integer: true,
+  }),
+
+  // ---- Per-instance variation modules (T30): composed, never a unique shader/material (V2) ----
+  crowdBodyVariantCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Body mesh-module variants packed in the shared crowd atlas (variation, not new materials).',
+    default: 6,
+    min: 1,
+    max: 64,
+    integer: true,
+  }),
+  crowdHeadVariantCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Head module variants in the shared atlas.',
+    default: 8,
+    min: 1,
+    max: 64,
+    integer: true,
+  }),
+  crowdHairVariantCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hair module variants in the shared atlas.',
+    default: 6,
+    min: 1,
+    max: 64,
+    integer: true,
+  }),
+  crowdClothingVariantCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Clothing module variants in the shared atlas.',
+    default: 10,
+    min: 1,
+    max: 64,
+    integer: true,
+  }),
+  crowdPaletteCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Palette/mask swatches for tinting variation (dirt/blood layered separately).',
+    default: 12,
+    min: 1,
+    max: 256,
+    integer: true,
+  }),
+
+  // ---- Gore render (T19 / V8 / V29): pooled + capped; intensity multiplier injected from accessibility ----
+  goreSprayPoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Fixed pool capacity for directional blood spray/mist emitters (recycled oldest-first when full).',
+    default: 64,
+    min: 0,
+    max: 1024,
+    integer: true,
+    tiers: { 'desktop-high': 128, 'desktop-medium': 64, 'desktop-compat': 32, 'mobile-webgpu': 16 },
+  }),
+  goreStainPoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Fixed pool capacity for persistent readable blood stains/decals.',
+    default: 256,
+    min: 0,
+    max: 4096,
+    integer: true,
+    tiers: { 'desktop-high': 512, 'desktop-medium': 256, 'desktop-compat': 128, 'mobile-webgpu': 48 },
+  }),
+  goreSeverPoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Fixed pool capacity for sever-silhouette / wound-cap gore markers.',
+    default: 48,
+    min: 0,
+    max: 512,
+    integer: true,
+    tiers: { 'desktop-high': 96, 'desktop-medium': 48, 'desktop-compat': 24, 'mobile-webgpu': 8 },
+  }),
+  goreSprayParticlesPerEvent: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Particles emitted per hero blood-spray event at full gore intensity (scaled by accessibility + distance).',
+    default: 12,
+    min: 1,
+    max: 200,
+    integer: true,
+    tiers: { 'desktop-high': 20, 'desktop-compat': 8, 'mobile-webgpu': 4 },
+  }),
+  goreDistantSimplifyMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Beyond this distance gore uses the pooled simplified form (no hero wet response).',
+    default: 20,
+    min: 1,
+    max: 200,
+  }),
+
+  // ---- Visibility / cutaway (T28 / V20): roof+upper-wall fade, base preserved, interiors stay hidden ----
+  roofFadeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'Time to fade a roof/upper-wall section in or out as occlusion state changes (V20).',
+    default: 0.25,
+    min: 0,
+    max: 5,
+  }),
+  wallBasePreservedHeightMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Wall height (from floor up) always kept opaque to read enclosure + breach state (V20).',
+    default: 1.2,
+    min: 0.1,
+    max: 10,
+  }),
+  upperWallFadeStartHeightMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Wall height above which sections may fade when they occlude the camera view (V20).',
+    default: 1.8,
+    min: 0.2,
+    max: 20,
   }),
 });
