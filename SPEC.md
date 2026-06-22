@@ -165,6 +165,8 @@ Architecture-boundary + non-negotiable rules. Numbered, monotonic.
 - **V29** Accessibility (must support): full input remap + separate sensitivity; outline strength / target highlight / gore intensity / camera shake / flashes / motion-reduction settings; color-independent interaction+damage indicators; scalable UI + high-contrast text; optional pause/slowdown for inventory+complex contextual actions (single-player); audio-cue subtitles / visual indicators for alarms, breaking glass, directional threats.
 - **V30** Scope guardrails (launch destruction): destructible doors, windows, selected walls, selected floors, barricades, furniture obstacles, local fire. Full multi-building collapse / terrain excavation / arbitrary civil-engineering construction = later milestones. Irregular breach holes must visually hide structural cell shape.
 - **V31** Survival systems = slow pressure, not constant meter babysitting. Hunger/thirst, fatigue/sleep (quality depends on security/pain/noise/temp), bleeding/pain (persist, readable severity), infection risk (consistent rules, communicated via symptoms), encumbrance (weight+container capacity+quick-access cost), stress/panic (affect control + awareness, no agency removal). Progression increases competence/options/reliability, NOT superhuman damage. Tension rule: every major system feeds "how safe is this place now, and what did the player do to change that?"
+- **V32** (backprop B1) Each fixed tick within a multi-tick frame MUST advance the tick index passed to systems. A frame running N catch-up ticks invokes scheduler/systems with tick, tick+1, … tick+N-1 — NOT the final index N times. Else interval-cadence systems (perception/tier/sound) misfire under variable-dt frames. Test with a variable-dt frame that advances >1 tick.
+- **V33** (backprop B2) Per-instance / crowd GPU data that scales with entity capacity MUST use storage buffers or instanced vertex attributes via the WebGPU node path — NEVER a uniform buffer. Respect `maxUniformBufferBindingSize` (65536). A capacity-sized uniform (e.g. instanceMatrix as uniform = capacity×64B) silently invalidates the bind group and drops the draw. Verify by zero WebGPU validation errors in the in-browser smoke check at max horde capacity.
 
 ---
 
@@ -272,7 +274,7 @@ T16+T33 minimal subsets are pulled forward into T41 (firearm anatomical hit path
 | T37 | x | R | quality tiers + scaling-order impl (Desktop high/med/compat, Mobile-WebGPU); capability detect; user override w/ safe-limit guard | T5, T30 | V22, V25 |
 | T36 | . | X | benchmark suite: Crowd avenue, Breach cascade, Dense interior, Streaming sprint, Corpse accumulation, Mobile capability; median/95/99 frame times; CI captures | T9, T16, T33 | V10, §V-gates |
 | T39 | . | X | test layers: unit (damage/transfer/strength/tier/config), deterministic replay, integration (breach→nav+vis+audio+render+persist consistency), content validation, visual regression, perf, save-compat | T16, T33 | V26, V27 |
-| T38 | . | INT | M1 vertical slice: one city block — street + multi-room building, cutaway camera, loot, shelter actions, melee+firearm, sound attraction, save/load, day/night+weather, one full modify-defend-escape loop | W2 done | V27, milestone-1 |
+| T38 | x | INT | M1 vertical slice: one city block — street + multi-room building, cutaway camera, loot, shelter actions, melee+firearm, sound attraction, save/load, day/night+weather, one full modify-defend-escape loop | W2 done | V27, milestone-1 |
 | T40 | . | INT | M2 vertical slice: representative district final-quality art, medium-term objective + decisive horde event shaped by player mods, production pipeline, benchmark suite, accessibility pass, stable save migration, reference desktop quality on named hw | T38, T34, T36, T37, T39 | milestone-2, V27 |
 
 **Suggested 2-agent assignment** (parallel-safe by lane):
@@ -289,4 +291,7 @@ Five decisions to lock before vertical-slice brief finalized (OPEN, §C): campai
 ## §B — Bugs
 
 | id | date | cause | fix |
+|---|---|---|---|
+| B1 | 2026-06-22 | `GameRuntime.update` ran every scheduler tick of a multi-tick frame with a constant `ctx.tick` (final index) → interval-cadence systems (perception/tier/sound) misfired under variable-dt rAF frames advancing >1 tick. GATE-0 tests only stepped 1 tick/update so never exposed it. | Per-tick index reconstruction in `update` (mirrors `FrameLoop`); invariant V32 + variable-dt multi-tick test. |
+| B2 | 2026-06-22 | Crowd `instanceMatrix` bound as a WebGPU uniform buffer (core `MeshStandardMaterial`+`InstancedMesh` auto-convert path); at desktop-high capacity 4000 → 256000 B > 65536 max uniform binding → `bindGroup_object` invalid → crowd draw silently dropped (canvas empty). GPU-free unit tests couldn't catch it; found via in-browser CDP smoke check. | Route crowd instance data through the `three/webgpu` node/storage-buffer path; invariant V33 + CDP check asserts zero WebGPU validation errors at max capacity. |
 |---|---|---|---|

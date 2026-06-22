@@ -1,0 +1,42 @@
+{
+  "method": "node-cpu-proxy",
+  "note": "Per-tick CPU sim cost (ms) recorded by src/tests/benchmark on a developer workstation. Hardware-agnostic proxy ONLY — NOT the in-browser GPU frame-time capture (deferred). Regenerate with BENCH_RECORD=1 npx vitest run src/tests/benchmark. The regression test asserts measured <= max(baseline * toleranceFactor, floorMs); see config.ts.",
+  "scenes": {
+    "crowd-avenue": {
+      "medianMs": 4.4654,
+      "p95Ms": 6.0175,
+      "p99Ms": 6.1483,
+      "entityCount": 2000
+    },
+    "breach-cascade": {
+      "medianMs": 2.9765,
+      "p95Ms": 3.954,
+      "p99Ms": 4.296,
+      "entityCount": 1500
+    },
+    "dense-interior": {
+      "medianMs": 1.524,
+      "p95Ms": 1.9661,
+      "p99Ms": 2.0476,
+      "entityCount": 800
+    },
+    "streaming-sprint": {
+      "medianMs": 1.605,
+      "p95Ms": 2.0117,
+      "p99Ms": 2.4088,
+      "entityCount": 1200
+    },
+    "corpse-accumulation": {
+      "medianMs": 2.9263,
+      "p95Ms": 3.6654,
+      "p99Ms": 4.1351,
+      "entityCount": 3000
+    },
+    "mobile-capability": {
+      "medianMs": 2.117,
+      "p95Ms": 3.0401,
+      "p99Ms": 3.1642,
+      "entityCount": 1200
+    }
+  }
+}

@@ -64,4 +64,10 @@ export const audioConfig = registerDomain('audio', {
     doc: 'Number of selected foreground voices layered over a group bed.',
     default: 3, min: 0, max: 64, integer: true,
   }),
+  // ---- stimulus field capacity (max concurrent active stimuli before weakest-evicts, T38) ----
+  stimulusFieldCapacity: num({
+    owner: 'audio', unit: 'count',
+    doc: 'Max simultaneously active stimuli in the shared StimulusField before the weakest is evicted.',
+    default: 256, min: 16, max: 8192, integer: true,
+  }),
 });

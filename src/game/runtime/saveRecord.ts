@@ -23,6 +23,14 @@ export interface PopulationEntry {
   readonly navGroup: number;
 }
 
+/** Player avatar transform persisted with the slice (T38). */
+export interface PlayerSave {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly heading: number;
+}
+
 export interface RuntimeSave {
   readonly schemaVersion: number;
   readonly worldVersion: string;
@@ -30,4 +38,8 @@ export interface RuntimeSave {
   /** IdFactory counters so the next mint after load is beyond every restored id (V26). */
   readonly idCounters: Record<NumericIdKind, number>;
   readonly population: readonly PopulationEntry[];
+  /** Player avatar transform (T38 slice). Optional for backward compatibility with GATE-0 saves. */
+  readonly player?: PlayerSave;
+  /** Active weather profile id (T38 slice). Optional for backward compatibility. */
+  readonly weather?: string;
 }

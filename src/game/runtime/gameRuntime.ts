@@ -16,7 +16,11 @@ import {
   type VisualEvent,
   type WorldEvent,
   type AnatomyRegion,
+  type Command,
+  type CommandResult,
 } from '@/game/core';
+import { StimulusField } from '@/game/stimulus';
+import { AudioSim } from '@/game/audio';
 import {
   SimulationZombies,
   TierManager,
@@ -44,6 +48,8 @@ import { perceptionConfig } from '@/config/domains/perception';
 import { collisionConfig } from '@/config/domains/collision';
 import { gameConfig } from '@/config/domains/game';
 import { timeConfig } from '@/config/domains/time';
+import { audioConfig } from '@/config/domains/audio';
+import { weatherConfig, weatherSeverity, type WeatherProfile } from '@/config/domains/weather';
 import type { QualityTier } from '@/config/types';
 import { CombatSystem, type ShotResult } from '@/game/combat';
 import {
@@ -117,6 +123,9 @@ export class GameRuntime {
   readonly tierManager: TierManager;
   readonly combat: CombatSystem;
   readonly playerEntity: EntityId;
+  /** Shared stimulus field + audio model — firing emits a sound the horde perceives (sound attraction). */
+  readonly stimulus: StimulusField;
+  readonly audio: AudioSim;
 
   private readonly adapter: PersistenceAdapter;
   private readonly partition: PartitionKey;
@@ -127,6 +136,8 @@ export class GameRuntime {
   private readonly playerCfg = resolveDomain(playerConfig, REFERENCE_TIER);
   private readonly perception = resolveDomain(perceptionConfig, REFERENCE_TIER);
   private readonly collision = resolveDomain(collisionConfig, REFERENCE_TIER);
+  private readonly audioCfg = resolveDomain(audioConfig, REFERENCE_TIER);
+  private readonly weatherCfg = resolveDomain(weatherConfig, REFERENCE_TIER);
 
   private readonly slotToEntity = new Map<ZombieSlot, EntityId>();
   private readonly entityToSlot = new Map<EntityId, ZombieSlot>();
@@ -143,6 +154,13 @@ export class GameRuntime {
 
   private playerPos: Vec3;
   private playerHealth: number;
+  private playerHeading = 0;
+  private weatherProfile: WeatherProfile;
+  /** Absolute-tick offset so time-of-day survives a save/reload (set from capturedAtTick on load). */
+  private tickOffset = 0;
+  /** Sound-attraction lure: while active the WHOLE horde reroutes to the loudest perceived sound (V15). */
+  private soundLureCell: number | null = null;
+  private soundLureUntilTick = -1;
 
   constructor(opts: GameRuntimeOptions) {
     this.tier = opts.tier ?? REFERENCE_TIER;
@@ -173,6 +191,12 @@ export class GameRuntime {
     const center = this.scene.cellCenter(this.scene.playerCell);
     this.playerPos = { x: center.x, y: this.playerCfg.aimOriginHeight, z: center.z };
     this.playerHealth = this.playerCfg.startHealth;
+    this.weatherProfile = this.weatherCfg.defaultProfile as WeatherProfile;
+
+    // Shared stimulus field + audio model. Firing routes a sound into the field; the horde perceives it
+    // and reroutes via the shared flow field (the central promise made measurable, V15/V14).
+    this.stimulus = new StimulusField(this.audioCfg.stimulusFieldCapacity);
+    this.audio = new AudioSim({ ids: this.ids, field: this.stimulus, tier: this.tier });
 
     this.combat = new CombatSystem({
       zombies: this.zombies,
@@ -223,6 +247,121 @@ export class GameRuntime {
     return this.playerPos;
   }
 
+  /** Player facing in radians (atan2(dirZ, dirX)); drives the default fire direction + render heading. */
+  playerAim(): number {
+    return this.playerHeading;
+  }
+
+  /** The shared flow-field target cell this tick (test/diagnostics accessor; see currentFlowTargetCell). */
+  get flowTargetCell(): number {
+    return this.currentFlowTargetCell();
+  }
+
+  /** Active weather profile (drives the renderer's fog/grading; default from weather config). */
+  get weather(): WeatherProfile {
+    return this.weatherProfile;
+  }
+
+  /** Atmospheric severity 0..1 for the active weather profile (fog extinction + grading input). */
+  get weatherSeverity(): number {
+    return weatherSeverity(this.weatherCfg, this.weatherProfile);
+  }
+
+  setWeather(profile: WeatherProfile): void {
+    this.weatherProfile = profile;
+  }
+
+  /**
+   * Day fraction 0..1 derived purely from the authoritative clock (0 = midnight, 0.5 = noon). The render
+   * lane maps this to the sun/moon angle; the sim never owns lighting. Survives reload via tickOffset.
+   */
+  timeOfDay(): number {
+    const absTick = this.clock.tick + this.tickOffset;
+    const seconds = absTick * this.clock.tickSeconds;
+    const t = (this.weatherCfg.startTimeOfDay + seconds / this.weatherCfg.dayLengthSeconds) % 1;
+    return t < 0 ? t + 1 : t;
+  }
+
+  /** Set the player's aim heading from a world-space direction (mouse aim). Zero vector is ignored. */
+  aim(dirX: number, dirZ: number): void {
+    if (dirX === 0 && dirZ === 0) return;
+    this.playerHeading = Math.atan2(dirZ, dirX);
+  }
+
+  /**
+   * Move the player by a normalized intent over `dtSeconds` at the configured walk speed. The engine
+   * validates against walkable nav cells (V1: UI issues intent, engine authorizes) and slides along walls
+   * rather than sticking. Returns true if the player actually moved.
+   */
+  movePlayer(dirX: number, dirZ: number, dtSeconds: number): boolean {
+    const len = Math.hypot(dirX, dirZ);
+    if (len === 0 || dtSeconds <= 0) return false;
+    const speed = this.playerCfg.moveSpeedMetersPerSecond;
+    const stepX = (dirX / len) * speed * dtSeconds;
+    const stepZ = (dirZ / len) * speed * dtSeconds;
+    const nx = this.playerPos.x + stepX;
+    const nz = this.playerPos.z + stepZ;
+    if (this.scene.isWalkableWorld(nx, nz)) {
+      this.playerPos = { x: nx, y: this.playerPos.y, z: nz };
+      return true;
+    }
+    // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
+    if (this.scene.isWalkableWorld(nx, this.playerPos.z)) {
+      this.playerPos = { x: nx, y: this.playerPos.y, z: this.playerPos.z };
+      return true;
+    }
+    if (this.scene.isWalkableWorld(this.playerPos.x, nz)) {
+      this.playerPos = { x: this.playerPos.x, y: this.playerPos.y, z: nz };
+      return true;
+    }
+    return false;
+  }
+
+  /** The mid structural cell of the destructible section — the UI's default breach/board target. */
+  defaultBreachCell(): number {
+    return this.scene.wall.packCell(0, 0, Math.floor(this.scene.wall.sizeZ / 2));
+  }
+
+  /**
+   * Validate + apply a contract Command (V1: UI issues intent, engine validates, may fail with a reason).
+   * Movement + firing flow through their own authoritative methods (no command kind exists for them in the
+   * frozen contract); this routes the structure + targeting intents the contract DOES model.
+   */
+  dispatch(cmd: Command): CommandResult {
+    switch (cmd.kind) {
+      case 'modifyStructure':
+        return this.applyStructureOp(cmd);
+      case 'selectTarget':
+        this.selectTarget(cmd.target);
+        return { ok: true, id: cmd.id };
+      default:
+        return { ok: false, id: cmd.id, reason: `runtime does not handle command '${cmd.kind}'` };
+    }
+  }
+
+  private applyStructureOp(
+    cmd: Extract<Command, { kind: 'modifyStructure' }>,
+  ): CommandResult {
+    if ((cmd.module as number) !== (this.scene.moduleId as number)) {
+      return { ok: false, id: cmd.id, reason: `unknown module ${cmd.module as number}` };
+    }
+    const cell = this.scene.wall.getCell(cmd.cell);
+    if (!cell) return { ok: false, id: cmd.id, reason: `no structural cell ${cmd.cell}` };
+    switch (cmd.op) {
+      case 'breach': {
+        this.scene.wall.applyDamage(cmd.cell, cell.maxStrength, this.structuralHooks);
+        return { ok: true, id: cmd.id };
+      }
+      case 'board':
+      case 'reinforce': {
+        this.scene.wall.reinforce(cmd.cell, this.scene.wall.structures.defaultCellStrength);
+        return { ok: true, id: cmd.id };
+      }
+      default:
+        return { ok: false, id: cmd.id, reason: `unsupported structure op '${cmd.op}'` };
+    }
+  }
+
   /** Slot -> stable EntityId (the seam lane-S left to the integrator). Throws if the slot is unmapped. */
   entityOf(slot: ZombieSlot): EntityId {
     const e = this.slotToEntity.get(slot);
@@ -246,17 +385,29 @@ export class GameRuntime {
   update(dtSeconds: number): number {
     const ticks = this.clock.advance(dtSeconds);
     this.elapsedMs += dtSeconds * 1000;
-    const ctx: SystemContext = { tick: this.clock.tick, tickSeconds: this.clock.tickSeconds };
+    // Run each fixed tick with its OWN absolute index (mirrors FrameLoop) so interval-cadence systems
+    // (perception/tier/sound) fire on the right ticks even when a single variable-dt frame advances many
+    // ticks. Passing a constant final tick here silently breaks interval cadence (V12).
     for (let i = 0; i < ticks; i++) {
+      const tick = this.clock.tick - (ticks - 1 - i);
+      const ctx: SystemContext = { tick, tickSeconds: this.clock.tickSeconds };
       this.scheduler.runTick(ctx);
     }
     this.publishSnapshots();
     return ticks;
   }
 
-  /** Fire one firearm shot immediately (deterministic). Combat is resolved authoritatively now. */
+  /** Fire one firearm shot immediately (deterministic). Combat is resolved authoritatively now, and the
+   *  gunshot emits a sound stimulus at the muzzle so the horde is drawn to the noise (sound attraction). */
   fire(dirX: number, dirZ: number, region: AnatomyRegion): ShotResult {
-    return this.combat.fire(this.playerPos, dirX, dirZ, region);
+    const result = this.combat.fire(this.playerPos, dirX, dirZ, region);
+    this.emitGunfire();
+    return result;
+  }
+
+  /** Emit a gunshot sound stimulus at the player's current muzzle position into the shared field. */
+  private emitGunfire(): void {
+    this.audio.hearEvent('gunfire', this.playerPos.x, this.playerPos.z, this.clock.tick);
   }
 
   /** Aim at a specific live entity and fire at the given region (convenience for tests/AI). */
@@ -365,9 +516,11 @@ export class GameRuntime {
     const record: RuntimeSave = {
       schemaVersion: RUNTIME_SAVE_SCHEMA_VERSION,
       worldVersion: this.scene.worldVersion,
-      capturedAtTick: this.clock.tick,
+      capturedAtTick: this.clock.tick + this.tickOffset,
       idCounters: this.ids.snapshot(),
       population,
+      player: { x: this.playerPos.x, y: this.playerPos.y, z: this.playerPos.z, heading: this.playerHeading },
+      weather: this.weatherProfile,
     };
     await this.adapter.put(this.partition, RUNTIME_SAVE_KEY, record);
   }
@@ -409,6 +562,13 @@ export class GameRuntime {
       for (const e of record.population) {
         this.placeZombie(e.entity as EntityId, e);
       }
+      // Restore the player avatar + weather + day-time offset so the reloaded slice resumes in place.
+      if (record.player) {
+        this.playerPos = { x: record.player.x, y: record.player.y, z: record.player.z };
+        this.playerHeading = record.player.heading;
+      }
+      if (record.weather) this.weatherProfile = record.weather as WeatherProfile;
+      this.tickOffset = record.capturedAtTick;
     }
   }
 
@@ -423,10 +583,13 @@ export class GameRuntime {
     this.scheduler.register('perception', { bucket: 'interval', everyTicks: 4 }, () => this.stepPerception(), 0);
     // interval: tier assignment (V13), phase-offset so it does not share a tick with perception.
     this.scheduler.register('tier', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.stepTiers(ctx), 1);
+    // interval: sound attraction — retire decayed stimuli + reroute the shared field toward the loudest
+    // sound reaching the horde (V14/V15). Phase 2 so it never shares a tick with perception/tier.
+    this.scheduler.register('sound', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.stepSound(ctx), 2);
   }
 
   private stepMovement(): void {
-    const targetCell = this.scene.navIndex(this.scene.playerCell);
+    const targetCell = this.currentFlowTargetCell();
     const field = this.flowCache.get(this.scene.navGrid, targetCell, MOVEMENT_PROFILE);
     const dt = this.clock.tickSeconds;
     const speed = this.combatCfg.hordeMoveSpeed;
@@ -464,8 +627,47 @@ export class GameRuntime {
     let shot = this.pendingShots.shift();
     while (shot) {
       this.combat.fire(shot.origin, shot.dirX, shot.dirZ, shot.region);
+      this.audio.hearEvent('gunfire', shot.origin.x, shot.origin.z, this.clock.tick);
       shot = this.pendingShots.shift();
     }
+  }
+
+  /**
+   * Sound attraction (V14/V15): retire decayed stimuli, then read the loudest SOUND reaching the horde's
+   * cluster from the shared field — NOT the player coordinate directly. If one is heard, lure the whole
+   * horde to its source for the configured investigate window; the lure expires back to tracking the
+   * player. Because every agent shares ONE flow field, retargeting reroutes the entire horde at once.
+   */
+  private stepSound(ctx: SystemContext): void {
+    this.stimulus.update(ctx.tick);
+    const here = this.scene.cellCenter(this.scene.spawnCenterCell);
+    const hits = this.stimulus.query(here.x, here.z, ctx.tick);
+    let bestX = 0;
+    let bestZ = 0;
+    let bestIntensity = 0;
+    for (const h of hits) {
+      if (h.stimulus.kind !== 'sound') continue;
+      if (h.intensity > bestIntensity) {
+        bestIntensity = h.intensity;
+        bestX = h.stimulus.x;
+        bestZ = h.stimulus.z;
+      }
+    }
+    if (bestIntensity > 0 && this.scene.isWalkableWorld(bestX, bestZ)) {
+      const c = this.scene.navGrid.worldToCell(bestX, bestZ);
+      this.soundLureCell = this.scene.navGrid.index(c.cx, c.cy);
+      this.soundLureUntilTick = ctx.tick + this.perception.investigateTicks;
+    }
+  }
+
+  /** The shared flow-field target this tick: the active sound lure if any, else the live player cell. */
+  private currentFlowTargetCell(): number {
+    if (this.soundLureCell !== null && this.clock.tick <= this.soundLureUntilTick) {
+      return this.soundLureCell;
+    }
+    this.soundLureCell = null;
+    const c = this.scene.navGrid.worldToCell(this.playerPos.x, this.playerPos.z);
+    return this.scene.navGrid.index(c.cx, c.cy);
   }
 
   private stepPerception(): void {

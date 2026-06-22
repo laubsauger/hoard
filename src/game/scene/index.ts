@@ -7,5 +7,7 @@ export {
   REGION_ROOM_B,
   type TestBlock,
   type CellXY,
+  type CellRect,
   type Vec3,
 } from './testBlock';
+export { buildCityBlock, CITY_BLOCK_WORLD_VERSION, REGION_STREET } from './cityBlock';

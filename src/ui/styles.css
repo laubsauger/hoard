@@ -136,3 +136,63 @@ body,
   font-weight: 600;
   cursor: pointer;
 }
+
+/* T38 — engine command bar (pointer-events ON; the only interactive overlay). */
+.hbn-controls {
+  position: absolute;
+  top: calc(16px * var(--hbn-ui-scale));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--hbn-panel);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+  font-size: calc(12px * var(--hbn-ui-scale));
+}
+
+.hbn-controls__group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.hbn-controls button,
+.hbn-controls select {
+  padding: 6px 10px;
+  background: rgba(143, 174, 92, 0.16);
+  border: 1px solid rgba(143, 174, 92, 0.4);
+  border-radius: 6px;
+  color: var(--hbn-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hbn-controls button:hover {
+  background: rgba(143, 174, 92, 0.3);
+}
+
+.hbn-controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hbn-controls label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.85;
+}
+
+.hbn-controls__hint {
+  margin: 0;
+  width: 100%;
+  text-align: center;
+  opacity: 0.6;
+}

@@ -10,4 +10,5 @@ export {
   RUNTIME_SAVE_SCHEMA_VERSION,
   type RuntimeSave,
   type PopulationEntry,
+  type PlayerSave,
 } from './saveRecord';

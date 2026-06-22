@@ -2,4 +2,5 @@
 
 export { Hud } from './Hud';
 export { LoadingScreen } from './LoadingScreen';
-export { GameViewport } from './GameViewport';
+export { GameViewport, type EngineHandle } from './GameViewport';
+export { Controls } from './Controls';

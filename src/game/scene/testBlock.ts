@@ -38,6 +38,15 @@ export interface CellXY {
   readonly cy: number;
 }
 
+/** Inclusive cell rectangle of the building shell (walls + interior). Cells inside get a roof + cutaway;
+ *  cells outside are open-air street. Used purely by the renderer (T38), never by the sim. */
+export interface CellRect {
+  readonly minCx: number;
+  readonly maxCx: number;
+  readonly minCy: number;
+  readonly maxCy: number;
+}
+
 export interface Vec3 {
   readonly x: number;
   readonly y: number;
@@ -55,6 +64,10 @@ export interface TestBlock {
   /** Player aim/eye position is filled per-runtime using player config aim height. */
   readonly playerCell: CellXY;
   readonly spawnCenterCell: CellXY;
+  /** Building shell rectangle (walls + interior) for the renderer's roof + cutaway (T38). */
+  readonly buildingBounds: CellRect;
+  /** Walkable cells the player can leave the building through (escape route, T38). May be empty. */
+  readonly exitCells: readonly CellXY[];
   /** World-space centre of a nav cell (y = 0 floor). */
   cellCenter(cell: CellXY): Vec3;
   /** Map a module-local structural cell to the nav cell it occupies (integrator-owned seam). */
@@ -104,6 +117,9 @@ export function buildTestBlock(): TestBlock {
     fractureFamily: FRACTURE_FAMILY,
     playerCell: PLAYER_CELL,
     spawnCenterCell: SPAWN_CENTER_CELL,
+    // The bare GATE-0 block is wall-to-wall building: the whole grid is the shell, no street, no exit.
+    buildingBounds: { minCx: 0, maxCx: GRID_WIDTH_CELLS - 1, minCy: 0, maxCy: GRID_HEIGHT_CELLS - 1 },
+    exitCells: [],
     cellCenter: (cell) => ({
       x: (cell.cx + 0.5) * navCellSize,
       y: 0,
