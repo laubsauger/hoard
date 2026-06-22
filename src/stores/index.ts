@@ -40,8 +40,10 @@ export {
   mapViewStore,
   createMapViewStore,
   createHordeSnapshotGate,
+  createMissionSnapshotGate,
   type MapViewState,
   type MapMarker,
+  type MissionStatus,
   type MapViewStore,
 } from './mapView';
 export {

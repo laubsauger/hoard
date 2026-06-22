@@ -24,13 +24,26 @@ import { combatConfig } from '../config/domains/combat';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
+import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
-import { buildCityBlock } from '../game/scene';
+import { buildCityDistrict } from '../game/scene';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
-import type { CommandId, ModuleId } from '../game/core/contracts';
+import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
 import type { WeatherProfile } from '../config/domains/weather';
 import { sessionStore } from '../stores/session';
-import { settingsStore } from '../stores/settings';
+import { settingsStore, type SettingsState } from '../stores/settings';
+
+/** Map the persisted accessibility settings onto the renderer's injected params (V29). */
+function accessibilityFromSettings(s: SettingsState): RenderAccessibility {
+  return resolveRenderAccessibility({
+    goreIntensity: s.goreIntensity,
+    outlineStrength: s.outlineStrength,
+    targetHighlightStrength: s.targetHighlightStrength,
+    cameraShakeScale: s.cameraShakeScale,
+    reduceFlashes: s.reduceFlashes,
+    motionReduction: s.motionReduction,
+  });
+}
 
 const DEG2RAD = Math.PI / 180;
 
@@ -40,9 +53,14 @@ export interface EngineHandle {
   load(): Promise<void>;
   breach(): void;
   board(): void;
+  ignite(): void;
   rotate(dir: 1 | -1): void;
   zoom(delta: number): void;
   setWeather(profile: WeatherProfile): void;
+  // M2 medium-term objective intents (V1 — issued as confirmAction commands).
+  collectPart(): void;
+  repairRadio(): void;
+  advanceObjective(): void;
 }
 
 export interface GameViewportProps {
@@ -107,7 +125,9 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       const adp = makeAdapter();
       adapter = adp;
 
-      runtime = new GameRuntime({ tier, adapter: adp, scene: buildCityBlock() });
+      // M2: a representative district (multiple streaming sectors with abstract populations, V13).
+      const district = buildCityDistrict(tier);
+      runtime = new GameRuntime({ tier, adapter: adp, scene: district.block, sectors: district.sectors });
       runtime.spawnHorde(combat.gateZeroZombieCount, combat.gateZeroSpawnRadiusMeters);
 
       host = new RendererHost({
@@ -127,7 +147,15 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         return;
       }
 
-      scene = new BlockScene({ runtime, tier, registry: host.resources });
+      scene = new BlockScene({
+        runtime,
+        tier,
+        registry: host.resources,
+        accessibility: accessibilityFromSettings(settingsStore.getState()),
+      });
+      // Live-apply accessibility changes from the settings panel into the running scene (V29 end-to-end).
+      const unsubAccessibility = settingsStore.subscribe((s) => scene?.setAccessibility(accessibilityFromSettings(s)));
+      cleanups.push(unsubAccessibility);
 
       const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
 
@@ -189,7 +217,8 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       onReady?.({
         save: () => runtime.save(),
         load: async () => {
-          const fresh = new GameRuntime({ tier, adapter: adp, scene: buildCityBlock() });
+          const reloaded = buildCityDistrict(tier);
+          const fresh = new GameRuntime({ tier, adapter: adp, scene: reloaded.block, sectors: reloaded.sectors });
           await fresh.loadFrom();
           runtime = fresh;
           scene?.rebindRuntime(fresh);
@@ -200,9 +229,19 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         board: () => {
           runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'board' });
         },
+        ignite: () => runtime.igniteRoute(runtime.defaultBreachCell()),
         rotate: (dir) => camera.rotate(dir),
         zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
         setWeather: (profile) => runtime.setWeather(profile),
+        collectPart: () => {
+          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.collectPart' });
+        },
+        repairRadio: () => {
+          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.repair' });
+        },
+        advanceObjective: () => {
+          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.advance' });
+        },
       });
 
       // ---- frame loop: real dt -> runtime.update (fixed ticks) -> sync scene -> render (V12) ----

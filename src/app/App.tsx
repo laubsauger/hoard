@@ -8,6 +8,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { GameViewport, type EngineHandle } from '../ui/GameViewport';
 import { Hud } from '../ui/Hud';
 import { Controls } from '../ui/Controls';
+import { AccessibilityPanel } from '../ui/AccessibilityPanel';
 import { LoadingScreen } from '../ui/LoadingScreen';
 import '../ui/styles.css';
 
@@ -25,6 +26,7 @@ export function App() {
           <GameViewport onReady={onReady} onError={onError} />
           <Hud />
           <Controls handle={handle} />
+          <AccessibilityPanel />
           {error && (
             <div className="hbn-error" role="alert">
               <h1>Engine unavailable</h1>

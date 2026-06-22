@@ -60,4 +60,69 @@ export const worldConfig = registerDomain('world', {
     min: 0.05,
     max: 2,
   }),
+
+  // ---- M2 district scale (T40). A representative district is a grid of streaming sectors; offscreen
+  // sectors hold an ABSTRACT population (V13) that promotes to live sim when the player nears them. ----
+
+  /** Sectors per district along X. The district grid is districtSectorsX × districtSectorsZ sectors. */
+  districtSectorsX: num({
+    owner: 'world',
+    unit: 'count',
+    doc: 'Number of streaming sectors along X in the representative M2 district.',
+    default: 3,
+    min: 1,
+    max: 16,
+    integer: true,
+  }),
+  /** Sectors per district along Z. */
+  districtSectorsZ: num({
+    owner: 'world',
+    unit: 'count',
+    doc: 'Number of streaming sectors along Z in the representative M2 district.',
+    default: 2,
+    min: 1,
+    max: 16,
+    integer: true,
+  }),
+  /** Abstract horde population seeded per offscreen sector (V13 — abstract tier promotes near player). */
+  abstractPopulationPerSector: num({
+    owner: 'world',
+    unit: 'count',
+    doc: 'Abstract horde population seeded per sector before it is streamed in (V13).',
+    default: 40,
+    min: 0,
+    max: 100_000,
+    integer: true,
+    tiers: { 'mobile-webgpu': 16 },
+  }),
+  /** Distance from a sector centre at/under which the sector activates + promotes abstract pop (V13). */
+  sectorActivateRadiusMeters: num({
+    owner: 'world',
+    unit: 'meters',
+    doc: 'Player distance to a sector centre at/under which the sector streams in + promotes abstract pop.',
+    default: 60,
+    min: 1,
+    max: 1024,
+  }),
+  /** Distance from a sector centre beyond which an active sector cools down toward eviction. Must be
+   *  larger than the activate radius so streaming does not thrash at the boundary. */
+  sectorEvictRadiusMeters: num({
+    owner: 'world',
+    unit: 'meters',
+    doc: 'Player distance beyond which an active sector cools toward persist+evict (hysteresis vs activate).',
+    default: 110,
+    min: 1,
+    max: 2048,
+  }),
+  /** Hard cap on how many abstract members a single sector promotes to live sim at once (perf budget). */
+  promotedPerSectorCap: num({
+    owner: 'world',
+    unit: 'count',
+    doc: 'Max abstract members a sector promotes to live simulation per activation (perf budget, V13/V22).',
+    default: 24,
+    min: 0,
+    max: 5000,
+    integer: true,
+    tiers: { 'mobile-webgpu': 8 },
+  }),
 });

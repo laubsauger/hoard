@@ -23,6 +23,17 @@ export function Hud() {
   // Coarse horde pressure counts — NOT entities (V1).
   const visibleZombies = useMapView((s) => s.horde?.visibleCount ?? null);
   const nearestThreat = useMapView((s) => s.horde?.nearestThreatMeters ?? null);
+  // M2 mission status (objective + decisive event + district streaming) — coarse, throttled (V11).
+  const directive = useMapView((s) => s.mission?.directive ?? null);
+  const partsFound = useMapView((s) => s.mission?.partsFound ?? null);
+  const partsRequired = useMapView((s) => s.mission?.partsRequired ?? null);
+  const evacRemaining = useMapView((s) => s.mission?.evacuationTicksRemaining ?? null);
+  const eventPhase = useMapView((s) => s.mission?.eventPhase ?? null);
+  const eventOutcome = useMapView((s) => s.mission?.eventOutcome ?? null);
+  const openRoutes = useMapView((s) => s.mission?.openRoutes ?? null);
+  const reinforcedRoutes = useMapView((s) => s.mission?.reinforcedRoutes ?? null);
+  const liveDistrictPop = useMapView((s) => s.mission?.liveDistrictPop ?? null);
+  const abstractDistrictPop = useMapView((s) => s.mission?.abstractDistrictPop ?? null);
 
   if (!hudVisible) return null;
 
@@ -37,7 +48,23 @@ export function Hud() {
       <div className="hbn-hud__threat">
         <Vital label="Visible Z" value={visibleZombies} />
         <Vital label="Nearest m" value={nearestThreat} />
+        <Vital label="District live" value={liveDistrictPop} />
+        <Vital label="District abstract" value={abstractDistrictPop} />
       </div>
+      {directive && (
+        <div className="hbn-hud__objective" aria-label="objective">
+          <span className="hbn-hud__directive">{directive}</span>
+          {partsRequired !== null && partsFound !== null && (
+            <span className="hbn-hud__parts">Parts {partsFound}/{partsRequired}</span>
+          )}
+          {evacRemaining !== null && <span className="hbn-hud__evac">Evac in {Math.ceil(evacRemaining)}</span>}
+          {eventPhase && eventPhase !== 'idle' && (
+            <span className="hbn-hud__event">
+              Horde event: {eventOutcome ?? eventPhase} · routes open {openRoutes} / reinforced {reinforcedRoutes}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

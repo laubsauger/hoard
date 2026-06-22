@@ -36,7 +36,18 @@ import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
 import { resolveSurfaceVisibility, resolveVisibilitySettings, type OcclusionContext } from '../world/visibility';
 import { fogTransmittance } from '../lighting/lighting';
 import { computeSkyState } from './sky';
+import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
+
+/** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
+const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
+  goreIntensity: 1,
+  outlineStrength: 1,
+  targetHighlightStrength: 1,
+  cameraShakeScale: 1,
+  reduceFlashes: false,
+  motionReduction: false,
+});
 
 /** A roof / upper-wall surface that fades for the cutaway (V20). */
 interface FadeSurface {
@@ -48,6 +59,7 @@ interface FadeSurface {
 }
 
 const FOG_VISIBILITY_TRANSMITTANCE = 0.12; // distance at which the scene fades to fog colour
+const PLAYER_BASE_EMISSIVE = 0.4; // authored player-rim glow at full outline strength (scaled by V29 setting)
 
 export class BlockScene {
   readonly scene = new Scene();
@@ -56,6 +68,10 @@ export class BlockScene {
   private runtime: GameRuntime;
   private readonly tier: QualityTier;
   private readonly registry: ResourceRegistry;
+  /** Live accessibility params (V29) — drives player-rim outline strength + motion-reduced cutaway fades. */
+  private accessibility: RenderAccessibility = DEFAULT_ACCESSIBILITY;
+  private playerRimMat: MeshStandardMaterial | null = null;
+  private readonly basePlayerEmissive: number;
 
   private readonly world = resolveDomain(worldConfig, this.tierOf());
   private readonly player = resolveDomain(playerConfig, this.tierOf());
@@ -82,10 +98,12 @@ export class BlockScene {
     return this.tier;
   }
 
-  constructor(opts: { runtime: GameRuntime; tier: QualityTier; registry: ResourceRegistry }) {
+  constructor(opts: { runtime: GameRuntime; tier: QualityTier; registry: ResourceRegistry; accessibility?: RenderAccessibility }) {
     this.runtime = opts.runtime;
     this.tier = opts.tier;
     this.registry = opts.registry;
+    this.accessibility = opts.accessibility ?? DEFAULT_ACCESSIBILITY;
+    this.basePlayerEmissive = PLAYER_BASE_EMISSIVE;
     this.navCellSize = this.runtime.scene.navGrid.settings.navCellSize;
 
     this.scene.background = new Color(0x0b0d0a);
@@ -237,9 +255,17 @@ export class BlockScene {
 
   private buildPlayer(): Object3D {
     const group = new Group();
+    const bodyMat = this.mat('player', {
+      color: 0x9cc4ff,
+      roughness: 0.5,
+      emissive: 0x16324f,
+      // V29: the player's strongest-silhouette rim scales with the outline-strength accessibility setting.
+      emissiveIntensity: PLAYER_BASE_EMISSIVE * this.accessibility.outlineStrength,
+    });
+    this.playerRimMat = bodyMat;
     const body = new Mesh(
       this.geo('player.geo', new CapsuleGeometry(this.player.bodyRadiusMeters, this.player.bodyHeightMeters - 2 * this.player.bodyRadiusMeters, 6, 12)),
-      this.mat('player', { color: 0x9cc4ff, roughness: 0.5, emissive: 0x16324f, emissiveIntensity: 0.4 }),
+      bodyMat,
     );
     body.castShadow = true;
     body.position.y = this.player.bodyHeightMeters / 2;
@@ -255,6 +281,21 @@ export class BlockScene {
   }
 
   // ---- per-frame sync ----
+
+  /**
+   * Apply updated accessibility params live (V29) — scales the player-rim outline strength now; the
+   * motion-reduction flag is read each frame by the cutaway. Other params (gore intensity, shake) are
+   * consumed by their own systems via the shared RenderAccessibility object.
+   */
+  setAccessibility(a: RenderAccessibility): void {
+    this.accessibility = a;
+    if (this.playerRimMat) this.playerRimMat.emissiveIntensity = this.basePlayerEmissive * a.outlineStrength;
+  }
+
+  /** The live accessibility params (test/diagnostics — proves settings propagate into the scene). */
+  get accessibilityParams(): RenderAccessibility {
+    return this.accessibility;
+  }
 
   /** Re-point at a freshly loaded runtime (save/load rebuild) and resync breach + crowd. */
   rebindRuntime(runtime: GameRuntime): void {
@@ -313,7 +354,12 @@ export class BlockScene {
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {
     const playerInside = this.isPlayerInsideBuilding();
-    const fadeRate = this.roofFadeSeconds > 0 ? dtSeconds / this.roofFadeSeconds : 1;
+    // V29 motion reduction: cut roofs/upper walls instantly rather than animating the fade (less motion).
+    const fadeRate = this.accessibility.feedback.reduceMotion
+      ? 1
+      : this.roofFadeSeconds > 0
+        ? dtSeconds / this.roofFadeSeconds
+        : 1;
     for (const s of this.fadeSurfaces) {
       const ctx: OcclusionContext = {
         playerInside,

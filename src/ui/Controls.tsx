@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import type { EngineHandle } from './GameViewport';
 import { WEATHER_PROFILES, type WeatherProfile } from '../config/domains/weather';
+import { uiStore } from '../stores/ui';
 
 export function Controls({ handle }: { handle: EngineHandle | null }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -25,6 +26,12 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
       <div className="hbn-controls__group">
         <button onClick={run('breach', () => handle.breach())}>Breach wall</button>
         <button onClick={run('board', () => handle.board())}>Board wall</button>
+        <button onClick={run('ignite', () => handle.ignite())}>Ignite route</button>
+      </div>
+      <div className="hbn-controls__group" aria-label="objective">
+        <button onClick={run('part', () => handle.collectPart())}>Find part</button>
+        <button onClick={run('repair', () => handle.repairRadio())}>Repair radio</button>
+        <button onClick={run('advance', () => handle.advanceObjective())}>Advance objective</button>
       </div>
       <div className="hbn-controls__group">
         <button onClick={run('save', () => handle.save())} disabled={busy !== null}>
@@ -58,6 +65,9 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
             ))}
           </select>
         </label>
+      </div>
+      <div className="hbn-controls__group">
+        <button onClick={() => uiStore.getState().openPanel('settings')}>Accessibility</button>
       </div>
       <p className="hbn-controls__hint">WASD move · mouse aim · click fire · Q/E rotate · wheel zoom</p>
     </div>

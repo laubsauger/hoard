@@ -25,21 +25,26 @@ import {
   SimulationZombies,
   TierManager,
   SimTier,
-  type TierInputs,
   type ZombieSlot,
 } from '@/game/simulation';
-import { FlowFieldCache, steer } from '@/game/navigation';
+import { FlowFieldCache } from '@/game/navigation';
 import { CollisionLayer, layerMask, SpatialHash } from '@/game/navigation/collision';
+import { HordeSimulation, planarDistanceToPlayer } from './hordeSystems';
 import { type StructuralHooks } from '@/game/destruction';
+import { ObjectiveSystem, resolveObjectiveSettings } from '@/game/objective';
 import {
-  captureSaveDelta,
-  readSaveDelta,
-  writeSaveDelta,
-  SaveCompatError,
-  type ModuleDelta,
+  DistrictModel,
+  HordeEvent,
+  resolveHordeEventSettings,
+  routeStatesFromModule,
+  type SectorDescriptor,
+  type HordeEventResult,
+} from '@/game/world';
+import {
   type PartitionKey,
   type PersistenceAdapter,
 } from '@/game/persistence';
+import { RuntimePersistence } from './runtimePersistence';
 import { resolveDomain } from '@/config/registry';
 import { weaponsConfig } from '@/config/domains/weapons';
 import { combatConfig } from '@/config/domains/combat';
@@ -60,14 +65,12 @@ import {
   type Vec3,
 } from '@/game/scene';
 import {
-  RUNTIME_SAVE_KEY,
-  RUNTIME_SAVE_SCHEMA_VERSION,
   type PopulationEntry,
-  type RuntimeSave,
 } from './saveRecord';
 import {
   createPlayerSnapshotGate,
   createHordeSnapshotGate,
+  createMissionSnapshotGate,
   playerViewStore,
   mapViewStore,
   type PlayerViewStore,
@@ -77,10 +80,11 @@ import type { Now } from '@/stores';
 
 const REFERENCE_TIER: QualityTier = 'desktop-high';
 const HORDE_NAV_GROUP = 0;
-const MOVEMENT_PROFILE = 'zombie-walk';
-const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
 const ZOMBIE_AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Sight);
 const MAX_SPAWN_RESAMPLES = 32;
+/** Scheduler cadence (ticks) for the district streaming + objective maintenance step. Structural, like
+ *  the interval buckets the horde systems use (every 4 ticks) — not tunable content, so inlined. */
+const DISTRICT_STEP_TICKS = 15;
 
 /** Deterministic PRNG so the initial scatter replays identically (V26). */
 function mulberry32(seed: number): () => number {
@@ -104,6 +108,9 @@ export interface GameRuntimeOptions {
   readonly mapStore?: MapViewStore;
   /** Deterministic scatter seed for the initial horde spawn (V26). */
   readonly scatterSeed?: number;
+  /** M2 district streaming sectors (T40). When present, the runtime streams abstract sector populations
+   *  in/out as the player traverses (V13). Absent = single-block M1 behaviour (no streaming). */
+  readonly sectors?: readonly SectorDescriptor[];
 }
 
 export interface DrainedEvents {
@@ -126,6 +133,16 @@ export class GameRuntime {
   /** Shared stimulus field + audio model — firing emits a sound the horde perceives (sound attraction). */
   readonly stimulus: StimulusField;
   readonly audio: AudioSim;
+  /** The per-tick horde systems (steering/sound/perception/tiers) — runtime delegates, owns no step logic. */
+  private readonly horde: HordeSimulation;
+  /** Save/load orchestration (V9/V23/V26) — runtime delegates save()/loadFrom() here, owns no I/O flow. */
+  private readonly persistence: RuntimePersistence;
+  /** M2 medium-term objective state machine (find parts -> repair radio -> evacuate). */
+  readonly objective: ObjectiveSystem;
+  /** M2 decisive horde event shaped by the player's structural mods (§G central promise). */
+  readonly hordeEvent: HordeEvent;
+  /** M2 district streaming model — null in single-block (M1) mode. */
+  readonly district: DistrictModel | null;
 
   private readonly adapter: PersistenceAdapter;
   private readonly partition: PartitionKey;
@@ -142,6 +159,12 @@ export class GameRuntime {
   private readonly slotToEntity = new Map<ZombieSlot, EntityId>();
   private readonly entityToSlot = new Map<EntityId, ZombieSlot>();
   private readonly lastDamageTick = new Map<ZombieSlot, number>();
+  /** Slots spawned by district streaming, tagged by sector so eviction despawns exactly those (V13). */
+  private readonly slotToSector = new Map<ZombieSlot, number>();
+  /** Structural cells currently on fire (a horde-event lever — fire reroutes/stalls the mass). */
+  private readonly burningRoutes = new Set<number>();
+  /** Reference horde mass for the event's pressure normalization (the district's starting total). */
+  private readonly referenceHordeSize: number;
   private readonly pendingShots: { origin: Vec3; dirX: number; dirZ: number; region: AnatomyRegion }[] = [];
   private targetSlot: ZombieSlot = -1;
 
@@ -151,6 +174,7 @@ export class GameRuntime {
   private elapsedMs = 0;
   private readonly playerGate: ReturnType<typeof createPlayerSnapshotGate>;
   private readonly hordeGate: ReturnType<typeof createHordeSnapshotGate>;
+  private readonly missionGate: ReturnType<typeof createMissionSnapshotGate>;
 
   private playerPos: Vec3;
   private playerHealth: number;
@@ -158,9 +182,6 @@ export class GameRuntime {
   private weatherProfile: WeatherProfile;
   /** Absolute-tick offset so time-of-day survives a save/reload (set from capturedAtTick on load). */
   private tickOffset = 0;
-  /** Sound-attraction lure: while active the WHOLE horde reroutes to the loudest perceived sound (V15). */
-  private soundLureCell: number | null = null;
-  private soundLureUntilTick = -1;
 
   constructor(opts: GameRuntimeOptions) {
     this.tier = opts.tier ?? REFERENCE_TIER;
@@ -198,6 +219,22 @@ export class GameRuntime {
     this.stimulus = new StimulusField(this.audioCfg.stimulusFieldCapacity);
     this.audio = new AudioSim({ ids: this.ids, field: this.stimulus, tier: this.tier });
 
+    this.horde = new HordeSimulation({
+      zombies: this.zombies,
+      spatial: this.spatial,
+      scene: this.scene,
+      flowCache: this.flowCache,
+      tierManager: this.tierManager,
+      stimulus: this.stimulus,
+      clock: this.clock,
+      combatCfg: this.combatCfg,
+      perception: this.perception,
+      playerEntityId: this.playerEntity as number,
+      getPlayerPos: () => this.playerPos,
+      getTargetSlot: () => this.targetSlot,
+      lastDamageTick: this.lastDamageTick,
+    });
+
     this.combat = new CombatSystem({
       zombies: this.zombies,
       spatial: this.spatial,
@@ -222,11 +259,48 @@ export class GameRuntime {
       openCell: (_module, cell) => this.openBreachedNav(cell),
     };
 
+    // M2 systems: medium-term objective, decisive horde event, district streaming (all config-driven, V4).
+    this.objective = new ObjectiveSystem(resolveObjectiveSettings(this.tier));
+    this.hordeEvent = new HordeEvent(resolveHordeEventSettings(this.tier));
+    this.district = opts.sectors && opts.sectors.length > 0 ? new DistrictModel(opts.sectors, this.tier) : null;
+    // Reference mass for event pressure = the district's whole starting population, or a single-block
+    // fallback to the gate-0 spawn count so M1 mode still normalizes sanely.
+    this.referenceHordeSize = this.district
+      ? this.district.abstractTotal() + this.combatCfg.gateZeroZombieCount
+      : Math.max(1, this.combatCfg.gateZeroZombieCount);
+
+    const mapStore = opts.mapStore ?? mapViewStore;
     const playerNow: Now = () => this.elapsedMs;
     this.playerGate = createPlayerSnapshotGate(opts.playerStore ?? playerViewStore, this.tier, playerNow);
-    this.hordeGate = createHordeSnapshotGate(opts.mapStore ?? mapViewStore, this.tier, playerNow);
+    this.hordeGate = createHordeSnapshotGate(mapStore, this.tier, playerNow);
+    this.missionGate = createMissionSnapshotGate(mapStore, this.tier, playerNow);
+
+    this.persistence = new RuntimePersistence({
+      adapter: this.adapter,
+      partition: this.partition,
+      scene: this.scene,
+      zombies: this.zombies,
+      ids: this.ids,
+      objective: this.objective,
+      district: this.district,
+      entityOf: (slot) => this.entityOf(slot),
+      placeZombie: (entity, e) => this.placeZombie(entity, e),
+      openBreachedNav: (cell) => this.openBreachedNav(cell),
+      getClockTick: () => this.clock.tick,
+      getTickOffset: () => this.tickOffset,
+      setTickOffset: (tick) => { this.tickOffset = tick; },
+      getPlayer: () => ({ pos: this.playerPos, heading: this.playerHeading }),
+      setPlayer: (pos, heading) => { this.playerPos = pos; this.playerHeading = heading; },
+      getWeather: () => this.weatherProfile,
+      setWeather: (profile) => { this.weatherProfile = profile as WeatherProfile; },
+    });
 
     this.registerSystems();
+  }
+
+  /** Absolute tick (survives reload via tickOffset) — the basis for objective + event timing. */
+  private absTick(): number {
+    return this.clock.tick + this.tickOffset;
   }
 
   // ---- public surface ----
@@ -252,9 +326,9 @@ export class GameRuntime {
     return this.playerHeading;
   }
 
-  /** The shared flow-field target cell this tick (test/diagnostics accessor; see currentFlowTargetCell). */
+  /** The shared flow-field target cell this tick (test/diagnostics accessor). */
   get flowTargetCell(): number {
-    return this.currentFlowTargetCell();
+    return this.horde.flowTargetCell();
   }
 
   /** Active weather profile (drives the renderer's fog/grading; default from weather config). */
@@ -334,9 +408,78 @@ export class GameRuntime {
       case 'selectTarget':
         this.selectTarget(cmd.target);
         return { ok: true, id: cmd.id };
+      case 'confirmAction':
+        return this.applyConfirmAction(cmd);
       default:
         return { ok: false, id: cmd.id, reason: `runtime does not handle command '${cmd.kind}'` };
     }
+  }
+
+  /**
+   * Route medium-term OBJECTIVE intents (V1) modelled by the frozen `confirmAction` command. Each action
+   * advances the objective FSM and may fail with an explicit reason (e.g. advancing before the phase's
+   * precondition is met). Arming the evacuation is what triggers the decisive horde event (the climax).
+   */
+  private applyConfirmAction(
+    cmd: Extract<Command, { kind: 'confirmAction' }>,
+  ): CommandResult {
+    switch (cmd.action) {
+      case 'objective.collectPart':
+        this.objective.collectPart();
+        return { ok: true, id: cmd.id };
+      case 'objective.repair':
+        // One decisive repair action completes the required work (accumulation is unit-tested directly).
+        this.objective.applyRepairTicks(this.objective.snapshot(this.absTick()).repairRequiredTicks);
+        return { ok: true, id: cmd.id };
+      case 'objective.advance': {
+        const wasCallEvac = this.objective.currentPhase === 'callEvacuation';
+        const advanced = this.objective.advance(this.absTick());
+        if (!advanced) return { ok: false, id: cmd.id, reason: `objective cannot advance from '${this.objective.currentPhase}'` };
+        // Advancing OUT of callEvacuation arms the decisive horde event (the climax).
+        if (wasCallEvac) this.hordeEvent.arm(this.absTick());
+        return { ok: true, id: cmd.id };
+      }
+      case 'objective.reachExit':
+        return this.objective.reachExit()
+          ? { ok: true, id: cmd.id }
+          : { ok: false, id: cmd.id, reason: 'not evacuating' };
+      default:
+        return { ok: false, id: cmd.id, reason: `unknown action '${cmd.action}'` };
+    }
+  }
+
+  /**
+   * Ignite a structural route cell (a horde-event lever — fire reroutes/stalls the mass). Not modelled by
+   * the frozen StructureOp set, so it is a runtime method like fire()/breachWall(); it emits a fireIgnited
+   * world fact for render/AI/save consumers. Throws on an unknown cell (V4 — no silent miss).
+   */
+  igniteRoute(cell: number): void {
+    if (!this.scene.wall.getCell(cell)) throw new Error(`cannot ignite unknown structural cell ${cell}`);
+    this.burningRoutes.add(cell);
+    if (!this.worldEvents.push({ kind: 'fireIgnited', id: this.ids.next<EventId>('event'), module: this.scene.moduleId, cell })) {
+      throw new Error('world-event queue overflow during ignite');
+    }
+  }
+
+  /** Whether a structural route cell is currently on fire (test/diagnostics + horde-event input). */
+  isRouteBurning(cell: number): boolean {
+    return this.burningRoutes.has(cell);
+  }
+
+  /** Preview the decisive event against the CURRENT player-shaped structural state (test/diagnostics). */
+  evaluateEventNow(): HordeEventResult {
+    return this.hordeEvent.peek(this.currentEventInput());
+  }
+
+  /** Build the decisive-event input from the live, player-shaped structural state + total horde mass. */
+  private currentEventInput() {
+    const routes = routeStatesFromModule(this.scene.wall, {
+      cellCount: this.scene.wall.sizeZ,
+      packCell: (z) => this.scene.wall.packCell(0, 0, z),
+      isBurning: (cell) => this.burningRoutes.has(cell),
+    });
+    const hordeSize = this.zombies.count + (this.district ? this.district.abstractTotal() : 0);
+    return { routes, hordeSize, referenceHordeSize: this.referenceHordeSize };
   }
 
   private applyStructureOp(
@@ -481,48 +624,11 @@ export class GameRuntime {
     return { world, visual };
   }
 
-  // ---- persistence (V9 / V23 / V26) ----
+  // ---- persistence (V9 / V23 / V26) — orchestrated by RuntimePersistence ----
 
   /** Persist the compact delta: structural breaches (lane-S SaveDelta) + id counters + population. */
   async save(): Promise<void> {
-    const moduleDeltas: ModuleDelta[] = [
-      { module: this.scene.moduleId as number, cells: this.scene.wall.modificationDelta() },
-    ];
-    const delta = captureSaveDelta({
-      worldVersion: this.scene.worldVersion,
-      partition: this.partition,
-      capturedAtTick: this.clock.tick,
-      modules: moduleDeltas,
-    });
-    await writeSaveDelta(this.adapter, delta);
-
-    const population: PopulationEntry[] = [];
-    const pos: [number, number, number] = [0, 0, 0];
-    this.zombies.forEachAlive((slot) => {
-      this.zombies.getPosition(slot, pos);
-      population.push({
-        entity: this.entityOf(slot) as number,
-        archetype: this.zombies.getArchetype(slot),
-        x: pos[0],
-        y: pos[1],
-        z: pos[2],
-        heading: this.zombies.getHeading(slot),
-        state: this.zombies.getState(slot),
-        health: this.zombies.getHealth(slot),
-        anatomyFlags: this.zombies.getAnatomyFlags(slot),
-        navGroup: this.zombies.getNavGroup(slot),
-      });
-    });
-    const record: RuntimeSave = {
-      schemaVersion: RUNTIME_SAVE_SCHEMA_VERSION,
-      worldVersion: this.scene.worldVersion,
-      capturedAtTick: this.clock.tick + this.tickOffset,
-      idCounters: this.ids.snapshot(),
-      population,
-      player: { x: this.playerPos.x, y: this.playerPos.y, z: this.playerPos.z, heading: this.playerHeading },
-      weather: this.weatherProfile,
-    };
-    await this.adapter.put(this.partition, RUNTIME_SAVE_KEY, record);
+    return this.persistence.save();
   }
 
   /**
@@ -531,96 +637,81 @@ export class GameRuntime {
    * collide — V26), and re-create the live population at their stable EntityIds.
    */
   async loadFrom(): Promise<void> {
-    if (this.zombies.count > 0) throw new Error('loadFrom must run on a fresh runtime');
-
-    const delta = await readSaveDelta(this.adapter, this.partition, this.scene.worldVersion); // validates V23
-    if (delta) {
-      for (const m of delta.modules) {
-        if (m.module === (this.scene.moduleId as number)) {
-          this.scene.wall.applyDeltaSnapshot(m.cells);
-        }
-      }
-      // applyDeltaSnapshot does not run hooks; re-open LOCAL nav for every breached cell so the route
-      // is reconstructed exactly (same breach state feeds nav — V18).
-      for (let z = 0; z < this.scene.wall.sizeZ; z++) {
-        const cell = this.scene.wall.packCell(0, 0, z);
-        if (this.scene.wall.isBreached(cell)) this.openBreachedNav(cell);
-      }
-    }
-
-    const record = await this.adapter.get<RuntimeSave>(this.partition, RUNTIME_SAVE_KEY);
-    if (record) {
-      if (record.schemaVersion !== RUNTIME_SAVE_SCHEMA_VERSION) {
-        throw new SaveCompatError(`runtime save schema ${record.schemaVersion} != ${RUNTIME_SAVE_SCHEMA_VERSION}`);
-      }
-      if (record.worldVersion !== this.scene.worldVersion) {
-        throw new SaveCompatError(`runtime save world '${record.worldVersion}' != '${this.scene.worldVersion}'`);
-      }
-      // Restore counters first; population is recreated at saved ids (no minting), so the next mint
-      // is guaranteed beyond every restored id.
-      this.ids.restore(record.idCounters);
-      for (const e of record.population) {
-        this.placeZombie(e.entity as EntityId, e);
-      }
-      // Restore the player avatar + weather + day-time offset so the reloaded slice resumes in place.
-      if (record.player) {
-        this.playerPos = { x: record.player.x, y: record.player.y, z: record.player.z };
-        this.playerHeading = record.player.heading;
-      }
-      if (record.weather) this.weatherProfile = record.weather as WeatherProfile;
-      this.tickOffset = record.capturedAtTick;
-    }
+    return this.persistence.loadFrom();
   }
 
   // ---- internals ----
 
   private registerSystems(): void {
     // everyTick: shared-flow steering + movement integrate (V12/V15/V19).
-    this.scheduler.register('movement', { bucket: 'everyTick' }, () => this.stepMovement());
+    this.scheduler.register('movement', { bucket: 'everyTick' }, () => this.horde.stepMovement());
     // everyTick: resolve any queued auto-fire shots (combat resolution slot in the tick).
     this.scheduler.register('combat-resolve', { bucket: 'everyTick' }, () => this.stepQueuedShots());
     // interval: stimulus-driven perception (V14) — never omniscient player coords.
-    this.scheduler.register('perception', { bucket: 'interval', everyTicks: 4 }, () => this.stepPerception(), 0);
+    this.scheduler.register('perception', { bucket: 'interval', everyTicks: 4 }, () => this.horde.stepPerception(), 0);
     // interval: tier assignment (V13), phase-offset so it does not share a tick with perception.
-    this.scheduler.register('tier', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.stepTiers(ctx), 1);
+    this.scheduler.register('tier', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepTiers(ctx), 1);
     // interval: sound attraction — retire decayed stimuli + reroute the shared field toward the loudest
     // sound reaching the horde (V14/V15). Phase 2 so it never shares a tick with perception/tier.
-    this.scheduler.register('sound', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.stepSound(ctx), 2);
+    this.scheduler.register('sound', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepSound(ctx), 2);
+    // interval (coarse): district streaming + objective maintenance + decisive-event resolution (T40).
+    this.scheduler.register('district', { bucket: 'interval', everyTicks: DISTRICT_STEP_TICKS }, (ctx) => this.stepDistrict(ctx), 0);
   }
 
-  private stepMovement(): void {
-    const targetCell = this.currentFlowTargetCell();
-    const field = this.flowCache.get(this.scene.navGrid, targetCell, MOVEMENT_PROFILE);
-    const dt = this.clock.tickSeconds;
-    const speed = this.combatCfg.hordeMoveSpeed;
-    const sep = this.combatCfg.steerSeparationMeters;
-    const flowWeight = this.combatCfg.steerFlowWeight;
-    const pos: [number, number, number] = [0, 0, 0];
+  /**
+   * Coarse M2 step (T40): stream the district around the player (promote/evict abstract sector pops, V13),
+   * advance objective timing (auto-complete on reaching the exit while evacuating; fail on countdown
+   * elapse), and resolve the decisive horde event at its climax against the live player-shaped state (§G).
+   */
+  private stepDistrict(ctx: SystemContext): void {
+    const now = this.absTick();
 
-    this.zombies.forEachAlive((slot) => {
-      if (this.zombies.getNavGroup(slot) < 0) return;
-      this.zombies.getPosition(slot, pos);
-      const ids = this.spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
-      const neighbors = ids.map((id) => {
-        const a = this.spatial.get(id);
-        return { dx: a.x - pos[0], dz: a.z - pos[2] };
-      });
-      const { dirX, dirZ } = steer(field, { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight });
-      if (dirX === 0 && dirZ === 0) {
-        this.zombies.setVelocity(slot, 0, 0, 0);
-        return;
-      }
-      const nx = pos[0] + dirX * speed * dt;
-      const nz = pos[2] + dirZ * speed * dt;
-      if (this.scene.isWalkableWorld(nx, nz)) {
-        this.zombies.setPosition(slot, nx, pos[1], nz);
-        this.zombies.setHeading(slot, Math.atan2(dirZ, dirX));
-        this.zombies.setVelocity(slot, dirX * speed, 0, dirZ * speed);
-        this.spatial.update(slot, nx, nz);
-      } else {
-        this.zombies.setVelocity(slot, 0, 0, 0);
-      }
-    });
+    if (this.district) {
+      const plan = this.district.update(this.playerPos.x, this.playerPos.z, ctx.tick);
+      for (const p of plan.promotions) this.promoteSector(p.sectorId, p.count, p.centerX, p.centerZ);
+      for (const e of plan.evictions) this.evictSector(e.sectorId, e.count);
+    }
+
+    // Auto-complete the objective when the player reaches an exit cell during evacuation (V1 — the engine
+    // recognizes the world condition; no UI click needed for the win).
+    if (this.objective.currentPhase === 'evacuating' && this.playerOnExitCell()) {
+      this.objective.reachExit();
+    }
+    this.objective.tick(now);
+
+    // Resolve the climax once the buildup elapses, against whatever the player made of the routes (§G).
+    if (this.hordeEvent.shouldResolve(now)) {
+      this.hordeEvent.resolve(this.currentEventInput());
+    }
+  }
+
+  /** Promote up to `count` abstract members of a sector to live sim, scattered near the sector centre. */
+  private promoteSector(sectorId: number, count: number, centerX: number, centerZ: number): void {
+    const radius = this.combatCfg.gateZeroSpawnRadiusMeters;
+    for (let i = 0; i < count; i++) {
+      const { x, z } = this.scatterWalkable(centerX, centerZ, radius);
+      const entity = this.spawnZombie({ x, y: 0, z });
+      const slot = this.entityToSlot.get(entity);
+      if (slot !== undefined) this.slotToSector.set(slot, sectorId);
+    }
+  }
+
+  /** Demote (despawn) up to `count` live members tagged to an evicted sector — folds back to abstract. */
+  private evictSector(sectorId: number, count: number): void {
+    let removed = 0;
+    for (const [slot, sec] of this.slotToSector) {
+      if (removed >= count) break;
+      if (sec !== sectorId) continue;
+      this.despawn(slot); // also clears slotToSector via despawn()
+      removed += 1;
+    }
+  }
+
+  private playerOnExitCell(): boolean {
+    const navCellSize = this.scene.navGrid.settings.navCellSize;
+    const cx = Math.floor(this.playerPos.x / navCellSize);
+    const cy = Math.floor(this.playerPos.z / navCellSize);
+    return this.scene.exitCells.some((c) => c.cx === cx && c.cy === cy);
   }
 
   private stepQueuedShots(): void {
@@ -630,75 +721,6 @@ export class GameRuntime {
       this.audio.hearEvent('gunfire', shot.origin.x, shot.origin.z, this.clock.tick);
       shot = this.pendingShots.shift();
     }
-  }
-
-  /**
-   * Sound attraction (V14/V15): retire decayed stimuli, then read the loudest SOUND reaching the horde's
-   * cluster from the shared field — NOT the player coordinate directly. If one is heard, lure the whole
-   * horde to its source for the configured investigate window; the lure expires back to tracking the
-   * player. Because every agent shares ONE flow field, retargeting reroutes the entire horde at once.
-   */
-  private stepSound(ctx: SystemContext): void {
-    this.stimulus.update(ctx.tick);
-    const here = this.scene.cellCenter(this.scene.spawnCenterCell);
-    const hits = this.stimulus.query(here.x, here.z, ctx.tick);
-    let bestX = 0;
-    let bestZ = 0;
-    let bestIntensity = 0;
-    for (const h of hits) {
-      if (h.stimulus.kind !== 'sound') continue;
-      if (h.intensity > bestIntensity) {
-        bestIntensity = h.intensity;
-        bestX = h.stimulus.x;
-        bestZ = h.stimulus.z;
-      }
-    }
-    if (bestIntensity > 0 && this.scene.isWalkableWorld(bestX, bestZ)) {
-      const c = this.scene.navGrid.worldToCell(bestX, bestZ);
-      this.soundLureCell = this.scene.navGrid.index(c.cx, c.cy);
-      this.soundLureUntilTick = ctx.tick + this.perception.investigateTicks;
-    }
-  }
-
-  /** The shared flow-field target this tick: the active sound lure if any, else the live player cell. */
-  private currentFlowTargetCell(): number {
-    if (this.soundLureCell !== null && this.clock.tick <= this.soundLureUntilTick) {
-      return this.soundLureCell;
-    }
-    this.soundLureCell = null;
-    const c = this.scene.navGrid.worldToCell(this.playerPos.x, this.playerPos.z);
-    return this.scene.navGrid.index(c.cx, c.cy);
-  }
-
-  private stepPerception(): void {
-    // V14: a zombie only gains a stimulus when the player is within its sensing range — not omniscient.
-    const sight = this.perception.sightRange;
-    this.zombies.forEachAlive((slot) => {
-      const d = this.distanceToPlayer(slot);
-      this.zombies.setStimulus(slot, d <= sight ? (this.playerEntity as number) : -1);
-    });
-  }
-
-  private stepTiers(ctx: SystemContext): void {
-    const sight = this.perception.sightRange;
-    const window = this.combatCfg.recentDamageWindowTicks;
-    this.zombies.forEachAlive((slot) => {
-      const d = this.distanceToPlayer(slot);
-      const visible = d <= sight;
-      const damagedAt = this.lastDamageTick.get(slot);
-      const recentDamage = damagedAt !== undefined && ctx.tick - damagedAt <= window;
-      const inputs: TierInputs = {
-        distance: d,
-        visible,
-        threat: visible ? this.perception.visibleThreatWeight : 0,
-        cameraImportance: 0,
-        targeted: slot === this.targetSlot,
-        recentDamage,
-        currentAttack: false,
-        perfBudget: this.combatCfg.perfBudget,
-      };
-      this.tierManager.update(this.zombies, slot, inputs);
-    });
   }
 
   private publishSnapshots(): void {
@@ -723,7 +745,7 @@ export class GameRuntime {
       const sim = this.zombies.getSimTier(slot);
       if (sim === SimTier.Abstract) abstractCount += 1;
       else activeCount += 1;
-      const d = this.distanceToPlayer(slot);
+      const d = planarDistanceToPlayer(this.zombies, slot, this.playerPos.x, this.playerPos.z);
       if (d < nearest) nearest = d;
     });
     this.hordeGate.push({
@@ -731,6 +753,30 @@ export class GameRuntime {
       activeCount,
       abstractCount,
       nearestThreatMeters: Number.isFinite(nearest) ? nearest : 0,
+    });
+
+    // M2 mission status (objective + decisive event preview + district streaming readout), throttled (V11).
+    const now = this.absTick();
+    const obj = this.objective.snapshot(now);
+    const preview = this.hordeEvent.resolvedResult ?? this.evaluateEventNow();
+    this.missionGate.push({
+      objectivePhase: obj.phase,
+      directive: obj.directive,
+      partsFound: obj.partsFound,
+      partsRequired: obj.partsRequired,
+      repairProgressTicks: obj.repairProgressTicks,
+      repairRequiredTicks: obj.repairRequiredTicks,
+      evacuationTicksRemaining: obj.evacuationTicksRemaining,
+      canAdvance: obj.canAdvance,
+      eventPhase: this.hordeEvent.currentPhase,
+      eventBuildupProgress: this.hordeEvent.buildupProgress(now),
+      eventOutcome: this.hordeEvent.resolvedResult ? this.hordeEvent.resolvedResult.outcome : null,
+      eventPressure: preview.totalPressure,
+      openRoutes: preview.openRouteCount,
+      reinforcedRoutes: preview.reinforcedRouteCount,
+      activeSectors: this.district ? this.district.activeSectorCount() : 0,
+      liveDistrictPop: this.district ? this.district.liveTotal() : 0,
+      abstractDistrictPop: this.district ? this.district.abstractTotal() : 0,
     });
   }
 
@@ -773,13 +819,8 @@ export class GameRuntime {
     this.slotToEntity.delete(slot);
     if (entity !== undefined) this.entityToSlot.delete(entity);
     this.lastDamageTick.delete(slot);
+    this.slotToSector.delete(slot);
     if (this.targetSlot === slot) this.targetSlot = -1;
-  }
-
-  private distanceToPlayer(slot: ZombieSlot): number {
-    const pos: [number, number, number] = [0, 0, 0];
-    this.zombies.getPosition(slot, pos);
-    return Math.hypot(pos[0] - this.playerPos.x, pos[2] - this.playerPos.z);
   }
 
   private scatterWalkable(cx: number, cz: number, radius: number): { x: number; z: number } {

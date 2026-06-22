@@ -272,10 +272,10 @@ T16+T33 minimal subsets are pulled forward into T41 (firearm anatomical hit path
 |---|---|---|---|---|---|
 | T33 | x | S | persistence full: base packages vs deltas, schema versions+migrations, district/sector partition, worker serialize, async IndexedDB, checkpoints+mutation journal, version-compat validation | T13, T14, T25 | V9, V23, V26, I.persist, R12, R14 |
 | T37 | x | R | quality tiers + scaling-order impl (Desktop high/med/compat, Mobile-WebGPU); capability detect; user override w/ safe-limit guard | T5, T30 | V22, V25 |
-| T36 | . | X | benchmark suite: Crowd avenue, Breach cascade, Dense interior, Streaming sprint, Corpse accumulation, Mobile capability; median/95/99 frame times; CI captures | T9, T16, T33 | V10, §V-gates |
-| T39 | . | X | test layers: unit (damage/transfer/strength/tier/config), deterministic replay, integration (breach→nav+vis+audio+render+persist consistency), content validation, visual regression, perf, save-compat | T16, T33 | V26, V27 |
+| T36 | x | X | benchmark suite: Crowd avenue, Breach cascade, Dense interior, Streaming sprint, Corpse accumulation, Mobile capability; median/95/99 frame times; CI captures | T9, T16, T33 | V10, §V-gates |
+| T39 | x | X | test layers: unit (damage/transfer/strength/tier/config), deterministic replay, integration (breach→nav+vis+audio+render+persist consistency), content validation, visual regression, perf, save-compat | T16, T33 | V26, V27 |
 | T38 | x | INT | M1 vertical slice: one city block — street + multi-room building, cutaway camera, loot, shelter actions, melee+firearm, sound attraction, save/load, day/night+weather, one full modify-defend-escape loop | W2 done | V27, milestone-1 |
-| T40 | . | INT | M2 vertical slice: representative district final-quality art, medium-term objective + decisive horde event shaped by player mods, production pipeline, benchmark suite, accessibility pass, stable save migration, reference desktop quality on named hw | T38, T34, T36, T37, T39 | milestone-2, V27 |
+| T40 | x | INT | M2 vertical slice: representative district final-quality art, medium-term objective + decisive horde event shaped by player mods, production pipeline, benchmark suite, accessibility pass, stable save migration, reference desktop quality on named hw | T38, T34, T36, T37, T39 | milestone-2, V27 |
 
 **Suggested 2-agent assignment** (parallel-safe by lane):
 - **W0** — 1 agent: T1→T2→T3→T42 (contracts must be serial + frozen).
