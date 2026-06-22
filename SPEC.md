@@ -211,10 +211,10 @@ Rules: (1) shared dirs (`config/`, `diagnostics/`, `tests/`) only get NEW files 
 
 | id | st | lane | task | deps | cites |
 |---|---|---|---|---|---|
-| T1 | . | F | Scaffold Vite+TS+React+Zustand+Three.js(WebGPURenderer); folder layout per §I; strict TS; lint; vitest | — | C, I.layout |
-| T2 | . | F | `config/` typed system: every value w/ unit+owner+default+range+tier; loader rejects invalid content; quality-profile resolver; one file per config domain | T1 | V4, V25, I.config |
-| T3 | . | F | `game/core/`: fixed-tick clock + scheduler (freq buckets: every-tick/2-4/5-15/per-sec-or-event/on-demand); explicit ID minting; bounded pooled event queues | T1 | V12, V26, I.cmd |
-| T42 | . | F | **FREEZE CONTRACTS**: discriminated command+event types (exhaustive); `*ViewSnapshot` shapes; SoA buffer layout + field offsets; worker message schema; ID schemes. Published from `game/core/`; downstream lanes code against these | T3 | V1, V3, V12, V26, I.cmd, I.structs |
+| T1 | x | F | Scaffold Vite+TS+React+Zustand+Three.js(WebGPURenderer); folder layout per §I; strict TS; lint; vitest | — | C, I.layout |
+| T2 | x | F | `config/` typed system: every value w/ unit+owner+default+range+tier; loader rejects invalid content; quality-profile resolver; one file per config domain | T1 | V4, V25, I.config |
+| T3 | x | F | `game/core/`: fixed-tick clock + scheduler (freq buckets: every-tick/2-4/5-15/per-sec-or-event/on-demand); explicit ID minting; bounded pooled event queues | T1 | V12, V26, I.cmd |
+| T42 | x | F | **FREEZE CONTRACTS**: discriminated command+event types (exhaustive); `*ViewSnapshot` shapes; SoA buffer layout + field offsets; worker message schema; ID schemes. Published from `game/core/`; downstream lanes code against these | T3 | V1, V3, V12, V26, I.cmd, I.structs |
 
 ### Wave 1 — Spikes (PARALLEL: lanes S / R / U / A run concurrently)
 
