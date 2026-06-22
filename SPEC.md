@@ -220,24 +220,24 @@ Rules: (1) shared dirs (`config/`, `diagnostics/`, `tests/`) only get NEW files 
 
 | id | st | lane | task | deps | cites |
 |---|---|---|---|---|---|
-| T8 | . | S | data-oriented SoA entity store (typed arrays) per frozen layout — pos/heading/vel/state/health/anatomical-flags/target/stimulus/chunk/cell/nav-group/sim-tier/render-tier/anim; ownership-named types | T42 | V3, V26, I.structs |
-| T10 | . | S | tiered population (Tier0 hero/1 active-crowd/2 visible-horde/3 abstract) + promotion/demotion preserving identity+state | T8 | V13, zombies-config |
-| T11 | . | S | navigation: tiled navmesh + ≥1 shared flow-field in test block; region/portal graph; local steering grid; cache flow by target+profile+nav-revision | T2, T3 | V15, V5, R9, R10, R11 |
-| T12 | . | S | collision broad-phase: chunk-local uniform grid/spatial hash; explicit layers; circles+vertical bounds default, promote to capsule/anatomical on demand | T2, T3 | V6, V19, collision-config |
-| T13 | . | S | sparse `StructuralModule`: occupancy cells, material+strength, support graph, fracture families/breach thresholds; irregular breach → local collision+pathing update (no full rebuild); breach hides cell shape | T2 | V5, V18, V30, I.structs |
-| T14 | . | S | chunk streaming lifecycle (unloaded→abstract→meta→CPU-load→sim-active→visual→high-detail→cooling→persisted+evicted) + asset disposal + basic save delta to IndexedDB | T2, T3 | V9, V24, I.persist, R14 |
-| T5 | . | R | `render/engine/`: WebGPURenderer lifecycle, frame orchestration, adapter-limit capability detect, device-loss recovery, resource ownership+disposal registry, diagnostics counters | T1, T2 | V23, V24, V25, R4, R15 |
-| T7 | . | R | camera rig: near-ortho ~35–45° pitch, diagonal yaw, 90° rotation steps, limited zoom, stable combat framing | T5 | V21, camera-config |
-| T9 | . | R | GPU-instanced animated crowd, ≥several hundred varied zombies (instances + per-instance variation buffers, shared mesh family); reads SoA via frozen layout | T5, T42 | V2, V10, R5, R6 |
-| T4 | . | U | `stores/`: session/UI/player-view/inventory-view/crafting-view/map-view/settings/input/diagnostics slices; subscribeWithSelector; selector-only; persist settings+session only | T3 | V1, V11, I.stores |
-| T6 | . | U | `app/` React shell + error/loading boundaries; HUD that NEVER subscribes to per-frame world state (selector-scoped proof) | T4 | V1, V11 |
-| T34 | . | A | Asset pipeline (`tools/`): import+provenance → clean → retopo/decimate → skeleton+weights → anatomical region split+wound caps → UV+bake → art-direction pass → LOD+shadow+collision+impostor gen → KTX2/GLB compress+metadata → automated validation | — | V7, R7, R17 |
+| T8 | x | S | data-oriented SoA entity store (typed arrays) per frozen layout — pos/heading/vel/state/health/anatomical-flags/target/stimulus/chunk/cell/nav-group/sim-tier/render-tier/anim; ownership-named types | T42 | V3, V26, I.structs |
+| T10 | x | S | tiered population (Tier0 hero/1 active-crowd/2 visible-horde/3 abstract) + promotion/demotion preserving identity+state | T8 | V13, zombies-config |
+| T11 | x | S | navigation: tiled navmesh + ≥1 shared flow-field in test block; region/portal graph; local steering grid; cache flow by target+profile+nav-revision | T2, T3 | V15, V5, R9, R10, R11 |
+| T12 | x | S | collision broad-phase: chunk-local uniform grid/spatial hash; explicit layers; circles+vertical bounds default, promote to capsule/anatomical on demand | T2, T3 | V6, V19, collision-config |
+| T13 | x | S | sparse `StructuralModule`: occupancy cells, material+strength, support graph, fracture families/breach thresholds; irregular breach → local collision+pathing update (no full rebuild); breach hides cell shape | T2 | V5, V18, V30, I.structs |
+| T14 | x | S | chunk streaming lifecycle (unloaded→abstract→meta→CPU-load→sim-active→visual→high-detail→cooling→persisted+evicted) + asset disposal + basic save delta to IndexedDB | T2, T3 | V9, V24, I.persist, R14 |
+| T5 | x | R | `render/engine/`: WebGPURenderer lifecycle, frame orchestration, adapter-limit capability detect, device-loss recovery, resource ownership+disposal registry, diagnostics counters | T1, T2 | V23, V24, V25, R4, R15 |
+| T7 | x | R | camera rig: near-ortho ~35–45° pitch, diagonal yaw, 90° rotation steps, limited zoom, stable combat framing | T5 | V21, camera-config |
+| T9 | x | R | GPU-instanced animated crowd, ≥several hundred varied zombies (instances + per-instance variation buffers, shared mesh family); reads SoA via frozen layout | T5, T42 | V2, V10, R5, R6 |
+| T4 | x | U | `stores/`: session/UI/player-view/inventory-view/crafting-view/map-view/settings/input/diagnostics slices; subscribeWithSelector; selector-only; persist settings+session only | T3 | V1, V11, I.stores |
+| T6 | x | U | `app/` React shell + error/loading boundaries; HUD that NEVER subscribes to per-frame world state (selector-scoped proof) | T4 | V1, V11 |
+| T34 | x | A | Asset pipeline (`tools/`): import+provenance → clean → retopo/decimate → skeleton+weights → anatomical region split+wound caps → UV+bake → art-direction pass → LOD+shadow+collision+impostor gen → KTX2/GLB compress+metadata → automated validation | — | V7, R7, R17 |
 
 ### GATE 0 — integrating proof (after Wave 1, blocks Wave 2; 1 coordinator agent)
 
 | id | st | lane | task | deps | cites |
 |---|---|---|---|---|---|
-| T41 | . | INT | **FIRST PRODUCTION ACTION = GATE 0 artifact**: ugly-but-measurable test block stitching Wave-1 outputs via frozen contracts — destructible wall + multi-room interior + ≥500 animated zombies + shared horde nav + firearm w/ anatomical hits + save/reload + React HUD never subscribing to per-frame world state. **Gate decision**: crowd+destruction+streaming+state boundaries demonstrate plausible perf+maintainability before broad content. Lane agents do NOT edit T41 glue concurrently | T8,T9,T11,T13,T6 + min T16,T33 | V1, V2, V10, V27, milestone-0 |
+| T41 | x | INT | **FIRST PRODUCTION ACTION = GATE 0 artifact**: ugly-but-measurable test block stitching Wave-1 outputs via frozen contracts — destructible wall + multi-room interior + ≥500 animated zombies + shared horde nav + firearm w/ anatomical hits + save/reload + React HUD never subscribing to per-frame world state. **Gate decision**: crowd+destruction+streaming+state boundaries demonstrate plausible perf+maintainability before broad content. Lane agents do NOT edit T41 glue concurrently | T8,T9,T11,T13,T6 + min T16,T33 | V1, V2, V10, V27, milestone-0 |
 
 T16+T33 minimal subsets are pulled forward into T41 (firearm anatomical hit path + save delta) — their full versions land in Wave 2/3. This is the only forward-pull; avoids a separate GATE-0 review task.
 

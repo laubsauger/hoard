@@ -1,0 +1,11 @@
+// T41 — scene lane barrel: the GATE-0 authored test block.
+
+export {
+  buildTestBlock,
+  TEST_BLOCK_WORLD_VERSION,
+  REGION_ROOM_A,
+  REGION_ROOM_B,
+  type TestBlock,
+  type CellXY,
+  type Vec3,
+} from './testBlock';

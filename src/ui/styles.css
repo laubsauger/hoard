@@ -1,0 +1,138 @@
+/* T6 — plain CSS only for Wave 1 (NO component library / shadcn). */
+
+:root {
+  --hbn-bg: #0b0d0a;
+  --hbn-panel: rgba(18, 22, 16, 0.82);
+  --hbn-text: #d8e0cf;
+  --hbn-accent: #8fae5c;
+  --hbn-danger: #c0563a;
+  --hbn-ui-scale: 1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--hbn-bg);
+  color: var(--hbn-text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.hbn-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.hbn-viewport {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* HUD overlay — pointer-events none so it never intercepts world input. */
+.hbn-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  padding: calc(16px * var(--hbn-ui-scale));
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  font-size: calc(13px * var(--hbn-ui-scale));
+}
+
+.hbn-hud__vitals,
+.hbn-hud__threat {
+  display: flex;
+  gap: 12px;
+  background: var(--hbn-panel);
+  padding: 8px 12px;
+  border-radius: 8px;
+  backdrop-filter: blur(4px);
+}
+
+.hbn-vital {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 48px;
+}
+
+.hbn-vital__label {
+  font-size: 0.72em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.hbn-vital__value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--hbn-accent);
+}
+
+.hbn-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.hbn-loading__title {
+  font-size: 1.6rem;
+  letter-spacing: 0.08em;
+}
+
+.hbn-loading__bar {
+  width: 280px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.hbn-loading__fill {
+  height: 100%;
+  background: var(--hbn-accent);
+  transition: width 120ms linear;
+}
+
+.hbn-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.hbn-error pre {
+  max-width: 80ch;
+  white-space: pre-wrap;
+  color: var(--hbn-danger);
+}
+
+.hbn-error button {
+  padding: 8px 18px;
+  background: var(--hbn-accent);
+  border: none;
+  border-radius: 6px;
+  color: #10140c;
+  font-weight: 600;
+  cursor: pointer;
+}
