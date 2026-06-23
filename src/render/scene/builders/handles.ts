@@ -48,6 +48,22 @@ export interface DoorLeaf {
   current: number;
 }
 
+/** A window unit's child meshes (the frame is static; pane / dark void / boards toggle visibility), keyed by nav
+ *  cell. The WindowSystem flips their visibility each frame to mirror the authoritative glass/board state (V12). */
+export interface WindowMesh {
+  readonly navCell: number;
+  readonly pane: Mesh;
+  readonly voidMesh: Mesh;
+  readonly boards: Mesh[];
+}
+
+/** Static output of the openings builder (doors + windows): the hinged door leaves the DoorSystem swings and the
+ *  window units the WindowSystem toggles. */
+export interface OpeningHandles {
+  readonly doorLeaves: DoorLeaf[];
+  readonly windowMeshes: WindowMesh[];
+}
+
 /** Player avatar handles. `rimMat` drives the accessibility outline glow; `aoContact` follows the player each
  *  frame (both null when disabled by config). */
 export interface PlayerHandles {
