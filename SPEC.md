@@ -340,7 +340,7 @@ Context-driven player↔environment interaction + the menu surfaces (interaction
 
 | id | st | lane | task | deps | cites |
 |---|---|---|---|---|---|
-| T59 | . | S | interaction resolution: from player pos+facing+held items+skills, enumerate valid contextual verbs on nearby targets (door/window/container/barricade/furniture/corpse/structure); publish as a filtered affordance list contract. Reuse `crafting.ts` affordances + `modifications.ts` access-states | T24,T25 | V43,crafting-config,destruction-config,PZ-research |
+| T59 | x | S | interaction resolution: from player pos+facing+held items+skills, enumerate valid contextual verbs on nearby targets (door/window/container/barricade/furniture/corpse/structure); publish as a filtered affordance list contract. Reuse `crafting.ts` affordances + `modifications.ts` access-states | T24,T25 | V43,crafting-config,destruction-config,PZ-research |
 | T60 | . | U | interaction wheel / context menu UI: radial/list at cursor showing filtered verbs (disabled + missing-req shown), default-verb key (`E`), click → `confirmAction`/`modifyStructure` command | T59,T6 | V43,V1,I.cmd,PZ-research |
 | T61 | . | S | timed-action queue: per-player action queue, durations from config scaled by skill, progress in player-view snapshot, cancel on Esc / movement / threat | T3 | V44,V12,PZ-research |
 | T62 | x | U | inventory menu: dual-pane (player ↔ nearby/floor/container), drag + grab-all via `moveItem`, equip primary/secondary, hard carry-cap vs soft encumbrance readout, per-item context verbs | T23,T4 | V45,V1,V11,inventory-config,PZ-research |
