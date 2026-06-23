@@ -37,15 +37,9 @@ import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
 import type { DebugFlags } from '../../diagnostics/flags';
 import {
-  resolveSurfaceVisibility,
   resolveVisibilitySettings,
   resolveCutawayDepthSettings,
-  wallFacesCamera,
-  exteriorWallOccludesPlayer,
-  wallBetweenPlayerAndCamera,
-  type OcclusionContext,
   type CutawayDepthSettings,
-  type VecXZ,
 } from '../world/visibility';
 import { SceneResources } from './builders/sceneResources';
 import type { FadeSurface } from './builders/handles';
@@ -64,6 +58,7 @@ import { WindowSystem } from './systems/windowSystem';
 import { VisionCullSystem } from './systems/visionCullSystem';
 import { LightingSystem } from './systems/lightingSystem';
 import { FlashlightSystem } from './systems/flashlightSystem';
+import { CutawaySystem } from './systems/cutawaySystem';
 import {
   CombatFeedbackSystem,
   CombatFeedbackView,
@@ -161,6 +156,8 @@ export class BlockScene {
   /** PLAYER PERCEPTION v2 (V62): owns the RENDER-side recently-seen memory + per-slot reveal buffer (V26).
    *  Assigned in the constructor (needs the live SoA capacity). */
   private readonly visionCull: VisionCullSystem;
+  /** Per-building cutaway (V59/V20/V60) — assigned in the constructor (needs the resolved navCellSize). */
+  private readonly cutaway: CutawaySystem;
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -196,6 +193,11 @@ export class BlockScene {
       hearingRange: this.perception.hearingRange,
       soundWallOcclusion: this.perception.soundWallOcclusion,
       playerSightMemorySeconds: this.perception.playerSightMemorySeconds,
+    });
+    this.cutaway = new CutawaySystem(this.fadeSurfaces, {
+      visibility: this.visibility,
+      roofFadeSeconds: this.roofFadeSeconds,
+      navCellSize: this.navCellSize,
     });
 
     this.scene.background = new Color(0x0b0d0a);
@@ -422,7 +424,7 @@ export class BlockScene {
     // PRESERVE ORDER (B6/T98): lighting resolves the scene brightness the flashlight consumes, then the cutaway.
     const { sceneBrightness } = this.lightingSys.update(dtSeconds, this.runtime);
     this.flashlightSys.update(this.runtime, sceneBrightness, this.flashlightOn);
-    this.syncCutaway(dtSeconds, camera);
+    this.cutaway.update(this.runtime, camera, dtSeconds, this.accessibility.feedback.reduceMotion);
 
     // Combat feedback (B7): age pulses + gore, then reflect onto the GPU objects.
     this.combat.update(Math.max(0, dtSeconds));
@@ -456,89 +458,6 @@ export class BlockScene {
     return this.lightingSys.currentExposure;
   }
 
-
-  private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {
-    // PER-BUILDING cutaway (V59): only the building the player currently occupies fades; its neighbours stay
-    // opaque so the district still reads as solid streets of houses.
-    const insideIndex = this.playerBuildingIndex();
-    // V29 motion reduction: cut roofs/upper walls instantly rather than animating the fade (less motion).
-    const fadeRate = this.accessibility.feedback.reduceMotion
-      ? 1
-      : this.roofFadeSeconds > 0
-        ? dtSeconds / this.roofFadeSeconds
-        : 1;
-    // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the camera position. A
-    // wall fades only when its outward normal turns toward the camera; the roof always occludes from above.
-    const player = this.runtime.player();
-    let towardCamera: VecXZ | null = null;
-    if (camera) {
-      const dx = camera.position.x - player.x;
-      const dz = camera.position.z - player.z;
-      if (Math.hypot(dx, dz) > 1e-6) towardCamera = { x: dx, z: dz };
-    }
-    for (const s of this.fadeSurfaces) {
-      const playerInside = insideIndex >= 0 && s.buildingIndex === insideIndex;
-      let occludesPlayerView: boolean;
-      if (towardCamera === null || camera === undefined) {
-        occludesPlayerView = false; // no camera (construction prime) → stay opaque
-      } else if (playerInside) {
-        // Occupied building (V58/V59): roof always occludes from above. A wall fades when it turns toward the
-        // camera (V58 directional test) OR — GENERIC player↔camera occlusion (V66) — when its plane actually lies
-        // between the player and the camera. The second term catches INTERIOR walls (whose guessed outward normal
-        // need not point at the camera) that hide the player on the sightline; the directional term preserves the
-        // existing whole-near-side exterior fade. Either making it true fades the wall to the sliver (V65).
-        occludesPlayerView = s.kind === 'roof' || s.outwardNormal === null
-          ? true
-          : wallFacesCamera({
-              outwardNormal: s.outwardNormal,
-              towardCamera,
-              facingDotThreshold: this.visibility.cameraFacingDotThreshold,
-            }) ||
-            wallBetweenPlayerAndCamera({
-              outwardNormal: s.outwardNormal,
-              wallCenter: { x: s.centerX, z: s.centerZ },
-              player: { x: player.x, z: player.z },
-              camera: { x: camera.position.x, z: camera.position.z },
-              lateralSpanMeters: this.visibility.occluderLateralSpanMeters,
-            });
-      } else if (s.kind === 'upperWall' && s.outwardNormal !== null) {
-        // OUTSIDE-WALL cutaway (V62): the player is OUTSIDE this building — fade an exterior wall only when the
-        // player hugs it AND it lies between the camera and the player, so it never hides the player. Roofs of
-        // un-occupied buildings stay opaque (the player isn't under them). VIEW-only — structural LOS unchanged.
-        occludesPlayerView = exteriorWallOccludesPlayer({
-          outwardNormal: s.outwardNormal,
-          wallCenter: { x: s.centerX, z: s.centerZ },
-          player: { x: player.x, z: player.z },
-          camera: { x: camera.position.x, z: camera.position.z },
-          adjacencyMeters: this.visibility.exteriorCutawayAdjacencyMeters,
-        });
-      } else {
-        occludesPlayerView = false;
-      }
-      const ctx: OcclusionContext = {
-        playerInside,
-        occludesPlayerView,
-        roomEnclosed: true,
-        portalOrLosToCamera: false,
-        surfaceHeightMeters: s.heightMeters,
-      };
-      const decision = resolveSurfaceVisibility(s.kind, ctx, this.visibility);
-      const target = decision.visible ? decision.targetOpacity : 0;
-      if (dtSeconds <= 0) s.opacity = target;
-      else s.opacity += (target - s.opacity) * Math.min(1, fadeRate);
-      s.material.opacity = s.opacity;
-      // V20 layering: a FADED roof/upper-wall must not depth-occlude the interior floor, blood decals, or units
-      // below it (the "blood invisible indoors" root cause). Stop writing depth while faded; restore it when
-      // fully opaque so a non-cutaway roof occludes normally.
-      s.material.depthWrite = s.opacity >= 0.99;
-      // V60: the cutaway is a VIEW AID ONLY — hiding a surface for the camera must NOT change the sim's physical
-      // light. A faded roof/wall stays in the scene (visible=true) so it KEEPS casting shadows + occluding light
-      // exactly as if solid; only the CAMERA sees through it (opacity). The shadow pass renders it via the depth
-      // material, which ignores opacity, so a hidden roof still shadows the interior as a real roof would. (Sound
-      // + physics already key off the structural/nav grid, never this mesh, so they were never affected.)
-      s.object.visible = true;
-    }
-  }
 
   /** Index of the building the player currently occupies, or -1 if they are out on the street/yard. */
   private playerBuildingIndex(): number {
