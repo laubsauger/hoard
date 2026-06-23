@@ -69,6 +69,7 @@ import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { buildProps } from './builders/propsBuilder';
 import { buildContainers } from './builders/containersBuilder';
 import { buildPlayer } from './builders/playerBuilder';
+import { HouseStyleResolver } from './builders/houseStyle';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -88,9 +89,6 @@ import {
   hasLineOfSight,
   rayDistanceToWall,
   windowPlacements,
-  houseStyleForBuilding,
-  featureBuildingIndexOf,
-  type BuildingFootprint,
   type HouseStyle,
   type CellRect,
   type WindowGlass,
@@ -138,8 +136,9 @@ export class BlockScene {
   private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
   private readonly wallPanelThickness = resolve(renderingConfig.wallPanelThicknessMeters, this.tierOf());
-  // T87 house render dims + deterministic variation params (drives believable varied + decayed houses, V26).
-  private readonly houseVar = resolveHouseVariation(this.tierOf());
+  // T87 deterministic per-building house style (V26): owns the variation params + the feature-building index +
+  // styleFor(). Assigned in the constructor (needs runtime.scene). Shared by the house + openings builders.
+  private readonly houseStyle: HouseStyleResolver;
   private readonly clapboardSpacing = resolve(renderingConfig.houseClapboardSpacingMeters, this.tierOf());
   private readonly ivyPatchMeters = resolve(renderingConfig.houseIvyPatchMeters, this.tierOf());
   private readonly debrisMeters = resolve(renderingConfig.houseDebrisMeters, this.tierOf());
@@ -183,8 +182,6 @@ export class BlockScene {
   /** T108 windows: each window's child meshes (glass pane / dark void / boards), keyed by nav cell. syncWindows
    *  toggles their visibility to match the authoritative glass/board state (the render only REFLECTS it, V12). */
   private readonly windowMeshes: { navCell: number; pane: Mesh; voidMesh: Mesh; boards: Mesh[] }[] = [];
-  /** The building that owns the destructible §G section — kept lightly weathered + readable (set at build). */
-  private featureBuildingIndex = -1;
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -268,7 +265,7 @@ export class BlockScene {
     this.flashlight.shadow.camera.far = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
     this.scene.add(this.flashlight, this.flashlight.target);
 
-    this.featureBuildingIndex = this.computeFeatureBuildingIndex();
+    this.houseStyle = new HouseStyleResolver(this.runtime.scene, resolveHouseVariation(this.tier));
     buildGround(this.buildCtx(), { floorThicknessMeters: this.world.floorThicknessMeters });
     buildGroundRects(this.buildCtx());
     this.buildWallsAndRoof();
@@ -334,20 +331,6 @@ export class BlockScene {
     return { root: this.scene, res: this.res, town: this.runtime.scene, navCellSize: this.navCellSize };
   }
 
-  /** Which building (if any) holds the destructible §G section cells — kept readable (less decay). Delegates
-   *  to the shared scene-layer helper (T108) so the sim WindowSystem picks the same feature house (V26). */
-  private computeFeatureBuildingIndex(): number {
-    return featureBuildingIndexOf(this.runtime.scene);
-  }
-
-  /** A deterministic, replay-stable HouseStyle for a building (V26): seeded off the building's STABLE footprint
-   *  so the same lot always authors the same house without widening the frozen scene contract. The §G feature
-   *  building is kept lightly weathered + un-collapsed so its interior stays readable + navigable. */
-  private styleFor(bld: BuildingFootprint, bi: number): HouseStyle {
-    // Delegates to the shared scene-layer authoring (T108) so the renderer + the sim WindowSystem derive the
-    // SAME seed/damage — and therefore the SAME window decay — from one source of truth (V26).
-    return houseStyleForBuilding(bld.bounds, bld.storeys, bi, this.houseVar, this.featureBuildingIndex);
-  }
 
   private buildWallsAndRoof(): void {
     const ts = this.runtime.scene;
@@ -397,7 +380,7 @@ export class BlockScene {
     const debrisColors: Color[] = [];
 
     buildings.forEach((bld, bi) => {
-      const style = this.styleFor(bld, bi);
+      const style = this.houseStyle.styleFor(bld, bi);
       const wallH = this.world.buildingWallHeightMeters * Math.max(1, style.storeys);
       const baseH = Math.min(baseHeightCap, wallH);
       const upperH = Math.max(0, wallH - baseH);
@@ -649,7 +632,7 @@ export class BlockScene {
     group.add(roof);
 
     // roof decay — caved-in / missing-shingle patches near the ridge (dark voids reading as holes).
-    const holes = roofHoles(style, this.houseVar.roofHoleDamageThreshold, this.houseVar.roofHoleMaxCount);
+    const holes = roofHoles(style, this.houseStyle.variation.roofHoleDamageThreshold, this.houseStyle.variation.roofHoleMaxCount);
     if (holes.length > 0) {
       const holeMat = this.mat(`roofHole.${bi}`, { color: 0x0d0c0a, roughness: 1, side: DoubleSide });
       const ridgeLen = style.roofShape === 'gable' ? (style.ridgeAlongX ? rw : rd) : Math.max(rw, rd);
@@ -877,7 +860,7 @@ export class BlockScene {
       for (let bi = 0; bi < buildingsForDoors.length; bi++) {
         const bb = buildingsForDoors[bi]!.bounds;
         if (cell.cx >= bb.minCx && cell.cx <= bb.maxCx && cell.cy >= bb.minCy && cell.cy <= bb.maxCy) {
-          const style = this.styleFor(buildingsForDoors[bi]!, bi);
+          const style = this.houseStyle.styleFor(buildingsForDoors[bi]!, bi);
           bWallH = wallH * Math.max(1, style.storeys);
           wallColor = style.wallColor;
           break;
@@ -971,7 +954,7 @@ export class BlockScene {
     };
 
     const placements = windowPlacements(ts, {
-      houseVar: this.houseVar,
+      houseVar: this.houseStyle.variation,
       stride: this.world.houseWindowStride,
       boardedFraction: this.windowBoardedFraction,
     });
