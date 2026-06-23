@@ -87,6 +87,9 @@ import {
 import type { Now } from '@/stores';
 
 const REFERENCE_TIER: QualityTier = 'desktop-high';
+/** Synthetic entity id for world loot containers — a high fixed space that never collides with minted
+ *  entity ids, so seeding world loot does not perturb the IdFactory counters (determinism/replay, V26). */
+const WORLD_CONTAINER_ENTITY = 0x7fff_0001;
 const HORDE_NAV_GROUP = 0;
 const ZOMBIE_AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Sight);
 const MAX_SPAWN_RESAMPLES = 32;
@@ -362,10 +365,13 @@ export class GameRuntime {
     for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
-    const cupRef: ContainerRef = { entity: this.ids.next<EntityId>('entity'), container: 'Kitchen Cupboard' };
+    // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
+    // never perturbs the IdFactory counters or the spawn-scatter rng that determinism/replay depend on (V26).
+    const cupRef: ContainerRef = { entity: WORLD_CONTAINER_ENTITY as EntityId, container: 'Kitchen Cupboard' };
     this.inventory.addContainer(cupRef, { type: 'cupboard' });
     this.namedContainers.set('Kitchen Cupboard', cupRef);
-    for (const s of rollLoot('kitchen', this.rand)) this.inventory.seed(cupRef, s.item, s.count);
+    const lootRng = mulberry32((opts.scatterSeed ?? 1) ^ 0x10c7);
+    for (const s of rollLoot('kitchen', lootRng)) this.inventory.seed(cupRef, s.item, s.count);
 
     this.registerSystems();
   }
