@@ -43,7 +43,6 @@ import {
   wallFacesCamera,
   exteriorWallOccludesPlayer,
   wallBetweenPlayerAndCamera,
-  clampConeRangeToWall,
   type OcclusionContext,
   type CutawayDepthSettings,
   type VecXZ,
@@ -63,17 +62,17 @@ import { BreachSystem } from './systems/breachSystem';
 import { DoorSystem } from './systems/doorSystem';
 import { WindowSystem } from './systems/windowSystem';
 import { VisionCullSystem } from './systems/visionCullSystem';
-import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
+import { LightingSystem } from './systems/lightingSystem';
+import { FlashlightSystem } from './systems/flashlightSystem';
 import {
   CombatFeedbackSystem,
   CombatFeedbackView,
   resolveCombatFeedbackSettings,
 } from '../effects/combatFeedback';
 import type { VisualEvent } from '../../game/core/contracts/events';
-import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
-import { resolveHouseVariation, rayDistanceToWall } from '../../game/scene';
+import { resolveHouseVariation } from '../../game/scene';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -87,10 +86,6 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
 
 
 const PLAYER_BASE_EMISSIVE = 0.4; // authored player-rim glow at full outline strength (scaled by V29 setting)
-// Authored cool-grey fog/atmosphere hue (relative channel weights); luminance is lifted off near-black to
-// the configured floor so the far plane never reads as a black void (B5). Slightly warmer/brighter by day.
-const FOG_HUE = { r: 0.62, g: 0.68, b: 0.78 } as const;
-const FOG_DAY_LUMINANCE_BONUS = 0.06;
 
 export class BlockScene {
   readonly scene = new Scene();
@@ -170,10 +165,10 @@ export class BlockScene {
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
   private readonly combatView: CombatFeedbackView;
-  /** Smoothed interior/exterior exposure transition 0..1 (B6) — eyes adapting, not a snap. */
-  private interiorTransition = 0;
-  /** Live tone-mapping exposure (B6) — read by the renderer host each frame. */
-  private exposure = 1;
+  /** Lighting + flashlight (B5/B6/T98) — constructed in the constructor (need the live lights). Lighting owns
+   *  the interior-transition + exposure smoothing state; the orchestrator passes its brightness to the flashlight. */
+  private readonly lightingSys: LightingSystem;
+  private readonly flashlightSys: FlashlightSystem;
 
   // shared, tracked GPU-resource factory (V24). Builders create materials/geometries through this; mat/geo/
   // mergeBoxes below delegate to it (kept as thin methods so the many existing call sites stay unchanged).
@@ -255,6 +250,37 @@ export class BlockScene {
     this.flashlight.shadow.camera.near = this.shadows.shadowCameraNearMeters;
     this.flashlight.shadow.camera.far = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
     this.scene.add(this.flashlight, this.flashlight.target);
+
+    this.lightingSys = new LightingSystem(
+      { scene: this.scene, sun: this.sun, ambient: this.ambient, hemi: this.hemi, fog: this.fog },
+      {
+        tier: this.tier,
+        navCellSize: this.navCellSize,
+        shadowLightDistanceMeters: this.shadows.shadowLightDistanceMeters,
+        baseExposure: this.baseExposure,
+        exposureTransitionSeconds: this.exposureTransitionSeconds,
+        sunIntensity: this.lighting.sunIntensity,
+        moonIntensity: this.lighting.moonIntensity,
+        ambientIntensity: this.lighting.ambientIntensity,
+        minAmbientIntensity: this.lighting.minAmbientIntensity,
+        fogDistanceSmoothingPerSecond: this.lighting.fogDistanceSmoothingPerSecond,
+        fogFloorLuminance: this.lighting.fogFloorLuminance,
+        nightExposureBoostStops: this.lighting.nightExposureBoostStops,
+        weather: {
+          sunElevationMaxDegrees: this.weatherCfg.sunElevationMaxDegrees,
+          moonElevationMaxDegrees: this.weatherCfg.moonElevationMaxDegrees,
+          sunAzimuthDegrees: this.weatherCfg.sunAzimuthDegrees,
+        },
+      },
+    );
+    this.flashlightSys = new FlashlightSystem(this.flashlight, {
+      intensity: this.lighting.flashlightIntensity,
+      rangeMarginMeters: this.lighting.flashlightRangeMarginMeters,
+      wallClampMarginMeters: this.lighting.flashlightWallClampMarginMeters,
+      heightMeters: this.lighting.flashlightHeightMeters,
+      dayIntensityScale: this.lighting.flashlightDayIntensityScale,
+      visionRange: this.perception.playerVisionRange,
+    });
 
     this.houseStyle = new HouseStyleResolver(this.runtime.scene, resolveHouseVariation(this.tier));
     buildGround(this.buildCtx(), { floorThicknessMeters: this.world.floorThicknessMeters });
@@ -393,7 +419,9 @@ export class BlockScene {
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);
     this.windows.sync(this.runtime);
-    this.syncLighting(dtSeconds);
+    // PRESERVE ORDER (B6/T98): lighting resolves the scene brightness the flashlight consumes, then the cutaway.
+    const { sceneBrightness } = this.lightingSys.update(dtSeconds, this.runtime);
+    this.flashlightSys.update(this.runtime, sceneBrightness, this.flashlightOn);
     this.syncCutaway(dtSeconds, camera);
 
     // Combat feedback (B7): age pulses + gore, then reflect onto the GPU objects.
@@ -425,93 +453,9 @@ export class BlockScene {
 
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */
   get currentExposure(): number {
-    return this.exposure;
+    return this.lightingSys.currentExposure;
   }
 
-
-  /**
-   * Drive the player flashlight (T98): anchor it at the player, aim it along playerAim() so its cone covers
-   * the same wedge the fog-of-war reveals, and scale its intensity by scene brightness — at night it is the
-   * main light, by day it is subtle. Off (or zero intensity) hides it cleanly. `sceneBrightness` is the
-   * 0..1 day/night key+ambient level resolved in syncLighting.
-   */
-  private updateFlashlight(sceneBrightness: number): void {
-    const f = this.flashlight;
-    if (!this.flashlightOn) {
-      f.visible = false;
-      return;
-    }
-    const p = this.runtime.player();
-    const aim = this.runtime.playerAim();
-    const maxRange = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
-    // V67: RAYCAST-CLAMPED cone — clip the beam reach to the first STRUCTURAL wall along the aim so it never shines
-    // THROUGH/past a wall the player faces (no light spilling outside the building). Reuses the SAME nav-grid wall
-    // raycast the shots (rayDistanceToWall) + perception LOS use — not a second wall representation. A small margin
-    // keeps the struck wall face itself lit; a clear aim returns maxRange so the cone is never shortened needlessly.
-    const wallDist = rayDistanceToWall(this.runtime.scene, p.x, p.z, aim, maxRange);
-    const range = clampConeRangeToWall(maxRange, wallDist, this.lighting.flashlightWallClampMarginMeters);
-    f.distance = range;
-    f.position.set(p.x, this.lighting.flashlightHeightMeters, p.z);
-    // Aim the target forward along the ground (cos/sin aim = the same forward the avatar nose + fire dir use)
-    // so the cone rakes from torso height down across the revealed wedge.
-    f.target.position.set(p.x + Math.cos(aim) * range, 0, p.z + Math.sin(aim) * range);
-    f.target.updateMatrixWorld();
-    const dayScale = this.lighting.flashlightDayIntensityScale;
-    const brightness = Math.min(1, Math.max(0, sceneBrightness));
-    f.intensity = this.lighting.flashlightIntensity * (dayScale + (1 - dayScale) * (1 - brightness));
-    f.visible = f.intensity > 0;
-  }
-
-  private syncLighting(dtSeconds: number): void {
-    const severity = this.runtime.weatherSeverity;
-    const sky = computeSkyState(this.runtime.timeOfDay(), this.lighting, this.weatherCfg, severity);
-
-    const dist = this.shadows.shadowLightDistanceMeters;
-    // B13: anchor the key + its shadow frustum to the player so cast shadows always cover the play area
-    // (the frustum is capped for sharpness; pinning it to world origin produced a hard shadow cut-off as
-    // the player walked away). Sun keeps its sky-driven direction, just translated onto the player.
-    const pl = this.runtime.player();
-    this.sun.position.set(pl.x - sky.direction.x * dist, -sky.direction.y * dist, pl.z - sky.direction.z * dist);
-    this.sun.target.position.set(pl.x, 0, pl.z);
-    this.sun.target.updateMatrixWorld();
-    this.sun.intensity = sky.keyIntensity;
-    this.sun.color.setHex(sky.isDay ? 0xfff2dc : 0xaebed8);
-    // B6: floor the ambient/hemisphere fill so a low-key night spawn never crushes unlit faces to black.
-    const ambient = Math.max(sky.ambientIntensity, this.lighting.minAmbientIntensity);
-    this.ambient.intensity = ambient;
-    this.hemi.intensity = ambient * 0.5;
-
-    // B5: analytic, clamped fog distances (no per-frame stepping-loop banding), smoothed toward target so a
-    // weather change never sweeps the fog boundary across the near-ortho frame as bands.
-    const target = resolveFogDistances(severity, this.tier);
-    const rate = this.lighting.fogDistanceSmoothingPerSecond;
-    this.fog.far = approach(this.fog.far, target.far, rate, dtSeconds);
-    this.fog.near = approach(this.fog.near, target.near, rate, dtSeconds);
-
-    // B5: lift the fog/background colour off near-black to the configured luminance floor (brighter by day)
-    // so distant geometry fades into atmosphere instead of a black void.
-    const lum = this.lighting.fogFloorLuminance + (sky.isDay ? FOG_DAY_LUMINANCE_BONUS : 0);
-    this.fog.color.setRGB(FOG_HUE.r * lum, FOG_HUE.g * lum, FOG_HUE.b * lum);
-    (this.scene.background as Color).copy(this.fog.color);
-
-    // B6: resolve the renderer tone-mapping exposure — interior compensation + a night floor so the scene
-    // stays viewable after AgX/ACES tone mapping. Smooth the interior transition (eyes adapting).
-    const insideTarget = this.isPlayerInsideBuilding() ? 1 : 0;
-    const transitionRate = this.exposureTransitionSeconds > 0 ? 1 / this.exposureTransitionSeconds : Infinity;
-    this.interiorTransition = approach(this.interiorTransition, insideTarget, transitionRate, dtSeconds);
-    const dayMax = this.lighting.sunIntensity + this.lighting.ambientIntensity;
-    const sceneBrightness = dayMax > 0 ? Math.min(1, Math.max(0, (sky.keyIntensity + sky.ambientIntensity) / dayMax)) : 0;
-    this.exposure = resolveToneExposure({
-      baseExposure: this.baseExposure,
-      interiorStops: interiorExposure(Math.min(1, Math.max(0, this.interiorTransition)), this.tier),
-      sceneBrightness,
-      nightBoostStops: this.lighting.nightExposureBoostStops,
-    });
-
-    // T98: the flashlight is the main light at night and subtle by day — drive it off the same scene
-    // brightness so it coordinates with the player-anchored sun + the floored ambient fill.
-    this.updateFlashlight(sceneBrightness);
-  }
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {
     // PER-BUILDING cutaway (V59): only the building the player currently occupies fades; its neighbours stay
