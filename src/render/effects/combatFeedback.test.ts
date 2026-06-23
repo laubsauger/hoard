@@ -98,6 +98,24 @@ describe('CombatFeedbackSystem (B7 event ingest)', () => {
     const s = new CombatFeedbackSystem(settings);
     expect(() => s.update(-1)).toThrow();
   });
+
+  it('originates the muzzle/tracer at playerPos + aim*muzzleOffset, in FRONT of the player (T78/V55)', () => {
+    const s = new CombatFeedbackSystem(settings);
+    const px = 5;
+    const pz = 9;
+    // Aim along +z (unnormalized magnitude 2) — the origin must offset along the NORMALIZED aim.
+    s.fire(px, 1, pz, 0, 2);
+    const off = settings.muzzleOffsetMeters;
+    expect(off).toBeGreaterThan(0);
+    const m = s.muzzlePulse!;
+    const t = s.tracerPulse!;
+    expect(m.x).toBeCloseTo(px, 6); // no lateral drift
+    expect(m.z).toBeCloseTo(pz + off, 6); // pushed forward along +z by exactly the offset
+    expect(t.x).toBeCloseTo(px, 6);
+    expect(t.z).toBeCloseTo(pz + off, 6);
+    // direction normalized.
+    expect(Math.hypot(m.dirX, m.dirZ)).toBeCloseTo(1, 6);
+  });
 });
 
 describe('B14/T71 — energy clamp + region height + directional velocity spray + ground splat (V48)', () => {
@@ -210,11 +228,11 @@ describe('B15/T74 — tracer terminates at the actual stop distance (V49)', () =
 
   it('derives the stop from a struck-body bloodSpray impact when fire() had no explicit distance', () => {
     const s = new CombatFeedbackSystem(settings);
-    s.fire(0, 1, 0, 1, 0); // muzzle at origin, aiming +x, no explicit stop
+    s.fire(0, 1, 0, 1, 0); // body at origin, aiming +x → muzzle at +x*muzzleOffset (T78/V55), no explicit stop
     expect(s.tracerStopDistance()).toBe(settings.tracerRangeMeters);
-    // First struck body 6 m down-range along +x.
+    // First struck body 6 m down-range along +x — distance is measured FROM the muzzle, not the body centre.
     s.ingest([hitReaction(0.8, 1, 0), bloodSpray(6, 1, 0)], camAt0);
-    expect(s.tracerStopDistance()).toBeCloseTo(6, 6);
+    expect(s.tracerStopDistance()).toBeCloseTo(6 - settings.muzzleOffsetMeters, 6);
   });
 
   it('ignores an impact behind the muzzle (not this shot)', () => {

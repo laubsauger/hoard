@@ -3,7 +3,7 @@
 // and recycle past the cap; gore-intensity 0 suppresses; reduce-flashes thins; pools never exceed caps.
 
 import { describe, it, expect } from 'vitest';
-import { BloodSim, resolveBloodSettings, type BloodIngestContext } from './bloodView';
+import { BloodSim, resolveBloodSettings, type BloodIngestContext, type SurfaceHit, type SurfaceProjector } from './bloodView';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import type { EntityId, EventId, StimulusId } from '../../game/core/contracts/ids';
 
@@ -135,6 +135,119 @@ describe('BloodSim — caps + accessibility (V24/V29/V8)', () => {
   it('rejects a negative dt (V4)', () => {
     const s = new BloodSim(settings);
     expect(() => s.update(-0.1)).toThrow();
+  });
+});
+
+describe('BloodSim — organic directional decals (T77/V54)', () => {
+  it('floor decals elongate ALONG the impact velocity (length > width)', () => {
+    const s = new BloodSim(settings);
+    for (let k = 0; k < 4; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(k, 0, 0)], ctx);
+    for (let i = 0; i < 120; i++) s.update(1 / 60);
+    expect(s.decalCount).toBeGreaterThan(0);
+    for (let i = 0; i < s.decalCount; i++) {
+      expect(s.cLen[i]!).toBeGreaterThan(s.cWid[i]!); // a streak, never a uniform disc
+    }
+  });
+
+  it('decal length axis rotates TOWARD the travel direction', () => {
+    const meanCos = (dirX: number, dirZ: number): number => {
+      const sim = new BloodSim(settings);
+      for (let k = 0; k < 8; k++) sim.consume([hitReaction(1, dirX, dirZ), bloodSpray(k, 0, 0)], ctx);
+      for (let i = 0; i < 120; i++) sim.update(1 / 60);
+      let sum = 0;
+      for (let i = 0; i < sim.decalCount; i++) sum += Math.cos(sim.cRot[i]!);
+      return sim.decalCount > 0 ? sum / sim.decalCount : 0;
+    };
+    // +x travel → length axis points ≈+x (cos≈+1); −x travel → ≈−x (cos≈−1).
+    expect(meanCos(1, 0)).toBeGreaterThan(0.3);
+    expect(meanCos(-1, 0)).toBeLessThan(-0.3);
+  });
+
+  it('keeps counts modest: a weak hit is a spritz, only a fraction of droplets stain (T77/V54)', () => {
+    const weak = new BloodSim(settings);
+    weak.consume([hitReaction(0.15, 1, 0), bloodSpray(0, 0, 0)], ctx);
+    expect(weak.dropletCount).toBeLessThanOrEqual(settings.dropletsPerHit); // skewed low
+    // Across many hits only a fraction of landed droplets leave a stain (calm floor).
+    const s = new BloodSim(settings);
+    let sprayed = 0;
+    for (let k = 0; k < 12; k++) {
+      const before = s.dropletCount;
+      s.consume([hitReaction(1, 1, 0), bloodSpray(k * 0.3, 0, 0)], ctx);
+      sprayed += s.dropletCount - before;
+      for (let i = 0; i < 90; i++) s.update(1 / 60);
+    }
+    expect(s.decalCount).toBeLessThan(sprayed * 0.6); // most droplets evaporate, never stain
+  });
+
+  it('holds fresh briefly, DRIES to the dried-blood colour, then LINGERS dried (slow decay)', () => {
+    const s = new BloodSim(settings);
+    for (let k = 0; k < 6; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(k * 0.2, 0, 0)], ctx);
+    for (let i = 0; i < 90; i++) s.update(1 / 60); // land
+    expect(s.decalCount).toBeGreaterThan(0);
+    const freshR = s.cr[0]!;
+    // After the fresh hold + dry transition the decal sits AT the dried colour.
+    s.update(settings.decalFreshSeconds + settings.decalDryTransitionSeconds);
+    const driedR = s.cr[0]!;
+    expect(Math.abs(driedR - s.dryTarget.r)).toBeLessThan(0.02);
+    expect(driedR).toBeLessThan(freshR); // darkened from fresh
+    // It then LINGERS dried for a long time (well before the end-of-life fade) — not gone.
+    s.update(settings.decalLifeSeconds * 0.4);
+    expect(Math.abs(s.cr[0]! - s.dryTarget.r)).toBeLessThan(0.05);
+  });
+});
+
+describe('BloodSim — surface projection (T77/V54)', () => {
+  // Mock projector: interior floor slab at y=0.2 (normal up) + a wall the spray ray strikes (normal −x).
+  const FLOOR: SurfaceHit = { x: 0, y: 0.2, z: 0, nx: 0, ny: 1, nz: 0 };
+  const WALL: SurfaceHit = { x: 2.5, y: 1.1, z: 0, nx: -1, ny: 0, nz: 0 };
+  class MockProjector implements SurfaceProjector {
+    floorCalls = 0;
+    wallCalls = 0;
+    floorBelow(x: number, _fromY: number, z: number): SurfaceHit | null {
+      this.floorCalls++;
+      return { ...FLOOR, x, z };
+    }
+    wallAlong(): SurfaceHit | null {
+      this.wallCalls++;
+      return WALL;
+    }
+  }
+
+  it('lands floor decals at the PROJECTED slab height + up normal (indoors fix)', () => {
+    const s = new BloodSim(settings);
+    const proj = new MockProjector();
+    s.setProjector(proj);
+    for (let k = 0; k < 4; k++) s.consume([hitReaction(1, 1, 0, 'torsoUpper'), bloodSpray(k, 0, 0)], ctx);
+    for (let i = 0; i < 120; i++) s.update(1 / 60);
+    expect(proj.floorCalls).toBeGreaterThan(0);
+    // Some decal lands ON the slab (y≈0.2), oriented flat (normal up) — not at the default flat floor 0.04.
+    let floorDecals = 0;
+    for (let i = 0; i < s.decalCount; i++) {
+      if (s.cny[i]! > 0.5) {
+        expect(s.cy[i]!).toBeCloseTo(0.2, 5);
+        floorDecals++;
+      }
+    }
+    expect(floorDecals).toBeGreaterThan(0);
+  });
+
+  it('stamps VERTICAL wall splats at the wall hit, oriented to the wall normal', () => {
+    const s = new BloodSim(settings);
+    const proj = new MockProjector();
+    s.setProjector(proj);
+    s.consume([hitReaction(1, 1, 0, 'torsoUpper'), bloodSpray(0, 0, 0)], ctx);
+    expect(proj.wallCalls).toBe(1);
+    let wallDecals = 0;
+    for (let i = 0; i < s.decalCount; i++) {
+      if (Math.abs(s.cny[i]!) < 0.5) {
+        // placed at the wall hit point, normal horizontal (−x).
+        expect(s.cx[i]!).toBeCloseTo(WALL.x, 1);
+        expect(s.cnx[i]!).toBeCloseTo(-1, 5);
+        expect(s.cny[i]!).toBeCloseTo(0, 5);
+        wallDecals++;
+      }
+    }
+    expect(wallDecals).toBeGreaterThan(0);
   });
 });
 

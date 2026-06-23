@@ -21,7 +21,7 @@ export class RaycastSurfaceProjector implements SurfaceProjector {
   private readonly nrm = new Vector3();
 
   /** @param structures the static structure meshes to test (floors/walls/roof) — caller excludes everything dynamic. */
-  constructor(private readonly structures: readonly Object3D[]) {}
+  constructor(private readonly structures: Object3D[]) {}
 
   floorBelow(x: number, fromY: number, z: number): SurfaceHit | null {
     if (this.structures.length === 0) return null;

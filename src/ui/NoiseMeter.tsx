@@ -20,7 +20,9 @@ export function NoiseMeter() {
 
   return (
     <div
-      className={`hbn-noise${ambient > 0.66 ? ' is-loud' : ''}`}
+      // Pulse only when the PLAYER is being loud (an actionable "the horde can hear you" alert), not on steady
+      // ambient — a nearby horde keeps ambient maxed, and a permanent strobe reads as noise, not signal.
+      className={`hbn-noise${self > 0.5 ? ' is-loud' : ''}`}
       aria-label={`Surrounding noise ${Math.round(ambient * 100)} percent`}
     >
       <svg viewBox="0 0 64 64" className="hbn-noise__svg" role="img">
@@ -39,7 +41,7 @@ export function NoiseMeter() {
           cy="32"
           r={5 + self * 11}
           className="hbn-noise__self"
-          style={{ opacity: 0.2 + 0.7 * self }}
+          style={{ opacity: self < 0.04 ? 0 : 0.25 + 0.7 * self }}
         />
       </svg>
       <span className="hbn-noise__label">NOISE</span>

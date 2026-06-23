@@ -35,30 +35,19 @@ const SIGHT_CONE_WORLD_STROKE = 0.05; // sight-cone outline stroke in WORLD mete
 // big sight range never fattens it (the relative width is derived = stroke / sightRange in the constructor).
 const Y_AXIS = new Vector3(0, 1, 0);
 
-const STATE_RGB: Record<number, [number, number, number]> = {
-  [ZombieState.Idle]: [0.23, 0.51, 0.96],
-  [ZombieState.Wander]: [0.13, 0.83, 0.93],
-  [ZombieState.Pursue]: [0.96, 0.62, 0.04],
-  [ZombieState.Attack]: [0.94, 0.27, 0.27],
-  [ZombieState.Stagger]: [0.92, 0.7, 0.03],
-  [ZombieState.Down]: [0.42, 0.45, 0.5],
-};
+// One solid colour per FSM state. Markers are bucketed into per-state InstancedMeshes (NOT per-instance
+// instanceColor — which does not render reliably on the WebGPU node material, the "always grey" bug).
+const STATE_HEX: readonly number[] = [
+  0x3b82f6, // Idle   — blue
+  0x22d3ee, // Wander — cyan (searching)
+  0xf59e0b, // Pursue — amber (charging)
+  0xef4444, // Attack — red
+  0xeab308, // Stagger — yellow
+  0x6b7280, // Down   — grey
+];
 
 function gizmoMaterial(color: number, opacity = 0.5): MeshBasicNodeMaterial {
   return new MeshBasicNodeMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false, side: DoubleSide });
-}
-
-/** Flat filled sector (vision cone) in the XZ plane: apex at origin, bisector along +x, given half-angle. */
-function makeSector(radius: number, halfAngle: number, segs = 28): BufferGeometry {
-  const p: number[] = [];
-  for (let i = 0; i < segs; i++) {
-    const a0 = -halfAngle + (2 * halfAngle * i) / segs;
-    const a1 = -halfAngle + (2 * halfAngle * (i + 1)) / segs;
-    p.push(0, 0, 0, Math.cos(a0) * radius, 0, Math.sin(a0) * radius, Math.cos(a1) * radius, 0, Math.sin(a1) * radius);
-  }
-  const g = new BufferGeometry();
-  g.setAttribute('position', new Float32BufferAttribute(p, 3));
-  return g;
 }
 
 /** Flat annulus in the XZ plane at a fixed radius + constant thickness. */
@@ -135,7 +124,8 @@ export class SceneGizmos {
   private readonly sight: InstancedLayer; // heading-oriented cone (unit radius, scaled per agent)
   private readonly attack: InstancedLayer; // thin ring baked at attackRange (translate only)
   private readonly sound: InstancedLayer; // unit ring scaled per own radius
-  private readonly markers: InstancedLayer; // state boxes
+  private readonly stateMarkers: InstancedLayer[]; // one InstancedMesh per FSM state (solid colour each)
+  private readonly stateCounts: number[] = [];
   private readonly playerCone: Mesh;
   private readonly markerColor = new Color();
   private readonly sightRange: number;
@@ -152,16 +142,24 @@ export class SceneGizmos {
     this.sight = new InstancedLayer(makeConeOutline(fovHalf, 24, sightStroke), 0x38bdf8, MAX_GIZMOS, 998, 0.85);
     this.attack = new InstancedLayer(makeRing(p.attackRangeMeters, RING_THICKNESS), 0xef4444, MAX_GIZMOS, 999, 0.7);
     this.sound = new InstancedLayer(makeRing(1, RING_THICKNESS), 0xfacc15, MAX_SOUND, 999, 0.6);
-    this.markers = new InstancedLayer(new BoxGeometry(0.6, 0.6, 0.6), 0xffffff, MAX_GIZMOS, 1000, 0.95);
+    this.stateMarkers = STATE_HEX.map(
+      (hex) => new InstancedLayer(new BoxGeometry(0.6, 0.6, 0.6), hex, MAX_GIZMOS, 1000, 0.95),
+    );
 
     this.playerFovHalf = (p.playerFieldOfViewDegrees * Math.PI) / 360;
-    this.playerCone = new Mesh(makeSector(p.playerVisionRange, this.playerFovHalf), gizmoMaterial(0x86efac, 0.18));
+    // Player vision = OUTLINED cone (analogous to the zombie sight cones, not a solid fill), violet so it's
+    // clearly distinct from the cyan ZOMBIE sight (0x38bdf8). Unit-radius outline scaled by the vision range,
+    // with the same thin fixed world-space stroke.
+    const playerStroke = SIGHT_CONE_WORLD_STROKE / Math.max(0.01, p.playerVisionRange);
+    this.playerCone = new Mesh(makeConeOutline(this.playerFovHalf, 24, playerStroke), gizmoMaterial(0xc084fc, 0.85));
     this.playerCone.frustumCulled = false;
     this.playerCone.renderOrder = 998;
     this.playerCone.position.y = GIZMO_Y;
+    this.playerCone.scale.set(p.playerVisionRange, 1, p.playerVisionRange);
     this.playerCone.visible = false;
 
-    this.group.add(this.sight.mesh, this.attack.mesh, this.sound.mesh, this.markers.mesh, this.playerCone);
+    this.group.add(this.sight.mesh, this.attack.mesh, this.sound.mesh, this.playerCone);
+    for (const m of this.stateMarkers) this.group.add(m.mesh);
   }
 
   update(
@@ -184,6 +182,7 @@ export class SceneGizmos {
       this.playerCone.rotation.y = -player.heading;
     }
 
+    for (let s = 0; s < STATE_HEX.length; s++) this.stateCounts[s] = 0;
     let n = 0;
     const pos: [number, number, number] = [0, 0, 0];
     zombies.forEachAlive((slot) => {
@@ -197,9 +196,12 @@ export class SceneGizmos {
       }
       if (flags.showAttackRadius) this.attack.set(n, pos[0], pos[2], 0, 1, 1);
       if (flags.showZombieState) {
-        const rgb = STATE_RGB[zombies.getState(slot)] ?? STATE_RGB[ZombieState.Idle]!;
-        this.markers.set(n, pos[0], pos[2], 0, 1, 1);
-        this.markers.setColor(n, this.markerColor.setRGB(rgb[0], rgb[1], rgb[2]));
+        // Bucket into the per-state mesh (its own count) so each marker draws its state's solid colour.
+        const st = zombies.getState(slot);
+        const layer = this.stateMarkers[st < STATE_HEX.length ? st : ZombieState.Idle]!;
+        const c = this.stateCounts[st < STATE_HEX.length ? st : ZombieState.Idle]!;
+        layer.set(c, pos[0], pos[2], 0, 1, 1);
+        this.stateCounts[st < STATE_HEX.length ? st : ZombieState.Idle] = c + 1;
       }
       n += 1;
     });
@@ -208,8 +210,11 @@ export class SceneGizmos {
     if (flags.showSightRadius) this.sight.finalize(n);
     this.attack.mesh.visible = flags.showAttackRadius;
     if (flags.showAttackRadius) this.attack.finalize(n);
-    this.markers.mesh.visible = flags.showZombieState;
-    if (flags.showZombieState) this.markers.finalize(n);
+    for (let s = 0; s < this.stateMarkers.length; s++) {
+      const m = this.stateMarkers[s]!;
+      m.mesh.visible = flags.showZombieState;
+      if (flags.showZombieState) m.finalize(this.stateCounts[s] ?? 0);
+    }
 
     this.sound.mesh.visible = flags.showSoundField;
     if (flags.showSoundField) {
@@ -231,7 +236,7 @@ export class SceneGizmos {
     this.sight.dispose();
     this.attack.dispose();
     this.sound.dispose();
-    this.markers.dispose();
+    for (const m of this.stateMarkers) m.dispose();
     this.playerCone.geometry.dispose();
     (this.playerCone.material as MeshBasicNodeMaterial).dispose();
   }

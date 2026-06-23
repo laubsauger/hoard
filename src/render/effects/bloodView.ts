@@ -204,6 +204,8 @@ export class BloodSim {
   readonly vz: Float32Array;
   readonly dsize: Float32Array;
   readonly fy: Float32Array; // per-droplet projected land height (true floor/slab Y under it, T77/V54)
+  readonly dang: Float32Array; // per-droplet LAUNCH angle — the decal streaks along this (air drag kills the
+  // landing velocity, so the launch direction is what reads as the travel direction, T77/V54)
   readonly dr: Float32Array;
   readonly dg: Float32Array;
   readonly db: Float32Array;
@@ -260,6 +262,7 @@ export class BloodSim {
     this.vz = new Float32Array(D);
     this.dsize = new Float32Array(D);
     this.fy = new Float32Array(D);
+    this.dang = new Float32Array(D);
     this.dr = new Float32Array(D);
     this.dg = new Float32Array(D);
     this.db = new Float32Array(D);
@@ -429,6 +432,7 @@ export class BloodSim {
       this.vz[i] = Math.sin(ang) * sp;
       this.dsize[i] = s.dropletSizeMeters * (0.35 + rnd() * rnd() * 1.4) * sizeMul;
       this.fy[i] = landY;
+      this.dang[i] = ang;
       this.dr[i] = color.r;
       this.dg[i] = color.g;
       this.db[i] = color.b;
@@ -467,7 +471,7 @@ export class BloodSim {
         wh.x + tx * jh + (rnd() - 0.5) * 0.02,
         wh.y + jv,
         wh.z + tz * jh,
-        0,
+        0, // wall decals run vertically — travel angle is unused
         0,
         wh.nx,
         wh.ny,
@@ -488,8 +492,8 @@ export class BloodSim {
     x: number,
     y: number,
     z: number,
-    vx: number,
-    vz: number,
+    travelAngle: number,
+    travelSpeed: number,
     nx: number,
     ny: number,
     nz: number,
@@ -499,7 +503,7 @@ export class BloodSim {
     size: number,
     isWall: boolean,
   ): void {
-    const speed = Math.hypot(vx, vz);
+    const speed = travelSpeed;
     const i = this.cHead;
     this.cHead = (this.cHead + 1) % this.cx.length;
     if (this.cCount < this.cx.length) this.cCount++;
@@ -510,12 +514,11 @@ export class BloodSim {
     this.cny[i] = ny;
     this.cnz[i] = nz;
     this.cAge[i] = 0;
-    // In-plane spin of the length axis: floor → toward travel; wall → vertical (gravity run). Jitter both.
+    // In-plane spin of the length axis: floor → along the travel angle; wall → vertical (gravity run). Jitter both.
     if (isWall) {
       this.cRot[i] = Math.PI / 2 + (rnd() - 0.5) * 0.5;
     } else {
-      const dir = speed > 0.1 ? Math.atan2(vz, vx) : rnd() * Math.PI * 2;
-      this.cRot[i] = dir + (rnd() - 0.5) * 0.8;
+      this.cRot[i] = travelAngle + (rnd() - 0.5) * 0.8;
     }
     // Elongated teardrop: length tracks droplet size + travel speed; width is a fraction of it so the decal
     // always reads as a STREAK (length > width), never a uniform disc (T77/V54).
@@ -557,7 +560,7 @@ export class BloodSim {
         // Only a fraction of droplets stain (size-weighted) — keeps the floor calm (T77/V54). They land on
         // the projected floor/slab height (fy), so interior floors get visible decals (the indoors fix).
         if (rnd() < Math.min(1, (this.dsize[i]! / s.dropletSizeMeters) * s.decalStainChance)) {
-          this.landDecal(this.px[i]!, this.fy[i]!, this.pz[i]!, this.vx[i]!, this.vz[i]!, 0, 1, 0, this.dr[i]!, this.dg[i]!, this.db[i]!, this.dsize[i]!, false);
+          this.landDecal(this.px[i]!, this.fy[i]!, this.pz[i]!, this.dang[i]!, Math.hypot(this.vx[i]!, this.vz[i]!), 0, 1, 0, this.dr[i]!, this.dg[i]!, this.db[i]!, this.dsize[i]!, false);
         }
         const last = --this.dCount;
         if (i !== last) this.moveDroplet(last, i);
@@ -609,7 +612,7 @@ export class BloodSim {
     // Cast the footstep floor probe down from torso height (above any floor slab, below the roof).
     const fy = this.resolveFloorY(fx, fz, s.regionHeights.torso);
     // Small + subtle prints that grow only modestly with coverage (T77/V54 — not blobby puddles).
-    this.landDecal(fx, fy, fz, mvx, mvz, 0, 1, 0, BLOOD.r * 0.85, BLOOD.g, BLOOD.b, s.footstepPrintSizeMeters * (0.6 + cover * 0.8), false);
+    this.landDecal(fx, fy, fz, Math.atan2(mvz, mvx), moved, 0, 1, 0, BLOOD.r * 0.85, BLOOD.g, BLOOD.b, s.footstepPrintSizeMeters * (0.6 + cover * 0.8), false);
     this.footTimer = Math.max(0.04, s.footstepCadenceSeconds - cover * 0.08); // soaked → closer prints
   }
 
@@ -621,6 +624,8 @@ export class BloodSim {
     this.vy[to] = this.vy[from]!;
     this.vz[to] = this.vz[from]!;
     this.dsize[to] = this.dsize[from]!;
+    this.fy[to] = this.fy[from]!;
+    this.dang[to] = this.dang[from]!;
     this.dr[to] = this.dr[from]!;
     this.dg[to] = this.dg[from]!;
     this.db[to] = this.db[from]!;

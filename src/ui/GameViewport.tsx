@@ -8,7 +8,7 @@
 // so a missing adapter reports cleanly and never crashes React.
 
 import { useEffect, useRef } from 'react';
-import { Plane, Raycaster, Vector2, Vector3 } from 'three';
+import { Mesh, Plane, Raycaster, Vector2, Vector3, type BufferGeometry, type Material, type Object3D } from 'three';
 import Stats from 'stats.js';
 import {
   RendererHost,
@@ -26,6 +26,7 @@ import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
 import { BloodView, resolveBloodSettings } from '../render/effects/bloodView';
+import { RaycastSurfaceProjector } from '../render/effects/surfaceProjector';
 import { GibView, resolveGibSettings } from '../render/effects/gibView';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
@@ -208,6 +209,35 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         scene?.scene.remove(gizmos.group);
         gizmos.dispose();
       });
+
+      // T77/V54: give the pooled BLOOD system a render-side surface projector so landing droplets project
+      // onto the REAL structure — interior floor slabs (which sit above the street, the indoors fix) at
+      // their true height + walls behind a struck body for vertical splats. The projector raycasts ONLY the
+      // static structure meshes: we assemble that list by EXCLUDING the dynamic objects — the crowd
+      // (scene.crowd.mesh), the player avatar (the scene's only CapsuleGeometry → its whole group), the
+      // gizmo overlay, and every gore/effect mesh (blood./gib./combat. material names). Structure never
+      // moves, so the list is built once. Read-only (V2); raycasts are bounded by the sim (per hit, pooled).
+      {
+        const sceneRoot = scene.scene;
+        const exclude = new Set<Object3D>();
+        exclude.add(scene.crowd.mesh);
+        gizmos.group.traverse((o) => exclude.add(o));
+        sceneRoot.traverse((o) => {
+          const m = o as Mesh;
+          if (m.isMesh && (m.geometry as BufferGeometry | undefined)?.type === 'CapsuleGeometry') {
+            (m.parent ?? m).traverse((c) => exclude.add(c));
+          }
+        });
+        const structures: Object3D[] = [];
+        sceneRoot.traverse((o) => {
+          const m = o as Mesh;
+          if (!m.isMesh || exclude.has(o)) return;
+          const matName = (m.material as Material | undefined)?.name ?? '';
+          if (matName.startsWith('blood.') || matName.startsWith('gib.') || matName.startsWith('combat.')) return;
+          structures.push(o);
+        });
+        bloodView.sim.setProjector(new RaycastSurfaceProjector(structures));
+      }
 
       const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
 

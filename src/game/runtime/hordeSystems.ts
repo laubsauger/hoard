@@ -5,6 +5,7 @@
 
 import type { FixedClock, SystemContext } from '@/game/core';
 import type { StimulusField } from '@/game/stimulus';
+import { ZombieState } from '@/game/simulation';
 import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/game/simulation';
 import { steer, type FlowFieldCache } from '@/game/navigation';
 import {
@@ -99,10 +100,21 @@ export class HordeSimulation {
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
     const pos: [number, number, number] = [0, 0, 0];
+    // Arrival: once within this radius of the target, STOP steering so the body settles at the ring instead
+    // of piling into the target and fighting the separation pass each tick (the jitter, V19/V35).
+    const tw = scene.navGrid.width;
+    const target = scene.cellCenter({ cx: targetCell % tw, cy: Math.floor(targetCell / tw) });
+    const arriveR2 = combatCfg.hordeArriveRadiusMeters * combatCfg.hordeArriveRadiusMeters;
 
     zombies.forEachAlive((slot) => {
       if (zombies.getNavGroup(slot) < 0) return;
       zombies.getPosition(slot, pos);
+      const adx = target.x - pos[0];
+      const adz = target.z - pos[2];
+      if (adx * adx + adz * adz <= arriveR2) {
+        zombies.setVelocity(slot, 0, 0, 0); // arrived — hold position, let separation settle (no jiggle)
+        return;
+      }
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);
@@ -271,17 +283,27 @@ export class HordeSimulation {
     // V14: a zombie SEES the player only within its forward vision cone, not 360°. fovHalf = full angle/2.
     const fovHalf = (perception.fieldOfViewDegrees * Math.PI) / 360;
     const coned = fovHalf < Math.PI;
+    const attackRange = perception.attackRangeMeters;
+    // Investigating a heard sound = the horde is lured + not yet seeing the player.
+    const lured = this.soundLureCell !== null && this.d.clock.tick <= this.soundLureUntilTick;
     const pos: [number, number, number] = [0, 0, 0];
     let seen = false;
     zombies.forEachAlive((slot) => {
       zombies.getPosition(slot, pos);
       const dx = p.x - pos[0];
       const dz = p.z - pos[2];
-      let inSight = Math.hypot(dx, dz) <= sight;
+      const dist = Math.hypot(dx, dz);
+      let inSight = dist <= sight;
       if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
       // V47: walls / closed doors block sight — no seeing the player through solid structure.
       if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
       zombies.setStimulus(slot, inSight ? playerEntityId : -1);
+      // V20: drive the FSM state so behaviour + the debug indicator reflect what the zombie is doing.
+      let state: number;
+      if (inSight) state = dist <= attackRange ? ZombieState.Attack : ZombieState.Pursue;
+      else if (lured) state = ZombieState.Wander; // searching/investigating a heard sound
+      else state = ZombieState.Idle;
+      zombies.setState(slot, state);
       if (inSight) seen = true;
     });
     // B16/V14: cache whether the horde sees the player so flowTargetCell can let sight override a stale lure.

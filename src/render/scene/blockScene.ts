@@ -527,10 +527,12 @@ export class BlockScene {
   }
 
   /** Player fired (B7) — flash the muzzle + draw a tracer from the player's muzzle along the aim direction. */
-  fireFeedback(dirX: number, dirZ: number): void {
+  fireFeedback(dirX: number, dirZ: number, stopDistanceMeters?: number): void {
     const p = this.runtime.player();
     const muzzleY = this.player.bodyHeightMeters * 0.6;
-    this.combat.fire(p.x, muzzleY, p.z, dirX, dirZ);
+    // Pass the authoritative shot stop distance (struck body OR first wall) so the tracer terminates there
+    // and never draws through a wall when no zombie was hit (V49/V53/B20).
+    this.combat.fire(p.x, muzzleY, p.z, dirX, dirZ, stopDistanceMeters);
   }
 
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */
@@ -614,6 +616,10 @@ export class BlockScene {
       if (dtSeconds <= 0) s.opacity = target;
       else s.opacity += (target - s.opacity) * Math.min(1, fadeRate);
       s.material.opacity = s.opacity;
+      // V20 layering: a FADED roof/upper-wall must not depth-occlude the interior floor, blood decals, or units
+      // below it (the "blood invisible indoors" root cause). Stop writing depth while faded; restore it when
+      // fully opaque so a non-cutaway roof occludes normally.
+      s.material.depthWrite = s.opacity >= 0.99;
       s.object.visible = s.opacity > 0.02;
     }
   }
