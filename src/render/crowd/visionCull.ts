@@ -3,7 +3,7 @@
 // "look-around" survival mood). This is the SAME forward-cone awareness the dev overlay already draws and
 // reuses the canonical V14 cone predicate `withinCone`. Applied where the crowd instance buffers are PACKED
 // (packCrowdInputs / packLimbInputs) so culled members are never submitted to the GPU at all. A soft band
-// near the cone edge + max range fades members out (cheap: scales the packed instance toward zero) so threats
+// near the cone edge + max range fades members out (cheap: fades the packed instance ALPHA toward zero (V65)) so threats
 // fade in rather than hard-pop. Reads nothing back into the sim (V1/V3).
 
 import { withinCone } from '../../game/runtime/hordeSystems';
@@ -38,7 +38,7 @@ const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 /**
  * Render-visibility fade for a crowd member at (x,z): 1 = fully visible, 0 = culled (do not draw). A value in
  * (0,1) means the member is inside the wedge but within a soft edge band — the caller multiplies the packed
- * instance scale by it so the member shrinks out smoothly instead of popping. O(1) cone+range test; the
+ * instance ALPHA by it (V65) so the member blends out smoothly instead of popping or shrinking. O(1) cone+range test; the
  * (optional) LOS DDA only runs for members that already passed cone+range, so it stays cheap per frame.
  */
 export function visionCullFade(x: number, z: number, c: VisionCull): number {

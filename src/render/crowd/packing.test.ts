@@ -204,16 +204,19 @@ describe('packCrowdInputs (V2/V3)', () => {
     expect(pose[0]).toBeCloseTo(5, 6);
   });
 
-  it('vision-cone cull: a soft edge band shrinks the packed scale toward zero near the boundary', () => {
+  it('vision-cone cull: a soft edge band fades the packed ALPHA toward zero near the boundary (scale stays full)', () => {
     const s = makeSoa();
     s.alive[0] = 1; s.position[0] = 19; s.position[2] = 0; // just inside a 20m range with a 4m fade band
     const { pose, meta } = buffers();
+    const outFade = new Float32Array(CAP).fill(1);
     packCrowdInputs(s.soa.views, pose, meta, {
       count: 1, capacity: CAP, variationCount: 1, scaleMin: 1, scaleMax: 1,
+      outFade,
       visibility: { px: 0, pz: 0, heading: 0, fovHalf: Math.PI / 2, range: 20, edgeBandMeters: 4, edgeBandRadians: 0 },
     });
-    // (20 - 19) / 4 = 0.25 → the instance scale (meta[0]) is faded down from 1.
-    expect(meta[0]).toBeCloseTo(0.25, 5);
+    // (20 - 19) / 4 = 0.25 → V65: the fade lands on the per-instance ALPHA (outFade[0]), NOT the scale.
+    expect(outFade[0]).toBeCloseTo(0.25, 5);
+    expect(meta[0]).toBeCloseTo(1, 6); // scale stays full — members blend via alpha, they don't shrink
   });
 
   it('without limbedMaxSimTier the box packs all live slots (default, unchanged)', () => {

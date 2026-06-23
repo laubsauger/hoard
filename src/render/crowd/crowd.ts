@@ -266,6 +266,10 @@ export class Crowd {
   private readonly metaInput: Float32Array;
   private readonly poseBuffer: StorageBufferNode<'vec4'>;
   private readonly metaBuffer: StorageBufferNode<'vec4'>;
+  /** Per-instance reveal alpha (V65): the cone/near/memory/noise fade, applied as material opacity so members
+   *  blend in/out smoothly instead of shrinking. Re-uploaded each frame like pose/meta. */
+  private readonly fadeInput: Float32Array;
+  private readonly fadeBuffer: StorageBufferNode<'float'>;
   /** Per-frame real delta fed to the GPU phase advance. */
   private readonly dtUniform: UniformNode<'float', number>;
 
@@ -291,6 +295,9 @@ export class Crowd {
     this.metaInput = new Float32Array(cap * FLOATS_PER_META);
     this.poseBuffer = registry.track(instancedArray(this.poseInput, 'vec4'), 'buffer', 'crowd.poseBuffer');
     this.metaBuffer = registry.track(instancedArray(this.metaInput, 'vec4'), 'buffer', 'crowd.metaBuffer');
+    // V65: per-instance reveal alpha. Default 1 (fully visible) so an un-culled horde draws solid.
+    this.fadeInput = new Float32Array(cap).fill(1);
+    this.fadeBuffer = registry.track(instancedArray(this.fadeInput, 'float'), 'buffer', 'crowd.fadeBuffer');
 
     // animPhase: GPU-resident animation phase state (V2). Seeded with per-slot offsets so instances are not
     // in lockstep, then advanced on the GPU each frame. The compute output is the per-instance transform
@@ -349,6 +356,12 @@ export class Crowd {
       const brightness = float(1 - spread).add(t.mul(spread * 2)); // [1-spread, 1+spread]
       return vec3(base.r, base.g, base.b).mul(brightness);
     })();
+
+    // V65: reveal fade = material ALPHA, not scale. A member entering/leaving the player's awareness blends
+    // smoothly instead of shrinking. transparent so alpha<1 composites; depthWrite kept so the solid bulk
+    // (alpha 1) still occludes normally — the few fading members blend over what's behind them.
+    this.material.transparent = true;
+    this.material.opacityNode = this.fadeBuffer.toAttribute();
   }
 
   /**
@@ -369,6 +382,7 @@ export class Crowd {
       limbedMaxSimTier: this.settings.limbedMaxSimTier,
       limbedBudget: this.settings.limbedBudget,
       visibility,
+      outFade: this.fadeInput,
     });
     this.limbs.update(views, count, visibility);
     this.mesh.count = liveCount;
@@ -376,6 +390,7 @@ export class Crowd {
     // backend re-uploads the freshly compacted inputs this frame. The compute reads these next.
     (this.poseBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
     (this.metaBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
+    (this.fadeBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
     this.dtUniform.value = dtSeconds;
     return liveCount;
   }

@@ -56,6 +56,13 @@ export interface PackOptions {
    * line-of-sight and fade those near the edges. Undefined = no cull (the whole horde draws).
    */
   readonly visibility?: VisionCull | undefined;
+  /**
+   * Optional per-instance OPACITY output (V65). When provided, the reveal `fade` (0..1 from cone/near/memory/
+   * noise) is written here PER LIVE INSTANCE instead of being baked into the instance SCALE — so the renderer
+   * fades members in/out via ALPHA (a smooth blend) rather than shrinking them (which read as jank). Compacted
+   * to the front like pose/meta; entries past liveCount are stale (mesh.count bounds the draw).
+   */
+  readonly outFade?: Float32Array | undefined;
 }
 
 export interface PackResult {
@@ -90,6 +97,7 @@ export function packCrowdInputs(
     limbedMaxSimTier = -1,
     limbedBudget = Infinity,
     visibility,
+    outFade,
   } = opts;
   if (count < 0 || count > capacity) throw new Error(`count ${count} exceeds capacity ${capacity}`);
   if (outPose.length < capacity * FLOATS_PER_POSE) {
@@ -123,7 +131,7 @@ export function packCrowdInputs(
       // else: over-budget figure → it FALLS THROUGH to the box below (no vanish).
     }
 
-    // Vision-cone fog-of-war (T96) + perception v2 (V62): skip members the reveal hides; fade edges via scale.
+    // Vision-cone fog-of-war (T96) + perception v2 (V62): skip members the reveal hides; fade edges via alpha (V65).
     // When the scene precomputed a per-slot reveal (cone+near+memory+noise), read it; else fall back to the pure
     // cone fade so callers that pass only a wedge keep working.
     let fade = 1;
@@ -133,7 +141,10 @@ export function packCrowdInputs(
     }
 
     const seed = variationSeed(slot, variationCount);
-    const sc = variationScale(seed, variationCount, scaleMin, scaleMax) * fade;
+    // V65: keep FULL scale — the reveal `fade` no longer shrinks the instance. When an outFade buffer is given
+    // it carries the fade as per-instance alpha (smooth blend); legacy callers without it get full-size members
+    // (the reveal still hard-skips fully-hidden ones via `fade <= 0` above).
+    const sc = variationScale(seed, variationCount, scaleMin, scaleMax);
 
     const p = live * FLOATS_PER_POSE;
     outPose[p] = position[slot * 3]!;
@@ -146,6 +157,7 @@ export function packCrowdInputs(
     outMeta[m + 1] = seed;
     outMeta[m + 2] = archetype[slot]!;
     outMeta[m + 3] = animState[slot]!;
+    if (outFade) outFade[live] = fade;
 
     live++;
     if (live > capacity) throw new Error(`live instance count exceeded capacity ${capacity}`);
