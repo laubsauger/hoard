@@ -1,10 +1,11 @@
-// T38 — the city-block render scene: the place the direct Three.js engine finally DRAWS the assembled
-// systems. Builds structural geometry (street + multi-room building walls/floors/roof + the destructible
-// wall section) from the authored TestBlock, an InstancedMesh crowd fed by the SoA via the existing
-// packing path, and sun/moon + ambient lighting driven by the sim clock. Per-frame it syncs the crowd,
-// the player avatar, breach visibility, the day/night key light, and the cutaway roof fade (V20). All GPU
-// resources are tracked in the injected ResourceRegistry for explicit disposal (V24). React never reads
-// world state back through this (V1) — it only consumes the runtime's throttled snapshots elsewhere.
+// T38/T87 — the district render scene: the place the direct Three.js engine finally DRAWS the assembled
+// systems. Iterates `buildingsOf(scene)` so a LARGE multi-building suburban district renders as MANY separate
+// houses — each with its own perimeter walls, interior floor slab, shaped roof, windows + door, deterministic
+// clapboard/decay variation (V26) and a PER-BUILDING cutaway (only the building the player occupies fades —
+// neighbours stay opaque, V59). Suburban ground paint + instanced district dressing (fences/cars/trees/ivy/
+// debris) are drawn over the base ground. An InstancedMesh crowd is fed by the SoA via the existing packing
+// path, and sun/moon + ambient lighting are driven by the sim clock. All GPU resources are tracked in the
+// injected ResourceRegistry for explicit disposal (V24). React never reads world state back through this (V1).
 
 import {
   AmbientLight,
@@ -13,19 +14,28 @@ import {
   type Camera,
   CircleGeometry,
   Color,
+  CylinderGeometry,
   DirectionalLight,
+  DoubleSide,
+  Euler,
   Float32BufferAttribute,
   Fog,
   Group,
   HemisphereLight,
+  IcosahedronGeometry,
+  InstancedMesh,
+  Matrix4,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
   CapsuleGeometry,
+  Quaternion,
   Scene,
+  Vector3,
 } from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { resolve } from '../../config/spec';
 import { resolveDomain } from '../../config/registry';
 import { worldConfig } from '../../config/domains/world';
@@ -59,6 +69,20 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
+import {
+  buildingsOf,
+  authorHouseStyle,
+  resolveHouseVariation,
+  windowState,
+  roofHoles,
+  hash01,
+  type GroundKind,
+  type BuildingFootprint,
+  type HouseStyle,
+  type CellRect,
+} from '../../game/scene';
+import { makeRoofGeometry } from './houseGeometry';
+import type { NavGrid } from '../../game/navigation';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -70,18 +94,20 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
   motionReduction: false,
 });
 
-/** A roof / upper-wall surface that fades for the cutaway (V20/V58). */
+/**
+ * A roof / upper-wall surface that fades for the cutaway (V20/V58). Each surface is tagged with the
+ * `buildingIndex` that owns it so ONLY the building the player currently occupies fades (per-building cutaway,
+ * V59) — neighbours stay opaque so the district reads solid. An upper-wall group also carries the shared
+ * outward horizontal normal of its panels so the DIRECTIONAL cutaway (V58) fades only the side(s) turned
+ * toward the camera; the far walls stay to read enclosure. `outwardNormal` is null for the roof.
+ */
 interface FadeSurface {
   readonly object: Object3D;
   readonly material: MeshStandardMaterial;
   readonly kind: 'roof' | 'upperWall';
-  /**
-   * For an upper-wall group: the shared outward horizontal normal of its panels (the directional cutaway
-   * fades it only when this normal turns toward the camera — T82/V58). Null for the roof (it occludes from
-   * directly above whenever the player is inside + the camera is looking in).
-   */
   readonly outwardNormal: VecXZ | null;
   readonly heightMeters: number;
+  readonly buildingIndex: number;
   opacity: number;
 }
 
@@ -112,6 +138,18 @@ export class BlockScene {
   private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
   private readonly wallPanelThickness = resolve(renderingConfig.wallPanelThicknessMeters, this.tierOf());
+  // T87 house render dims + deterministic variation params (drives believable varied + decayed houses, V26).
+  private readonly houseVar = resolveHouseVariation(this.tierOf());
+  private readonly clapboardSpacing = resolve(renderingConfig.houseClapboardSpacingMeters, this.tierOf());
+  private readonly ivyPatchMeters = resolve(renderingConfig.houseIvyPatchMeters, this.tierOf());
+  private readonly debrisMeters = resolve(renderingConfig.houseDebrisMeters, this.tierOf());
+  private readonly porchHeightMeters = resolve(renderingConfig.housePorchHeightMeters, this.tierOf());
+  private readonly chimneyMeters = resolve(renderingConfig.houseChimneyMeters, this.tierOf());
+  private readonly windowBoardedFraction = this.world.houseWindowBoardedFraction;
+  private readonly roofOverhang = this.world.houseRoofOverhangMeters;
+  private readonly houseDebrisMaxCount = this.world.houseDebrisMaxCount;
+  /** Soft cap on instanced ivy patches across the whole district (logged if hit). */
+  private readonly ivyInstanceCap = 4000;
   /** Tone-mapping operator + base exposure (B6) — applied to the renderer by the host each frame. */
   readonly toneMappingMode = resolve(postFXConfig.toneMappingMode, this.tierOf()) as ToneMappingMode;
   private readonly baseExposure = resolve(postFXConfig.baseExposure, this.tierOf());
@@ -128,6 +166,8 @@ export class BlockScene {
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
+  /** The building that owns the destructible §G section — kept lightly weathered + readable (set at build). */
+  private featureBuildingIndex = -1;
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -179,9 +219,12 @@ export class BlockScene {
     }
     this.scene.add(this.ambient, this.hemi, this.sun, this.sun.target);
 
+    this.featureBuildingIndex = this.computeFeatureBuildingIndex();
     this.buildGround();
+    this.buildGroundRects();
     this.buildWallsAndRoof();
     this.buildDoorsAndWindows();
+    this.buildProps();
     this.playerMesh = this.buildPlayer();
     this.scene.add(this.playerMesh);
     this.buildContactAo();
@@ -215,6 +258,14 @@ export class BlockScene {
     return g;
   }
 
+  /** Merge a batch of throwaway BoxGeometries into ONE tracked geometry (cuts per-cell wall draw calls). */
+  private mergeBoxes(label: string, boxes: BoxGeometry[]): BufferGeometry | null {
+    if (boxes.length === 0) return null;
+    const merged = mergeGeometries(boxes, false);
+    for (const b of boxes) b.dispose();
+    return merged ? this.geo(label, merged) : null;
+  }
+
   private worldExtent(): { width: number; depth: number } {
     return {
       width: this.runtime.scene.navGrid.width * this.navCellSize,
@@ -222,74 +273,104 @@ export class BlockScene {
     };
   }
 
+  /** Which building (if any) holds the destructible §G section cells — kept readable (less decay). */
+  private computeFeatureBuildingIndex(): number {
+    const ts = this.runtime.scene;
+    const buildings = buildingsOf(ts);
+    for (let z = 0; z < ts.wall.sizeZ; z++) {
+      const cell = ts.navCellForStructuralCell(ts.wall.packCell(0, 0, z));
+      for (let i = 0; i < buildings.length; i++) {
+        const b = buildings[i]!.bounds;
+        if (cell.cx >= b.minCx && cell.cx <= b.maxCx && cell.cy >= b.minCy && cell.cy <= b.maxCy) return i;
+      }
+    }
+    return -1;
+  }
+
   private buildGround(): void {
     const { width, depth } = this.worldExtent();
     const margin = this.navCellSize * 4;
+    // Base ground = grass/dirt verge under the whole district; the suburban paint (asphalt street, concrete
+    // sidewalk, grass yards) is layered on top by buildGroundRects.
     const ground = new Mesh(
       this.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
-      this.mat('ground', { color: 0x23262a, roughness: 0.95 }),
+      this.mat('ground', { color: 0x2a3120, roughness: 0.98 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(width / 2, 0, depth / 2);
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    // Interior floor slab over the building footprint, slightly raised + lighter so rooms read.
-    const b = this.runtime.scene.buildingBounds;
-    const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
-    const fd = (b.maxCy - b.minCy + 1) * this.navCellSize;
-    const floor = new Mesh(
-      this.geo('floor.geo', new PlaneGeometry(fw, fd)),
-      this.mat('floor', { color: 0x3a3d38, roughness: 0.9 }),
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, this.world.floorThicknessMeters, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
-    floor.receiveShadow = true;
-    this.scene.add(floor);
+    // Per-building interior floor slab — slightly raised + lighter so each house's rooms read (multi-building).
+    const floorMat = this.mat('floor', { color: 0x3a3d38, roughness: 0.9 });
+    buildingsOf(this.runtime.scene).forEach((bld, i) => {
+      const b = bld.bounds;
+      const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
+      const fd = (b.maxCy - b.minCy + 1) * this.navCellSize;
+      const floor = new Mesh(this.geo(`floor.geo.${i}`, new PlaneGeometry(fw, fd)), floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(((b.minCx + b.maxCx + 1) / 2) * this.navCellSize, this.world.floorThicknessMeters, ((b.minCy + b.maxCy + 1) / 2) * this.navCellSize);
+      floor.receiveShadow = true;
+      this.scene.add(floor);
+    });
+  }
+
+  /** Suburban ground paint (T87): asphalt street, concrete sidewalk, grass yards as flat coloured quads
+   *  layered by a small per-kind Y offset (highest kind wins on overlap). Pure dressing; no nav effect. */
+  private buildGroundRects(): void {
+    const rects = this.runtime.scene.groundRects;
+    if (!rects || rects.length === 0) return;
+    const cs = this.navCellSize;
+    const color: Record<GroundKind, number> = { asphalt: 0x26282c, sidewalk: 0x6a6c6e, grass: 0x3b4a2c };
+    const yOf: Record<GroundKind, number> = { asphalt: 0.012, sidewalk: 0.02, grass: 0.028 };
+    const mats: Record<GroundKind, MeshStandardMaterial> = {
+      asphalt: this.mat('ground.asphalt', { color: color.asphalt, roughness: 0.96 }),
+      sidewalk: this.mat('ground.sidewalk', { color: color.sidewalk, roughness: 0.9 }),
+      grass: this.mat('ground.grass', { color: color.grass, roughness: 1 }),
+    };
+    const group = new Group();
+    rects.forEach((r, i) => {
+      const w = (r.rect.maxCx - r.rect.minCx + 1) * cs;
+      const d = (r.rect.maxCy - r.rect.minCy + 1) * cs;
+      const m = new Mesh(this.geo(`groundRect.${i}`, new PlaneGeometry(w, d)), mats[r.kind]);
+      m.rotation.x = -Math.PI / 2;
+      m.position.set(((r.rect.minCx + r.rect.maxCx + 1) / 2) * cs, yOf[r.kind], ((r.rect.minCy + r.rect.maxCy + 1) / 2) * cs);
+      m.receiveShadow = true;
+      group.add(m);
+    });
+    this.scene.add(group);
+  }
+
+  /** A deterministic, replay-stable HouseStyle for a building (V26): seeded off the building's STABLE footprint
+   *  so the same lot always authors the same house without widening the frozen scene contract. The §G feature
+   *  building is kept lightly weathered + un-collapsed so its interior stays readable + navigable. */
+  private styleFor(bld: BuildingFootprint, bi: number): HouseStyle {
+    const b = bld.bounds;
+    const seed = (Math.imul(b.minCx + 1, 73856093) ^ Math.imul(b.minCy + 1, 19349663) ^ Math.imul(bi + 1, 83492791)) | 0;
+    const base = authorHouseStyle(seed, this.houseVar);
+    const storeys = Math.max(1, bld.storeys ?? base.storeys);
+    if (bi === this.featureBuildingIndex) {
+      // keep the §G house legible: clean tint, light damage, no roof collapse.
+      const damage = Math.min(base.damage, this.houseVar.roofHoleDamageThreshold * 0.6);
+      return { ...base, storeys, wallColor: base.wallColorClean, damage, ivy: 0, collapsed: false };
+    }
+    return { ...base, storeys };
   }
 
   private buildWallsAndRoof(): void {
     const ts = this.runtime.scene;
     const grid = ts.navGrid;
-    const wallH = this.world.buildingWallHeightMeters;
-    const baseH = Math.min(this.visibility.baseHeightMeters, wallH);
-    const upperH = Math.max(0, wallH - baseH);
+    const buildings = buildingsOf(ts);
     const th = Math.min(this.wallPanelThickness, this.navCellSize); // thin shell, never wider than the cell
+    const baseHeightCap = this.visibility.baseHeightMeters;
 
-    // B3: walls are THIN oriented shells on exposed cell edges (not cell-filling blocks). Two geometries per
-    // band: one for edges running along X (thickness in Z), one for edges along Z (thickness in X).
-    const baseGeoX = this.geo('wallBaseX.geo', new BoxGeometry(this.navCellSize, baseH, th));
-    const baseGeoZ = this.geo('wallBaseZ.geo', new BoxGeometry(th, baseH, this.navCellSize));
-    const upperGeoX = upperH > 0 ? this.geo('wallUpperX.geo', new BoxGeometry(this.navCellSize, upperH, th)) : null;
-    const upperGeoZ = upperH > 0 ? this.geo('wallUpperZ.geo', new BoxGeometry(th, upperH, this.navCellSize)) : null;
-    const baseMat = this.mat('wallBase', { color: 0x6b6256, roughness: 0.85 });
-    const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 }); // the destructible wall, tinted
+    // destructible section keeps its distinct tinted, hideable material (never per-house tinted).
+    const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 });
 
-    // B3: bias the fading upper-wall faces back + lift them off the retained base so reveal faces never
-    // z-fight the coplanar base top / ground (cutaway). Decision is pure (resolveCutawayDepthOffset).
+    // B3: bias fading upper-wall + roof faces back + lift them off the retained base so reveal faces never
+    // z-fight the coplanar base top / ground (cutaway). Decisions are pure (resolveCutawayDepthOffset).
     const upperOffset = resolveCutawayDepthOffset('upperWall', this.cutawayDepth);
-    const upperBottomY = baseH + upperOffset.verticalInsetMeters;
-
-    // T82/V58 DIRECTIONAL cutaway: bucket non-section upper walls by their cardinal OUTWARD normal so each
-    // side fades INDEPENDENTLY — only the side(s) turned toward the camera fade; the far walls stay opaque so
-    // the room never collapses to a roofless open box. One shared transparent material + group per direction.
-    const bb = ts.buildingBounds;
-    const centerX = ((bb.minCx + bb.maxCx + 1) / 2) * this.navCellSize;
-    const centerZ = ((bb.minCy + bb.maxCy + 1) / 2) * this.navCellSize;
-    const upperFadeGroups = new Map<string, { group: Group; material: MeshStandardMaterial; normal: VecXZ }>();
-    const upperFadeGroup = (normal: VecXZ): { group: Group; material: MeshStandardMaterial; normal: VecXZ } => {
-      const key = `${normal.x},${normal.z}`;
-      let g = upperFadeGroups.get(key);
-      if (!g) {
-        const m = this.mat(`wallUpper.${key}`, { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
-        m.polygonOffset = upperOffset.polygonOffset;
-        m.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
-        m.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
-        g = { group: new Group(), material: m, normal };
-        upperFadeGroups.set(key, g);
-      }
-      return g;
-    };
+    const roofOffset = resolveCutawayDepthOffset('roof', this.cutawayDepth);
 
     // structural-section nav cells get distinct, hideable meshes; everything else is a plain wall.
     const sectionByNav = new Map<number, number>(); // navIndex -> structuralCell
@@ -298,8 +379,6 @@ export class BlockScene {
       const cell = ts.navCellForStructuralCell(sc);
       sectionByNav.set(grid.index(cell.cx, cell.cy), sc);
     }
-
-    const wallsGroup = new Group();
 
     // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
     const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
@@ -313,84 +392,133 @@ export class BlockScene {
       return out;
     };
 
-    for (let cy = 0; cy < grid.height; cy++) {
-      for (let cx = 0; cx < grid.width; cx++) {
-        const idx = grid.index(cx, cy);
-        if (!grid.isBlocked(idx)) continue;
-        const wx = (cx + 0.5) * this.navCellSize;
-        const wz = (cy + 0.5) * this.navCellSize;
-        const sc = sectionByNav.get(idx);
-        const exposed = edges(cx, cy);
-        // A fully-enclosed wall cell would have no exposed edge — emit a single thin core panel so it still
-        // reads (and, for a section cell, still has a hideable mesh for breach). Walls border open space.
-        const faces = exposed.length > 0 ? exposed : [{ dx: 0, dz: 1, along: 'x' as const }];
-        // T70/B12: a 1-cell-thick wall is open on BOTH sides — emitting a panel per exposed face produced
-        // TWO parallel walls a whole cell apart (the "doubled wall + gap"). Emit ONE panel per RUN
-        // orientation, CENTRED on the cell: an X-run panel when a north/south face is exposed, a Z-run panel
-        // when an east/west face is exposed (a corner cell gets both → an L). No doubling, no gap.
-        const orientations: ('x' | 'z')[] = [];
-        if (faces.some((f) => f.along === 'x')) orientations.push('x');
-        if (faces.some((f) => f.along === 'z')) orientations.push('z');
-        if (orientations.length === 0) orientations.push('x');
-        const sectionObjs: Object3D[] = [];
+    const wallsGroup = new Group();
+    this.scene.add(wallsGroup);
+    const ivyMatrices: Matrix4[] = []; // accrued across every house → ONE instanced ivy mesh (perf, V2-style)
+    const debrisMatrices: Matrix4[] = [];
+    const debrisColors: Color[] = [];
 
-        for (const along of orientations) {
-          const baseGeo = along === 'x' ? baseGeoX : baseGeoZ;
-          const upperGeo = along === 'x' ? upperGeoX : upperGeoZ;
+    buildings.forEach((bld, bi) => {
+      const style = this.styleFor(bld, bi);
+      const wallH = this.world.buildingWallHeightMeters * Math.max(1, style.storeys);
+      const baseH = Math.min(baseHeightCap, wallH);
+      const upperH = Math.max(0, wallH - baseH);
+      const upperBottomY = baseH + upperOffset.verticalInsetMeters;
 
-          const base = new Mesh(baseGeo, sc !== undefined ? sectionMat : baseMat);
-          base.position.set(wx, baseH / 2, wz); // centred on the cell — one wall line, not two opposite faces
-          base.castShadow = true;
-          base.receiveShadow = true;
-          wallsGroup.add(base);
-          if (sc !== undefined) sectionObjs.push(base);
+      const b = bld.bounds;
+      const centerX = ((b.minCx + b.maxCx + 1) / 2) * this.navCellSize;
+      const centerZ = ((b.minCy + b.maxCy + 1) / 2) * this.navCellSize;
 
-          if (upperGeo) {
+      // per-house clapboard tint (weathered); each building owns its base + per-direction upper + roof
+      // materials so the cutaway fades ONLY this house and neighbours keep their colour (per-building, V59).
+      const baseMat = this.mat(`wallBase.${bi}`, { color: style.wallColor, roughness: 0.92 });
+      const baseParts: BoxGeometry[] = [];
+      // T82/V58 DIRECTIONAL cutaway: bucket non-section upper walls by their cardinal OUTWARD normal so each
+      // side fades INDEPENDENTLY — only the side(s) turned toward the camera fade. One merged mesh + one
+      // transparent material per (building, direction).
+      const upperByDir = new Map<string, { boxes: BoxGeometry[]; normal: VecXZ }>();
+      const upperDir = (normal: VecXZ): { boxes: BoxGeometry[]; normal: VecXZ } => {
+        const key = `${normal.x},${normal.z}`;
+        let g = upperByDir.get(key);
+        if (!g) {
+          g = { boxes: [], normal };
+          upperByDir.set(key, g);
+        }
+        return g;
+      };
+
+      for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+        for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+          const idx = grid.index(cx, cy);
+          if (!grid.isBlocked(idx)) continue;
+          const wx = (cx + 0.5) * this.navCellSize;
+          const wz = (cy + 0.5) * this.navCellSize;
+          const sc = sectionByNav.get(idx);
+          const faces = edges(cx, cy);
+          // T70/B12: emit ONE panel per RUN orientation, CENTRED on the cell (X-run when a N/S face is exposed,
+          // Z-run when an E/W face is exposed; a corner cell gets both → an L). No doubled wall, no gap.
+          const orientations: ('x' | 'z')[] = [];
+          if (faces.some((f) => f.along === 'x')) orientations.push('x');
+          if (faces.some((f) => f.along === 'z')) orientations.push('z');
+          if (orientations.length === 0) orientations.push('x');
+          const sectionObjs: Object3D[] = [];
+
+          for (const along of orientations) {
             if (sc !== undefined) {
-              // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
-              const upper = new Mesh(upperGeo, sectionMat);
-              upper.position.set(wx, upperBottomY + upperH / 2, wz);
-              upper.castShadow = true;
-              wallsGroup.add(upper);
-              sectionObjs.push(upper);
+              // Destructible section: individual hideable meshes that stay opaque (do NOT fade with cutaway).
+              const baseGeo = this.geo(`section.base.${bi}.${cx}.${cy}.${along}`, along === 'x'
+                ? new BoxGeometry(this.navCellSize, baseH, th)
+                : new BoxGeometry(th, baseH, this.navCellSize));
+              const base = new Mesh(baseGeo, sectionMat);
+              base.position.set(wx, baseH / 2, wz);
+              base.castShadow = true;
+              base.receiveShadow = true;
+              wallsGroup.add(base);
+              sectionObjs.push(base);
+              if (upperH > 0) {
+                const upperGeo = this.geo(`section.upper.${bi}.${cx}.${cy}.${along}`, along === 'x'
+                  ? new BoxGeometry(this.navCellSize, upperH, th)
+                  : new BoxGeometry(th, upperH, this.navCellSize));
+                const upper = new Mesh(upperGeo, sectionMat);
+                upper.position.set(wx, upperBottomY + upperH / 2, wz);
+                upper.castShadow = true;
+                wallsGroup.add(upper);
+                sectionObjs.push(upper);
+              }
             } else {
-              // Directional cutaway: route into the fade group for this panel's outward normal (T82/V58).
-              const fade = upperFadeGroup(this.upperWallOutwardNormal(along, faces, wx, wz, centerX, centerZ));
-              const upper = new Mesh(upperGeo, fade.material);
-              upper.position.set(wx, upperBottomY + upperH / 2, wz);
-              upper.castShadow = true;
-              upper.renderOrder = upperOffset.renderOrder;
-              fade.group.add(upper);
+              // Plain wall: accrue into the merged base batch + the directional upper batch for this house.
+              const baseBox = along === 'x'
+                ? new BoxGeometry(this.navCellSize, baseH, th)
+                : new BoxGeometry(th, baseH, this.navCellSize);
+              baseBox.translate(wx, baseH / 2, wz);
+              baseParts.push(baseBox);
+              if (upperH > 0) {
+                const upperBox = along === 'x'
+                  ? new BoxGeometry(this.navCellSize, upperH, th)
+                  : new BoxGeometry(th, upperH, this.navCellSize);
+                upperBox.translate(wx, upperBottomY + upperH / 2, wz);
+                upperDir(this.upperWallOutwardNormal(along, faces, wx, wz, centerX, centerZ)).boxes.push(upperBox);
+              }
             }
           }
+          if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
         }
-        if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
       }
-    }
-    this.scene.add(wallsGroup);
-    if (upperH > 0) {
-      // One fade surface per outward-normal direction — the per-frame cutaway fades each independently (V58).
-      for (const g of upperFadeGroups.values()) {
-        this.scene.add(g.group);
-        this.fadeSurfaces.push({ object: g.group, material: g.material, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, opacity: 1 });
-      }
-    }
 
-    // Roof over the building interior — the primary cutaway occluder (fades when the player is inside).
-    const b = ts.buildingBounds;
-    const rw = (b.maxCx - b.minCx + 1) * this.navCellSize;
-    const rd = (b.maxCy - b.minCy + 1) * this.navCellSize;
-    const roofMat = this.mat('roof', { color: 0x4c4a44, roughness: 0.9, transparent: true, opacity: 1 });
-    const roofOffset = resolveCutawayDepthOffset('roof', this.cutawayDepth);
-    roofMat.polygonOffset = roofOffset.polygonOffset;
-    roofMat.polygonOffsetFactor = roofOffset.polygonOffsetFactor;
-    roofMat.polygonOffsetUnits = roofOffset.polygonOffsetUnits;
-    const roof = new Mesh(this.geo('roof.geo', new PlaneGeometry(rw, rd)), roofMat);
-    roof.rotation.x = -Math.PI / 2;
-    roof.renderOrder = roofOffset.renderOrder;
-    roof.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, wallH, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
-    this.scene.add(roof);
-    this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, opacity: 1 });
+      // one merged base-wall mesh for the whole house (section cells excluded — they stay individual).
+      const baseGeoMerged = this.mergeBoxes(`wallBase.geo.${bi}`, baseParts);
+      if (baseGeoMerged) {
+        const baseWall = new Mesh(baseGeoMerged, baseMat);
+        baseWall.castShadow = true;
+        baseWall.receiveShadow = true;
+        wallsGroup.add(baseWall);
+      }
+      // one merged upper-wall mesh per direction → the per-side, per-building cutaway fade surface (V58/V59).
+      if (upperH > 0) {
+        for (const [key, g] of upperByDir) {
+          const upperGeoMerged = this.mergeBoxes(`wallUpper.geo.${bi}.${key}`, g.boxes);
+          if (!upperGeoMerged) continue;
+          const upperMat = this.mat(`wallUpper.${bi}.${key}`, { color: style.wallColor, roughness: 0.92, transparent: true, opacity: 1 });
+          upperMat.polygonOffset = upperOffset.polygonOffset;
+          upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+          upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+          const upperWall = new Mesh(upperGeoMerged, upperMat);
+          upperWall.castShadow = true;
+          upperWall.renderOrder = upperOffset.renderOrder;
+          this.scene.add(upperWall);
+          this.fadeSurfaces.push({ object: upperWall, material: upperMat, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+        }
+      }
+
+      this.buildClapboard(b, bi, wallH, style, wallsGroup);
+      this.buildRoofAssembly(b, bi, wallH, style, roofOffset);
+      this.buildPorch(b, bi, style);
+      this.collectIvy(b, style, grid, ivyMatrices);
+      this.collectDebris(b, style, debrisMatrices, debrisColors);
+    });
+
+    this.buildIvy(ivyMatrices);
+    this.buildDebris(debrisMatrices, debrisColors);
   }
 
   /**
@@ -417,6 +545,365 @@ export class BlockScene {
     const east = faces.some((f) => f.along === 'z' && f.dx > 0);
     const sx = west && !east ? -1 : east && !west ? 1 : wx < centerX ? -1 : 1;
     return { x: sx, z: 0 };
+  }
+
+  /** Horizontal clapboard/lap-siding read: a stack of thin proud trim lines around the house perimeter, plus
+   *  a darker base skirt + an eave fascia + corner boards. Merged into ONE mesh per house (zero extra draws). */
+  private buildClapboard(b: CellRect, bi: number, wallH: number, style: HouseStyle, parent: Group): void {
+    const cs = this.navCellSize;
+    const minX = b.minCx * cs;
+    const maxX = (b.maxCx + 1) * cs;
+    const minZ = b.minCy * cs;
+    const maxZ = (b.maxCy + 1) * cs;
+    const rw = maxX - minX;
+    const rd = maxZ - minZ;
+    const cxw = (minX + maxX) / 2;
+    const czw = (minZ + maxZ) / 2;
+    const proud = 0.04; // sit just outside the wall plane so the lines read as siding shadow lines
+    const lineH = 0.05;
+    const lineT = 0.03;
+    const parts: BoxGeometry[] = [];
+    const addSide = (geoW: number, geoH: number, geoD: number, x: number, y: number, z: number): void => {
+      const box = new BoxGeometry(geoW, geoH, geoD);
+      box.translate(x, y, z);
+      parts.push(box);
+    };
+    // skirt (thicker board at the base) + fascia (under the eave) + evenly-spaced lap lines between.
+    const lines = Math.max(2, Math.round(wallH / this.clapboardSpacing));
+    for (let k = 0; k <= lines; k++) {
+      const y = (k / lines) * (wallH - 0.1) + 0.05;
+      const h = k === 0 ? 0.18 : k === lines ? 0.12 : lineH; // fat skirt + fascia
+      addSide(rw + proud * 2, h, lineT, cxw, y, minZ - proud);
+      addSide(rw + proud * 2, h, lineT, cxw, y, maxZ + proud);
+      addSide(lineT, h, rd + proud * 2, minX - proud, y, czw);
+      addSide(lineT, h, rd + proud * 2, maxX + proud, y, czw);
+    }
+    // corner boards (vertical trim).
+    for (const [x, z] of [[minX, minZ], [maxX, minZ], [maxX, maxZ], [minX, maxZ]] as const) {
+      const c = new BoxGeometry(lineT * 1.6, wallH, lineT * 1.6);
+      c.translate(x, wallH / 2, z);
+      parts.push(c);
+    }
+    const merged = this.mergeBoxes(`clapboard.${bi}`, parts);
+    if (!merged) return;
+    const trim = new Mesh(merged, this.mat(`trim.${bi}`, { color: style.trimColor, roughness: 0.85 }));
+    trim.castShadow = true;
+    parent.add(trim);
+  }
+
+  /** Shaped roof (gable / hip / flat) + chimney + decay holes, grouped so the whole assembly is the building's
+   *  cutaway fade surface (V20). A collapsed house sags its roof. */
+  private buildRoofAssembly(
+    b: CellRect,
+    bi: number,
+    wallH: number,
+    style: HouseStyle,
+    roofOffset: ReturnType<typeof resolveCutawayDepthOffset>,
+  ): void {
+    const cs = this.navCellSize;
+    const rw = (b.maxCx - b.minCx + 1) * cs;
+    const rd = (b.maxCy - b.minCy + 1) * cs;
+    const cxw = ((b.minCx + b.maxCx + 1) / 2) * cs;
+    const czw = ((b.minCy + b.maxCy + 1) / 2) * cs;
+
+    const roofMat = this.mat(`roof.${bi}`, { color: style.roofColor, roughness: 0.95, transparent: true, opacity: 1, side: DoubleSide });
+    roofMat.polygonOffset = roofOffset.polygonOffset;
+    roofMat.polygonOffsetFactor = roofOffset.polygonOffsetFactor;
+    roofMat.polygonOffsetUnits = roofOffset.polygonOffsetUnits;
+
+    const group = new Group();
+    const roofGeo = this.geo(`roof.geo.${bi}`, makeRoofGeometry(style.roofShape, rw, rd, style.roofPitchMeters, this.roofOverhang, style.ridgeAlongX));
+    const roof = new Mesh(roofGeo, roofMat);
+    roof.renderOrder = roofOffset.renderOrder;
+    roof.castShadow = true;
+    group.add(roof);
+
+    // roof decay — caved-in / missing-shingle patches near the ridge (dark voids reading as holes).
+    const holes = roofHoles(style, this.houseVar.roofHoleDamageThreshold, this.houseVar.roofHoleMaxCount);
+    if (holes.length > 0) {
+      const holeMat = this.mat(`roofHole.${bi}`, { color: 0x0d0c0a, roughness: 1, side: DoubleSide });
+      const ridgeLen = style.roofShape === 'gable' ? (style.ridgeAlongX ? rw : rd) : Math.max(rw, rd);
+      const ridgeAlongX = style.roofShape === 'gable' ? style.ridgeAlongX : rw >= rd;
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h]!;
+        const along = (hole.t - 0.5) * ridgeLen;
+        const size = Math.min(hole.radiusMeters * 2, Math.min(rw, rd) * 0.8);
+        const box = new Mesh(this.geo(`roofHole.geo.${bi}.${h}`, new BoxGeometry(size, 0.14, size)), holeMat);
+        const y = Math.max(0.2, style.roofPitchMeters - 0.25);
+        box.position.set(ridgeAlongX ? along : 0, y, ridgeAlongX ? 0 : along);
+        group.add(box);
+      }
+    }
+
+    if (style.hasChimney) {
+      const c = this.chimneyMeters;
+      const chimneyH = style.roofPitchMeters + this.world.buildingWallHeightMeters * 0.5;
+      const chimney = new Mesh(this.geo(`chimney.geo.${bi}`, new BoxGeometry(c, chimneyH, c)), this.mat(`chimney.${bi}`, { color: 0x6e4a3a, roughness: 0.95 }));
+      const sx = (hash01(style.seed, 71) - 0.5) * (rw - c - 0.6);
+      const sz = (hash01(style.seed, 72) - 0.5) * (rd - c - 0.6);
+      chimney.position.set(sx, chimneyH / 2, sz);
+      chimney.castShadow = true;
+      group.add(chimney);
+    }
+
+    group.position.set(cxw, wallH, czw);
+    if (style.collapsed) group.rotation.z = (hash01(style.seed, 80) < 0.5 ? 1 : -1) * 0.14; // sagging caved roof
+    this.scene.add(group);
+    this.fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+  }
+
+  /** A covered front porch at the house's street door: deck + posts + a low shed roof. Always visible (it sits
+   *  outside the footprint, so it is not a cutaway occluder). */
+  private buildPorch(b: CellRect, bi: number, style: HouseStyle): void {
+    if (!style.hasPorch) return;
+    const cs = this.navCellSize;
+    const door = this.runtime.scene.exitCells.find((e) => e.cx >= b.minCx && e.cx <= b.maxCx && e.cy >= b.minCy && e.cy <= b.maxCy);
+    if (!door) return;
+    const depth = Math.min(this.world.housePorchDepthMeters, cs * 1.2); // porch run out from the wall
+    const width = cs * 2.2;
+    const dx = (door.cx + 0.5) * cs;
+    const southZ = (b.maxCy + 1) * cs; // door is on the south perimeter
+    const outZ = southZ + depth / 2;
+    const mat = this.mat(`porch.${bi}`, { color: style.trimColor, roughness: 0.9 });
+    const group = new Group();
+    // deck
+    const deck = new Mesh(this.geo(`porch.deck.${bi}`, new BoxGeometry(width, 0.16, depth)), mat);
+    deck.position.set(dx, 0.08, outZ);
+    deck.receiveShadow = true;
+    group.add(deck);
+    // roof
+    const roofY = this.porchHeightMeters;
+    const proof = new Mesh(this.geo(`porch.roof.${bi}`, new BoxGeometry(width + 0.3, 0.12, depth + 0.2)), mat);
+    proof.position.set(dx, roofY, outZ);
+    proof.castShadow = true;
+    group.add(proof);
+    // posts at the outer corners
+    const postGeo = this.geo(`porch.post.${bi}`, new BoxGeometry(0.14, roofY, 0.14));
+    for (const ox of [-width / 2 + 0.1, width / 2 - 0.1]) {
+      const post = new Mesh(postGeo, mat);
+      post.position.set(dx + ox, roofY / 2, southZ + depth - 0.15);
+      post.castShadow = true;
+      group.add(post);
+    }
+    this.scene.add(group);
+  }
+
+  /** Accrue per-house ivy/overgrowth instances climbing the EXTERIOR wall faces, scaled by style.ivy. The
+   *  caller flushes one shared instanced mesh for the whole district. */
+  private collectIvy(b: CellRect, style: HouseStyle, grid: NavGrid, out: Matrix4[]): void {
+    if (style.ivy <= 0) return;
+    const cs = this.navCellSize;
+    const wallH = this.world.buildingWallHeightMeters * Math.max(1, style.storeys);
+    const reach = style.ivy * wallH;
+    const patches = Math.max(1, Math.round(reach / this.ivyPatchMeters));
+    const q = new Quaternion();
+    const s = new Vector3(1, 1, 1);
+    const pos = new Vector3();
+    for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+      for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+        if (cx !== b.minCx && cx !== b.maxCx && cy !== b.minCy && cy !== b.maxCy) continue; // perimeter only
+        const idx = grid.index(cx, cy);
+        if (!grid.isBlocked(idx)) continue;
+        const cellRoll = hash01(style.seed, 5100 + cx * 31 + cy * 7);
+        if (cellRoll > style.ivy) continue; // denser ivy on more overgrown houses
+        // outward face normal: pick the first open neighbour direction.
+        let nx = 0;
+        let nz = 0;
+        if (cx === b.minCx) nx = -1;
+        else if (cx === b.maxCx) nx = 1;
+        else if (cy === b.minCy) nz = -1;
+        else nz = 1;
+        const wx = (cx + 0.5) * cs + nx * (cs / 2);
+        const wz = (cy + 0.5) * cs + nz * (cs / 2);
+        for (let p = 0; p < patches; p++) {
+          if (out.length >= this.ivyInstanceCap) {
+            console.warn(`[BlockScene] ivy instance cap (${this.ivyInstanceCap}) hit — capping district overgrowth`);
+            return;
+          }
+          const y = (p + 0.5) * this.ivyPatchMeters * 0.85;
+          pos.set(wx + nx * 0.06, y, wz + nz * 0.06);
+          out.push(new Matrix4().compose(pos, q, s));
+        }
+      }
+    }
+  }
+
+  /** One shared instanced ivy mesh for the whole district (flattened green patches; 1 draw call). */
+  private buildIvy(matrices: Matrix4[]): void {
+    if (matrices.length === 0) return;
+    const geo = this.geo('ivy.geo', new IcosahedronGeometry(this.ivyPatchMeters * 0.5, 0));
+    geo.scale(1, 1, 0.4); // flattened against the wall
+    const mat = this.mat('ivy', { color: 0x35501f, roughness: 1 });
+    const mesh = new InstancedMesh(geo, mat, matrices.length);
+    this.registry.track(mesh, 'buffer', 'block.ivy.instanced');
+    for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]!);
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+  }
+
+  /** Accrue base debris/rubble clumps strewn around a ruined house's perimeter, count scaled by damage. */
+  private collectDebris(b: CellRect, style: HouseStyle, out: Matrix4[], colors: Color[]): void {
+    const count = Math.round(style.damage * this.houseDebrisMaxCount);
+    if (count <= 0) return;
+    const cs = this.navCellSize;
+    const minX = b.minCx * cs;
+    const maxX = (b.maxCx + 1) * cs;
+    const minZ = b.minCy * cs;
+    const maxZ = (b.maxCy + 1) * cs;
+    const _p = new Vector3();
+    const _q = new Quaternion();
+    const _s = new Vector3();
+    const _e = new Euler();
+    for (let i = 0; i < count; i++) {
+      const side = Math.floor(hash01(style.seed, 6100 + i * 5) * 4);
+      const along = hash01(style.seed, 6101 + i * 5);
+      const out2 = 0.3 + hash01(style.seed, 6102 + i * 5) * 0.6; // distance just outside the wall
+      let x: number;
+      let z: number;
+      if (side === 0) { x = minX + along * (maxX - minX); z = minZ - out2; }
+      else if (side === 1) { x = minX + along * (maxX - minX); z = maxZ + out2; }
+      else if (side === 2) { x = minX - out2; z = minZ + along * (maxZ - minZ); }
+      else { x = maxX + out2; z = minZ + along * (maxZ - minZ); }
+      const sc = 0.55 + hash01(style.seed, 6103 + i * 5) * 0.7;
+      _q.setFromEuler(_e.set(0, hash01(style.seed, 6104 + i * 5) * Math.PI, 0));
+      out.push(new Matrix4().compose(_p.set(x, this.debrisMeters * 0.35 * sc, z), _q, _s.set(sc, sc * 0.7, sc)));
+      colors.push(new Color(0x4a463f).offsetHSL(0, 0, (hash01(style.seed, 6105 + i * 5) - 0.5) * 0.14));
+    }
+  }
+
+  /** One shared instanced debris mesh for the whole district (faceted rubble lumps; 1 draw call). */
+  private buildDebris(matrices: Matrix4[], colors: Color[]): void {
+    if (matrices.length === 0) return;
+    const geo = this.geo('debris.geo', new IcosahedronGeometry(this.debrisMeters * 0.6, 0));
+    const mat = this.mat('debris', { color: 0xffffff, roughness: 1 });
+    const mesh = new InstancedMesh(geo, mat, matrices.length);
+    this.registry.track(mesh, 'buffer', 'block.debris.instanced');
+    for (let i = 0; i < matrices.length; i++) {
+      mesh.setMatrixAt(i, matrices[i]!);
+      mesh.setColorAt(i, colors[i]!);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    this.scene.add(mesh);
+  }
+
+  /** Decorative district dressing (T87): picket fences in varied disarray (missing spans → gaps, broken →
+   *  partial height, leaning), abandoned cars, tires, bushes, and live + dead trees. EVERY repeated prop is
+   *  drawn as ONE InstancedMesh per batch so the whole district stays draw-call-cheap (≈1 call/kind). The
+   *  per-span fence/tree decay is derived deterministically from the prop's cell (V26) — no contract change. */
+  private buildProps(): void {
+    const props = this.runtime.scene.props;
+    if (!props || props.length === 0) return;
+    const cs = this.navCellSize;
+    const group = new Group();
+
+    const B = {
+      fence: [] as Matrix4[],
+      tire: [] as Matrix4[],
+      bush: [] as Matrix4[],
+      trunkLive: [] as Matrix4[],
+      foliage: [] as Matrix4[],
+      trunkDead: [] as Matrix4[],
+      branch: [] as Matrix4[],
+      carBody: [] as Matrix4[],
+      carCabin: [] as Matrix4[],
+    };
+    const bushColors: Color[] = [];
+
+    const _p = new Vector3();
+    const _q = new Quaternion();
+    const _s = new Vector3();
+    const _e = new Euler();
+    const mk = (x: number, y: number, z: number, rotY: number, tiltX: number, sx: number, sy: number, sz: number): Matrix4 =>
+      new Matrix4().compose(_p.set(x, y, z), _q.setFromEuler(_e.set(tiltX, rotY, 0)), _s.set(sx, sy, sz));
+
+    for (const p of props) {
+      const rot = p.rot ?? 0;
+      const variant = p.variant ?? 0;
+      const x = (p.cx + 0.5) * cs;
+      const z = (p.cy + 0.5) * cs;
+      const seed = (Math.imul(p.cx + 1, 73856093) ^ Math.imul(p.cy + 1, 19349663)) | 0;
+      switch (p.kind) {
+        case 'fence': {
+          if (hash01(seed, 5000) < this.world.fenceMissingChance) break; // missing span → a gap in the run
+          const broken = hash01(seed, 5001) < this.world.fenceBrokenChance;
+          const tilt = (hash01(seed, 5002) - 0.5) * 2 * this.world.fenceLeanMaxRadians;
+          const sy = broken ? 0.55 : 1;
+          B.fence.push(mk(x, 0.5 * sy, z, rot, tilt, 1, sy, 1));
+          break;
+        }
+        case 'tire':
+          B.tire.push(mk(x, 0.19, z, rot + variant, 0, 1, 1, 1));
+          break;
+        case 'bush': {
+          const s = 0.8 + variant * 0.25;
+          B.bush.push(mk(x, 0.5 * s, z, rot, 0, s, s * 0.8, s));
+          bushColors.push(new Color(0x33491f).offsetHSL(0, 0, (hash01(seed, 1) - 0.5) * 0.12));
+          break;
+        }
+        case 'tree': {
+          const s = 1 + variant * 0.3;
+          if (hash01(seed, 22) < this.world.treeDeadChance) {
+            const tilt = (hash01(seed, 24) - 0.5) * 0.5;
+            B.trunkDead.push(mk(x, 1.1, z, 0, tilt, 1, 1, 1));
+            for (let br = 0; br < 3; br++) {
+              const ang = hash01(seed, 10 + br) * Math.PI * 2;
+              B.branch.push(mk(x, 1.9 + br * 0.3, z, ang, 0.7 + tilt, 1, 1, 1));
+            }
+          } else {
+            B.trunkLive.push(mk(x, 1.1, z, 0, 0, 1, 1, 1));
+            B.foliage.push(mk(x, 2.6, z, hash01(seed, 7) * Math.PI, 0, s, s, s));
+          }
+          break;
+        }
+        case 'car': {
+          B.carBody.push(mk(x, 0.55, z, rot, 0, 1, 1, 1));
+          B.carCabin.push(mk(x, 1.3, z, rot, 0, 1, 1, 1));
+          break;
+        }
+      }
+    }
+
+    const flush = (label: string, geo: BufferGeometry, mat: MeshStandardMaterial, mats: Matrix4[], colors?: Color[]): void => {
+      if (mats.length === 0) return;
+      const mesh = new InstancedMesh(geo, mat, mats.length);
+      this.registry.track(mesh, 'buffer', `block.prop.${label}.instanced`);
+      for (let i = 0; i < mats.length; i++) mesh.setMatrixAt(i, mats[i]!);
+      if (colors) {
+        for (let i = 0; i < colors.length; i++) mesh.setColorAt(i, colors[i]!);
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    };
+
+    // shared geometries (length along X for the fence; tire baked flat) + weathered materials.
+    const fenceGeo = this.geo('prop.fence.geo', new BoxGeometry(cs * 0.92, 1.0, 0.08));
+    const tireGeo = this.geo('prop.tire.geo', new CylinderGeometry(0.34, 0.34, 0.38, 12).rotateX(Math.PI / 2));
+    const bushGeo = this.geo('prop.bush.geo', new IcosahedronGeometry(0.75, 0));
+    const trunkGeo = this.geo('prop.trunk.geo', new CylinderGeometry(0.18, 0.24, 2.2, 7));
+    const foliageGeo = this.geo('prop.foliage.geo', new IcosahedronGeometry(1.5, 0));
+    const branchGeo = this.geo('prop.branch.geo', new BoxGeometry(0.08, 1.2, 0.08));
+    const carBodyGeo = this.geo('prop.carBody.geo', new BoxGeometry(2.0, 0.9, 4.2));
+    const carCabinGeo = this.geo('prop.carCabin.geo', new BoxGeometry(1.8, 0.8, 2.0));
+
+    flush('fence', fenceGeo, this.mat('prop.fence', { color: 0x6b5a44, roughness: 0.95 }), B.fence);
+    flush('tire', tireGeo, this.mat('prop.tire', { color: 0x161616, roughness: 0.95 }), B.tire);
+    flush('bush', bushGeo, this.mat('prop.bush', { color: 0xffffff, roughness: 1 }), B.bush, bushColors);
+    flush('trunkLive', trunkGeo, this.mat('prop.trunk', { color: 0x39281a, roughness: 0.95 }), B.trunkLive);
+    flush('foliage', foliageGeo, this.mat('prop.foliage', { color: 0x2c4a24, roughness: 1 }), B.foliage);
+    flush('trunkDead', trunkGeo, this.mat('prop.trunkDead', { color: 0x4a443a, roughness: 0.95 }), B.trunkDead);
+    flush('branch', branchGeo, this.mat('prop.branch', { color: 0x4a443a, roughness: 0.95 }), B.branch);
+    flush('carBody', carBodyGeo, this.mat('prop.carBody', { color: 0x5a5247, roughness: 0.7, metalness: 0.2 }), B.carBody);
+    flush('carCabin', carCabinGeo, this.mat('prop.carCabin', { color: 0x2b3036, roughness: 0.5, metalness: 0.2 }), B.carCabin);
+
+    this.scene.add(group);
   }
 
   /**
@@ -453,14 +940,14 @@ export class BlockScene {
   }
 
   /**
-   * T70 — doors + windows so the shell reads as a house. Additive render pass (does not alter the wall
-   * grid): a framed door leaf at each exit gap, and glass window panes on a deterministic subset of facade
-   * (perimeter) wall cells. Pure content from the authored grid — no magic placement.
+   * T70 — doors + windows so each shell reads as a house. Additive render pass (does not alter the wall
+   * grid): a framed door leaf at each exit gap, and per-building windows on a deterministic subset of facade
+   * (perimeter) wall cells whose decay state (intact glass / smashed-open void / boarded over) is derived from
+   * the house seed (T87/V26). Pure content from the authored grid — no magic placement.
    */
   private buildDoorsAndWindows(): void {
     const ts = this.runtime.scene;
     const grid = ts.navGrid;
-    const b = ts.buildingBounds;
     const cs = this.navCellSize;
     const wallH = this.world.buildingWallHeightMeters;
     const group = new Group();
@@ -475,6 +962,17 @@ export class BlockScene {
       opacity: 0.34,
       emissive: 0x10212e,
     });
+    // T87 window decay: painted frame trim, a dark void behind smashed glass, and weathered boards.
+    const winFrameMat = this.mat('window.frame', { color: 0xcfc7b4, roughness: 0.85 });
+    const voidMat = this.mat('window.void', { color: 0x0c0d0e, roughness: 1 });
+    const boardMat = this.mat('window.board', { color: 0x6b5640, roughness: 0.95 });
+    const winH = this.world.buildingWallHeightMeters * 0.32;
+    const winSpan = cs * 0.62;
+    // shared window geometries (thickness on local X; the caller rotates for N/S walls).
+    const paneGeo = this.geo('window.pane.geo', new BoxGeometry(0.08, winH, winSpan));
+    const frameGeo = this.geo('window.frame.geo', new BoxGeometry(0.05, winH + 0.16, winSpan + 0.18));
+    const voidGeo = this.geo('window.void.geo', new BoxGeometry(0.04, winH, winSpan));
+    const boardGeo = this.geo('window.board.geo', new BoxGeometry(0.06, winH * 0.26, winSpan + 0.1));
 
     // ---- DOORS: a frame (posts + lintel) + an ajar leaf at each exit gap (exit gaps run along Z). ----
     const postGeo = this.geo('door.post.geo', new BoxGeometry(0.14, wallH, 0.14));
@@ -499,35 +997,64 @@ export class BlockScene {
       group.add(post1, post2, lintel, leaf);
     }
 
-    // ---- WINDOWS: glass panes on a deterministic subset of facade (perimeter) wall cells. ----
-    const sillH = wallH * 0.45;
-    const winH = wallH * 0.32;
-    const paneGeo = this.geo('window.pane.geo', new BoxGeometry(0.08, winH, cs * 0.62));
+    // ---- WINDOWS: a framed opening on a deterministic subset of facade cells, per building, with a decay
+    // state (intact glass / smashed-open void / boarded over) derived from the house seed (T87/V26). ----
     const doorAdjacent = (cx: number, cy: number): boolean =>
       ts.exitCells.some((e) => Math.abs(e.cx - cx) + Math.abs(e.cy - cy) <= 1);
-    let wi = 0;
-    for (let cy = b.minCy; cy <= b.maxCy; cy++) {
-      for (let cx = b.minCx; cx <= b.maxCx; cx++) {
-        const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
-        if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
-        const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
-        if (corner || doorAdjacent(cx, cy)) {
-          wi += 1;
-          continue;
-        }
-        if (wi++ % 2 !== 0) continue; // every other facade cell gets a window (deterministic)
-        let nx = 0;
-        let nz = 0;
-        if (cx === b.minCx) nx = -1;
-        else if (cx === b.maxCx) nx = 1;
-        else if (cy === b.minCy) nz = -1;
-        else nz = 1;
-        const pane = new Mesh(paneGeo, glassMat);
-        pane.position.set((cx + 0.5) * cs + nx * 0.02, sillH + winH / 2, (cy + 0.5) * cs + nz * 0.02);
-        if (nz !== 0) pane.rotation.y = Math.PI / 2; // pane spans X on a north/south wall
-        group.add(pane);
+    /** Place a framed window of the given decay state at (wx, sillY, wz), rotated for a N/S wall. */
+    const placeWindow = (wx: number, sillY: number, wz: number, ns: boolean, state: ReturnType<typeof windowState>): void => {
+      const rotY = ns ? Math.PI / 2 : 0;
+      const yc = sillY + winH / 2;
+      const place = (geo: BufferGeometry, mat: MeshStandardMaterial, dx: number, dy: number, rz = 0): void => {
+        const m = new Mesh(geo, mat);
+        m.position.set(wx + (ns ? 0 : dx), yc + dy, wz + (ns ? dx : 0));
+        m.rotation.y = rotY;
+        m.rotation.z = rz;
+        m.castShadow = true;
+        group.add(m);
+      };
+      place(frameGeo, winFrameMat, -0.01, 0); // painted frame trim (recessed backing)
+      if (state === 'intact') {
+        place(paneGeo, glassMat, 0.02, 0);
+      } else if (state === 'broken') {
+        place(voidGeo, voidMat, 0.0, 0); // dark smashed-open opening
+      } else {
+        // boarded: two crossing weathered planks over the opening.
+        place(boardGeo, boardMat, 0.03, winH * 0.18, 0.18);
+        place(boardGeo, boardMat, 0.03, -winH * 0.16, -0.14);
       }
-    }
+    };
+
+    buildingsOf(ts).forEach((bld, bi) => {
+      const b = bld.bounds;
+      const style = this.styleFor(bld, bi);
+      const bWallH = wallH * Math.max(1, style.storeys);
+      const sillH = this.world.buildingWallHeightMeters * 0.45; // ground-floor sill height (consistent)
+      const sills = bWallH > this.world.buildingWallHeightMeters * 1.1 ? [sillH, sillH + this.world.buildingWallHeightMeters] : [sillH];
+      let wi = 0;
+      for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+        for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+          const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
+          if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
+          const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
+          if (corner || doorAdjacent(cx, cy)) {
+            wi += 1;
+            continue;
+          }
+          if (wi % 2 !== 0) {
+            wi += 1;
+            continue; // every other facade cell gets a window (deterministic)
+          }
+          const ns = cy === b.minCy || cy === b.maxCy;
+          const wx = (cx + 0.5) * cs;
+          const wz = (cy + 0.5) * cs;
+          for (const sy of sills) {
+            placeWindow(wx, sy, wz, ns, windowState(style, wi, this.windowBoardedFraction));
+            wi += 1;
+          }
+        }
+      }
+    });
 
     this.scene.add(group);
   }
@@ -696,16 +1223,17 @@ export class BlockScene {
   }
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {
-    const playerInside = this.isPlayerInsideBuilding();
+    // PER-BUILDING cutaway (V59): only the building the player currently occupies fades; its neighbours stay
+    // opaque so the district still reads as solid streets of houses.
+    const insideIndex = this.playerBuildingIndex();
     // V29 motion reduction: cut roofs/upper walls instantly rather than animating the fade (less motion).
     const fadeRate = this.accessibility.feedback.reduceMotion
       ? 1
       : this.roofFadeSeconds > 0
         ? dtSeconds / this.roofFadeSeconds
         : 1;
-    // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the CameraRig's camera
-    // position. A wall fades only when its outward normal turns toward the camera (it sits between camera +
-    // player); the roof always occludes from above. The far walls keep their opacity so enclosure still reads.
+    // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the camera position. A
+    // wall fades only when its outward normal turns toward the camera; the roof always occludes from above.
     let towardCamera: VecXZ | null = null;
     if (camera) {
       const p = this.runtime.player();
@@ -714,19 +1242,18 @@ export class BlockScene {
       if (Math.hypot(dx, dz) > 1e-6) towardCamera = { x: dx, z: dz };
     }
     for (const s of this.fadeSurfaces) {
+      const playerInside = insideIndex >= 0 && s.buildingIndex === insideIndex;
       let occludesPlayerView: boolean;
-      if (towardCamera === null) {
-        occludesPlayerView = false; // no camera (construction prime) or degenerate top-down → keep everything
+      if (!playerInside || towardCamera === null) {
+        occludesPlayerView = false; // not the occupied building, or no camera (construction prime) → stay opaque
       } else if (s.kind === 'roof' || s.outwardNormal === null) {
-        occludesPlayerView = playerInside; // roof occludes from directly above whenever the player is inside
+        occludesPlayerView = true; // roof occludes from directly above whenever the player is inside this house
       } else {
-        occludesPlayerView =
-          playerInside &&
-          wallFacesCamera({
-            outwardNormal: s.outwardNormal,
-            towardCamera,
-            facingDotThreshold: this.visibility.cameraFacingDotThreshold,
-          });
+        occludesPlayerView = wallFacesCamera({
+          outwardNormal: s.outwardNormal,
+          towardCamera,
+          facingDotThreshold: this.visibility.cameraFacingDotThreshold,
+        });
       }
       const ctx: OcclusionContext = {
         playerInside,
@@ -748,12 +1275,21 @@ export class BlockScene {
     }
   }
 
-  private isPlayerInsideBuilding(): boolean {
-    const b = this.runtime.scene.buildingBounds;
+  /** Index of the building the player currently occupies, or -1 if they are out on the street/yard. */
+  private playerBuildingIndex(): number {
     const p = this.runtime.player();
     const cx = Math.floor(p.x / this.navCellSize);
     const cy = Math.floor(p.z / this.navCellSize);
-    return cx >= b.minCx && cx <= b.maxCx && cy >= b.minCy && cy <= b.maxCy;
+    const buildings = buildingsOf(this.runtime.scene);
+    for (let i = 0; i < buildings.length; i++) {
+      const b = buildings[i]!.bounds;
+      if (cx >= b.minCx && cx <= b.maxCx && cy >= b.minCy && cy <= b.maxCy) return i;
+    }
+    return -1;
+  }
+
+  private isPlayerInsideBuilding(): boolean {
+    return this.playerBuildingIndex() >= 0;
   }
 
   /** Detach the scene graph. The injected registry owns disposal of tracked geometries/materials (V24). */

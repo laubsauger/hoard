@@ -1384,6 +1384,35 @@ export const renderingConfig = registerDomain('rendering', {
   fireSmokeColorR: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) R component.', default: 0.06, min: 0, max: 1 }),
   fireSmokeColorG: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) G component.', default: 0.06, min: 0, max: 1 }),
   fireSmokeColorB: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) B component.', default: 0.07, min: 0, max: 1 }),
+
+  // ---- T87 residential house render dressing (clapboard/ivy/debris/porch/chimney sizing) ----
+  // Geometric scales for the believable-house look; the per-house VARIATION/DISARRAY probabilities live in
+  // the `world` domain, these are the render-side prop dimensions (V4).
+  houseClapboardSpacingMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Vertical spacing between horizontal clapboard/lap-siding trim lines on house walls (T87).',
+    default: 0.5, min: 0.15, max: 2,
+  }),
+  houseIvyPatchMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Edge size of one instanced ivy/overgrowth patch creeping a house wall (T87).',
+    default: 0.7, min: 0.2, max: 3,
+  }),
+  houseDebrisMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Edge size of one instanced debris/rubble clump at a ruined house base (T87).',
+    default: 0.55, min: 0.1, max: 3,
+  }),
+  housePorchHeightMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Height of a front-porch roof above its deck (post length) (T87).',
+    default: 2.4, min: 1, max: 5,
+  }),
+  houseChimneyMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Plan edge size of a house chimney stack (T87).',
+    default: 0.7, min: 0.2, max: 2,
+  }),
 });
 
 // ---- Block-limbed figure layout (T72 / V2 / V13 / ART-DIRECTION) ----
