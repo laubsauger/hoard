@@ -8,7 +8,6 @@
 // so a missing adapter reports cleanly and never crashes React.
 
 import { useEffect, useRef } from 'react';
-import { Plane, Raycaster, Vector2, Vector3 } from 'three';
 import {
   RendererHost,
   detectQualityTier,
@@ -19,12 +18,13 @@ import {
 } from '../render/engine';
 import { createDevStats, createRendererHost, startRendererHost, attachResize } from './viewport/rendererHost';
 import { createEffectViews } from './viewport/effectViews';
+import { AimRaycaster } from './viewport/aim';
+import { registerInput } from './viewport/input';
 import { combatConfig } from '../config/domains/combat';
 import { audioConfig } from '../config/domains/audio';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
-import { type ImpactIngestContext } from '../render/effects/impactView';
 import { type FireIgnition } from '../render/effects/fireView';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
@@ -123,10 +123,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
     let runtime: GameRuntime;
     let adapter: PersistenceAdapter | undefined;
     const keys = new Set<string>();
-    const ndc = new Vector2(0, 0);
-    const raycaster = new Raycaster();
-    const groundPlane = new Plane(new Vector3(0, 1, 0), 0);
-    const aimPoint = new Vector3();
+    const aim = new AimRaycaster();
     let cmdSeq = 1;
     let selfNoise = 0; // 0..1 player-produced noise, bumped on fire, decays each frame (HUD noise meter).
     const cleanups: (() => void)[] = [];
@@ -227,90 +224,22 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       cleanups.push(attachResize(canvas, host, camera, tier));
 
-      // ---- input: WASD move, mouse aim, click fire, Q/E rotate, +/- zoom, B breach, R board ----
-      const onKeyDown = (e: KeyboardEvent): void => {
-        gameAudio.resume(); // autoplay policy: lazily create/resume the AudioContext on a user gesture.
-        keys.add(e.code);
-        // T50/V29: read the rebindable keymap so remapped rotate/pause keys take effect live.
-        const b = inputStore.getState().bindings;
-        if (e.code === b.rotateCCW) camera.rotate(-1);
-        if (e.code === b.rotateCW) camera.rotate(1);
-        if (e.code === b.pause) {
-          // T49: the pause key toggles an authoritative pause — the sim HALTS in the frame loop (V12-safe)
-          // and the pause menu shows. The session `paused` flag is the single source of truth shared with
-          // the loop (the menu's Resume writes it too). Pausing leaves the lifecycle phase on 'playing'.
-          if (sessionStore.getState().phase === 'playing') sessionStore.getState().togglePause();
-        }
-        // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
-        if (e.code === 'KeyR') runtime.reloadWeapon();
-        if (e.code === 'BracketRight') runtime.cycleWeapon(1);
-        if (e.code === 'BracketLeft') runtime.cycleWeapon(-1);
-        // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
-        // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
-        if (e.code === 'KeyL') debugViewStore.getState().toggleFlag('flashlight');
-      };
-      const onKeyUp = (e: KeyboardEvent): void => {
-        keys.delete(e.code);
-      };
-      const onMouseMove = (e: MouseEvent): void => {
-        const r = canvas.getBoundingClientRect();
-        ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
-      };
-      const aimWorldPoint = (): Vector3 | null => {
-        raycaster.setFromCamera(ndc, camera.camera);
-        return raycaster.ray.intersectPlane(groundPlane, aimPoint) ? aimPoint : null;
-      };
-      const onClick = (): void => {
-        gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio.
-        gameAudio.gunshot(); // procedural gunshot synthesized directly off the player-fire path.
-        const hit = aimWorldPoint();
-        const p = runtime.player();
-        const dx = hit ? hit.x - p.x : Math.cos(runtime.playerAim());
-        const dz = hit ? hit.z - p.z : Math.sin(runtime.playerAim());
-        runtime.aim(dx, dz);
-        const shot = runtime.fire(dx, dz, 'torsoUpper');
-        selfNoise = 1; // a gunshot is the loudest thing the player produces (HUD noise meter).
-        // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
-        // never draws through a wall on a miss into structure (V49/V53/B20).
-        scene?.fireFeedback(dx, dz, shot.stopDistanceMeters); // B7: muzzle flash + tracer + report on fire
-        // T80/T81 (V57): DISTINCT surface response, branched off the authoritative ShotResult.
-        //   hit === true  → a zombie was struck → blood already fires (bloodView); add a WOUND mark at the
-        //                   struck body point. NO wall spark.
-        //   hit === false → clean miss / structure stop. When the shot stopped SHORT of weapon range it hit a
-        //                   WALL → raycast the structures along the aim to the real surface → SPARK burst
-        //                   (out of the wall) + bullet HOLE. A clean miss to max range hits nothing → no spark.
-        const impactCtx: ImpactIngestContext = { goreIntensity: access.goreIntensity, reduceFlashes: access.feedback.reduceFlashes };
-        const len = Math.hypot(dx, dz) || 1;
-        const ndx = dx / len;
-        const ndz = dz / len;
-        const stop = shot.stopDistanceMeters ?? firearmRangeMeters;
-        if (shot.hit) {
-          // Struck body point = muzzle origin + aim*travel (XZ); region->height lifts it; the wound faces back
-          // toward the shooter (-aim). Zombie base sits on the ground (y=0).
-          const wx = p.x + ndx * stop;
-          const wz = p.z + ndz * stop;
-          impactView.wound(wx, 0, wz, shot.region ?? 'torsoUpper', -ndx, -ndz, impactCtx);
-        } else if (stop < firearmRangeMeters) {
-          // Structure stop: find the real wall surface the nav-grid blocker corresponds to (raycast to range
-          // and take the first structure face), then spark + hole there oriented to its normal.
-          const wh = surfaceProjector.wallAlong(p.x, p.y, p.z, ndx, ndz, firearmRangeMeters);
-          if (wh) impactView.structureImpact(wh.x, wh.y, wh.z, wh.nx, wh.ny, wh.nz, impactCtx);
-        }
-      };
-      const onWheel = (e: WheelEvent): void => {
-        e.preventDefault();
-        camera.setZoom(camera.state.zoom + Math.sign(e.deltaY) * 2);
-      };
-      window.addEventListener('keydown', onKeyDown);
-      window.addEventListener('keyup', onKeyUp);
-      canvas.addEventListener('mousemove', onMouseMove);
-      canvas.addEventListener('click', onClick);
-      canvas.addEventListener('wheel', onWheel, { passive: false });
-      cleanups.push(() => window.removeEventListener('keydown', onKeyDown));
-      cleanups.push(() => window.removeEventListener('keyup', onKeyUp));
-      cleanups.push(() => canvas.removeEventListener('mousemove', onMouseMove));
-      cleanups.push(() => canvas.removeEventListener('click', onClick));
-      cleanups.push(() => canvas.removeEventListener('wheel', onWheel));
+      cleanups.push(
+        registerInput({
+          canvas,
+          camera,
+          aim,
+          keys,
+          gameAudio,
+          scene,
+          impactView,
+          surfaceProjector,
+          firearmRangeMeters,
+          getRuntime: () => runtime,
+          getAccess: () => access,
+          bumpSelfNoise: () => { selfNoise = 1; },
+        }),
+      );
 
       sessionStore.getState().setPhase('playing');
 
@@ -403,7 +332,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           const sprint = keys.has(bindNow.sprint);
           const sneak = keys.has(bindNow.sneak);
           if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint, sneak);
-          const hit = aimWorldPoint();
+          const hit = aim.worldPoint(camera);
           if (hit) {
             const pp = runtime.player();
             runtime.aim(hit.x - pp.x, hit.z - pp.z);
