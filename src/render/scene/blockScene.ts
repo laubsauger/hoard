@@ -63,6 +63,8 @@ import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
 import { buildingIndexAt } from './systems/playerLocation';
 import { BreachSystem } from './systems/breachSystem';
+import { DoorSystem } from './systems/doorSystem';
+import { WindowSystem } from './systems/windowSystem';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -73,12 +75,7 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
-import {
-  resolveHouseVariation,
-  hasLineOfSight,
-  rayDistanceToWall,
-  type WindowGlass,
-} from '../../game/scene';
+import { resolveHouseVariation, hasLineOfSight, rayDistanceToWall } from '../../game/scene';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -169,6 +166,10 @@ export class BlockScene {
 
   /** Per-frame systems constructed from the builder handles (Phase 2 of the decomposition). */
   private readonly breach = new BreachSystem(this.sectionMeshes);
+  private readonly doors = new DoorSystem(this.doorLeaves, {
+    swingSpeedRadiansPerSecond: this.structures.doorSwingSpeedRadiansPerSecond,
+  });
+  private readonly windows = new WindowSystem(this.windowMeshes);
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -285,7 +286,7 @@ export class BlockScene {
     this.doorLeaves.push(...openings.doorLeaves);
     this.windowMeshes.push(...openings.windowMeshes);
     // Prime the visibility from the initial sim state so a window that starts boarded/smashed renders that way.
-    this.syncWindows();
+    this.windows.sync(this.runtime);
     buildProps(this.buildCtx(), {
       fenceMissingChance: this.world.fenceMissingChance,
       fenceBrokenChance: this.world.fenceBrokenChance,
@@ -387,8 +388,8 @@ export class BlockScene {
     this.playerMesh.rotation.y = -this.runtime.playerAim();
 
     this.breach.sync(this.runtime.scene);
-    this.syncDoors(dtSeconds);
-    this.syncWindows();
+    this.doors.sync(this.runtime, dtSeconds);
+    this.windows.sync(this.runtime);
     this.syncLighting(dtSeconds);
     this.syncCutaway(dtSeconds, camera);
 
@@ -517,46 +518,6 @@ export class BlockScene {
     const brightness = Math.min(1, Math.max(0, sceneBrightness));
     f.intensity = this.lighting.flashlightIntensity * (dayScale + (1 - dayScale) * (1 - brightness));
     f.visible = f.intensity > 0;
-  }
-
-  /**
-   * T46 — reflect the authoritative door state onto the rendered leaves: a CLOSED door's leaf lies in the wall
-   * plane (rotation 0); an OPEN one is swung ~90° about its hinge. The render only READS sim state (V12) —
-   * the pivot eases toward its target at a configured angular speed so the swing animates (snaps at dt<=0,
-   * e.g. the construction-time prime, so a door that starts open renders open immediately).
-   */
-  private syncDoors(dtSeconds: number): void {
-    if (this.doorLeaves.length === 0) return;
-    const access = new Map<number, string>();
-    for (const d of this.runtime.doorViews()) access.set(this.runtime.scene.navGrid.index(d.cx, d.cy), d.access);
-    const speed = this.structures.doorSwingSpeedRadiansPerSecond;
-    for (const leaf of this.doorLeaves) {
-      const target = access.get(leaf.navCell) === 'open' ? leaf.openTarget : 0;
-      leaf.current = dtSeconds > 0 ? approach(leaf.current, target, speed, dtSeconds) : target;
-      leaf.pivot.rotation.y = leaf.current;
-    }
-  }
-
-  /**
-   * T108 — reflect the authoritative window state onto the rendered meshes (the render only READS sim state,
-   * V12): an INTACT pane shows the glass; an OPEN/SMASHED window shows the dark void (a real see-through hole,
-   * matching the cleared nav cell); a BOARDED window shows the void plus `boards` crossing planks. Keyed by
-   * nav cell so each window unit (and both sills of a two-storey cell) tracks the same live state.
-   */
-  private syncWindows(): void {
-    if (this.windowMeshes.length === 0) return;
-    const glassBy = new Map<number, { glass: WindowGlass; boards: number }>();
-    for (const w of this.runtime.windowViews()) {
-      glassBy.set(this.runtime.scene.navGrid.index(w.cx, w.cy), { glass: w.glass, boards: w.boards });
-    }
-    for (const u of this.windowMeshes) {
-      const state = glassBy.get(u.navCell);
-      if (!state) continue; // a window with no sim record keeps its built (primed) visibility
-      const intact = state.glass === 'intact';
-      u.pane.visible = intact;
-      u.voidMesh.visible = !intact; // the opening reads as a dark void once the glass is gone
-      for (let i = 0; i < u.boards.length; i++) u.boards[i]!.visible = i < state.boards;
-    }
   }
 
   private syncLighting(dtSeconds: number): void {
