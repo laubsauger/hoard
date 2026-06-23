@@ -80,6 +80,49 @@ function makeConeOutline(halfAngle: number, segs = 24, w = 0.02): BufferGeometry
   return g;
 }
 
+/** Nav-grid info the world overlays (spatial grid + structural cells) are built from. */
+export interface WorldGridInfo {
+  readonly width: number;
+  readonly height: number;
+  readonly cellSize: number;
+  /** True when the cell is impassable (wall / structure) — drawn as a filled quad for the structural overlay. */
+  blocked(cx: number, cy: number): boolean;
+}
+
+/** Merged thin-quad mesh of every nav-cell boundary line (lines don't render under WebGPU — use quads). */
+function makeGridLines(w: WorldGridInfo, halfW = 0.04): BufferGeometry {
+  const p: number[] = [];
+  const cs = w.cellSize;
+  const W = w.width * cs;
+  const H = w.height * cs;
+  const quad = (x0: number, z0: number, x1: number, z1: number): void => {
+    p.push(x0, 0, z0, x1, 0, z0, x1, 0, z1, x0, 0, z0, x1, 0, z1, x0, 0, z1);
+  };
+  for (let i = 0; i <= w.width; i++) quad(i * cs - halfW, 0, i * cs + halfW, H);
+  for (let j = 0; j <= w.height; j++) quad(0, j * cs - halfW, W, j * cs + halfW);
+  const g = new BufferGeometry();
+  g.setAttribute('position', new Float32BufferAttribute(p, 3));
+  return g;
+}
+
+/** Merged flat-quad mesh covering every blocked (structural) cell. */
+function makeBlockedQuads(w: WorldGridInfo): BufferGeometry {
+  const p: number[] = [];
+  const cs = w.cellSize;
+  const m = cs * 0.46;
+  for (let cy = 0; cy < w.height; cy++) {
+    for (let cx = 0; cx < w.width; cx++) {
+      if (!w.blocked(cx, cy)) continue;
+      const x = (cx + 0.5) * cs;
+      const z = (cy + 0.5) * cs;
+      p.push(x - m, 0, z - m, x + m, 0, z - m, x + m, 0, z + m, x - m, 0, z - m, x + m, 0, z + m, x - m, 0, z + m);
+    }
+  }
+  const g = new BufferGeometry();
+  g.setAttribute('position', new Float32BufferAttribute(p, 3));
+  return g;
+}
+
 /** One instanced layer: compose a transform per instance (position + Y-rotation + non-uniform scale). */
 class InstancedLayer {
   readonly mesh: InstancedMesh;
@@ -130,8 +173,11 @@ export class SceneGizmos {
   private readonly markerColor = new Color();
   private readonly sightRange: number;
   private readonly playerFovHalf: number;
+  /** World overlays (spatial grid lines + filled structural cells) — static, built once from the nav grid. */
+  private gridLines: Mesh | null = null;
+  private structuralQuads: Mesh | null = null;
 
-  constructor(tier: QualityTier) {
+  constructor(tier: QualityTier, world?: WorldGridInfo) {
     const p = resolveDomain(perceptionConfig, tier);
     this.sightRange = p.sightRange;
     const fovHalf = (p.fieldOfViewDegrees * Math.PI) / 360;
@@ -160,6 +206,20 @@ export class SceneGizmos {
 
     this.group.add(this.sight.mesh, this.attack.mesh, this.sound.mesh, this.playerCone);
     for (const m of this.stateMarkers) this.group.add(m.mesh);
+
+    if (world) {
+      this.gridLines = new Mesh(makeGridLines(world), gizmoMaterial(0x5b7aa8, 0.4));
+      this.gridLines.position.y = GIZMO_Y - 0.1;
+      this.gridLines.frustumCulled = false;
+      this.gridLines.renderOrder = 997;
+      this.gridLines.visible = false;
+      this.structuralQuads = new Mesh(makeBlockedQuads(world), gizmoMaterial(0xf97316, 0.28));
+      this.structuralQuads.position.y = GIZMO_Y - 0.05;
+      this.structuralQuads.frustumCulled = false;
+      this.structuralQuads.renderOrder = 997;
+      this.structuralQuads.visible = false;
+      this.group.add(this.gridLines, this.structuralQuads);
+    }
   }
 
   update(
@@ -170,8 +230,17 @@ export class SceneGizmos {
     wallDistance?: (x: number, z: number, heading: number, maxR: number) => number,
   ): void {
     const showPlayer = flags.showPlayerVision;
+    // World overlays are static meshes — just toggle their visibility (no per-frame rebuild needed).
+    if (this.gridLines) this.gridLines.visible = flags.showSpatialGrids;
+    if (this.structuralQuads) this.structuralQuads.visible = flags.showStructuralCells;
     const any =
-      flags.showSightRadius || flags.showAttackRadius || flags.showZombieState || flags.showSoundField || showPlayer;
+      flags.showSightRadius ||
+      flags.showAttackRadius ||
+      flags.showZombieState ||
+      flags.showSoundField ||
+      showPlayer ||
+      flags.showSpatialGrids ||
+      flags.showStructuralCells;
     this.group.visible = any;
     if (!any) return;
 
@@ -237,6 +306,14 @@ export class SceneGizmos {
     this.attack.dispose();
     this.sound.dispose();
     for (const m of this.stateMarkers) m.dispose();
+    if (this.gridLines) {
+      this.gridLines.geometry.dispose();
+      (this.gridLines.material as MeshBasicNodeMaterial).dispose();
+    }
+    if (this.structuralQuads) {
+      this.structuralQuads.geometry.dispose();
+      (this.structuralQuads.material as MeshBasicNodeMaterial).dispose();
+    }
     this.playerCone.geometry.dispose();
     (this.playerCone.material as MeshBasicNodeMaterial).dispose();
   }

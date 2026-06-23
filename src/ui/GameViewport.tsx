@@ -201,7 +201,13 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       // Dev-tools scene gizmos (perception/attack radii, FSM-state markers, sound field). Toggled via the
       // debug-flag store; the layer self-hides when no flag is set, so it is free in normal play.
-      const gizmos = new SceneGizmos(tier);
+      const ng = runtime.scene.navGrid;
+      const gizmos = new SceneGizmos(tier, {
+        width: ng.width,
+        height: ng.height,
+        cellSize: ng.settings.navCellSize,
+        blocked: (cx, cy) => ng.isBlocked(ng.index(cx, cy)),
+      });
       const noiseGate = createNoiseSnapshotGate(noiseViewStore, tier);
       cleanups.push(() => noiseViewStore.getState().clear());
       scene.scene.add(gizmos.group);
@@ -282,9 +288,11 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const dx = hit ? hit.x - p.x : Math.cos(runtime.playerAim());
         const dz = hit ? hit.z - p.z : Math.sin(runtime.playerAim());
         runtime.aim(dx, dz);
-        runtime.fire(dx, dz, 'torsoUpper');
+        const shot = runtime.fire(dx, dz, 'torsoUpper');
         selfNoise = 1; // a gunshot is the loudest thing the player produces (HUD noise meter).
-        scene?.fireFeedback(dx, dz); // B7: muzzle flash + tracer + report on fire
+        // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
+        // never draws through a wall on a miss into structure (V49/V53/B20).
+        scene?.fireFeedback(dx, dz, shot.stopDistanceMeters); // B7: muzzle flash + tracer + report on fire
       };
       const onWheel = (e: WheelEvent): void => {
         e.preventDefault();
