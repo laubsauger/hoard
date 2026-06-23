@@ -10,6 +10,7 @@ import { Hud } from '../ui/Hud';
 import { Controls } from '../ui/Controls';
 import { AccessibilityPanel } from '../ui/AccessibilityPanel';
 import { LoadingScreen } from '../ui/LoadingScreen';
+import { DevToolsPanel } from '../ui/debug';
 import '../ui/styles.css';
 
 export function App() {
@@ -27,6 +28,7 @@ export function App() {
           <Hud />
           <Controls handle={handle} />
           <AccessibilityPanel />
+          {import.meta.env.DEV && <DevToolsPanel />}
           {error && (
             <div className="hbn-error" role="alert">
               <h1>Engine unavailable</h1>

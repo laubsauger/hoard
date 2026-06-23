@@ -29,6 +29,8 @@ export interface GoreParticle {
   particles: number;
   /** Monotonic spawn sequence — oldest (lowest) is recycled first when the pool is full. */
   seq: number;
+  /** Seconds since spawn — drives fade-out + lifetime recycling in the renderer (B7). */
+  age: number;
 }
 
 export interface GoreSettings {
@@ -55,7 +57,7 @@ class GorePoolRing {
   constructor(capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 0) throw new Error(`gore pool capacity must be a non-negative integer, got ${capacity}`);
     this.records = Array.from({ length: capacity }, () => ({
-      active: false, kind: 'spray' as GoreKind, x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, energy: 0, particles: 0, seq: 0,
+      active: false, kind: 'spray' as GoreKind, x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, energy: 0, particles: 0, seq: 0, age: 0,
     }));
   }
 
@@ -150,12 +152,37 @@ export class GoreSystem {
     rec.energy = p.energy * goreIntensity;
     rec.particles = particles;
     rec.seq = ++this.seq;
+    rec.age = 0;
     return rec;
   }
 
   /** Retire a record back to the pool (e.g. after its lifetime elapses). */
   release(rec: GoreParticle): void {
     rec.active = false;
+  }
+
+  /**
+   * Age every active record and recycle any that have outlived `lifetimeSeconds` (B7). Pure book-keeping
+   * over the fixed pools — no allocation. Returns the number still active after the sweep.
+   */
+  update(dtSeconds: number, lifetimeSeconds: number): number {
+    if (dtSeconds < 0) throw new Error(`dtSeconds must be non-negative, got ${dtSeconds}`);
+    if (lifetimeSeconds <= 0) throw new Error(`lifetimeSeconds must be positive, got ${lifetimeSeconds}`);
+    let active = 0;
+    for (const kind of ['spray', 'stain', 'sever'] as const) {
+      for (const r of this.poolFor(kind).records) {
+        if (!r.active) continue;
+        r.age += dtSeconds;
+        if (r.age >= lifetimeSeconds) r.active = false;
+        else active += 1;
+      }
+    }
+    return active;
+  }
+
+  /** Active records of a kind (renderer reads these to lay out the instanced batch). */
+  activeRecords(kind: GoreKind): readonly GoreParticle[] {
+    return this.poolFor(kind).records.filter((r) => r.active);
   }
 }
 

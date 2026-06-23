@@ -1,9 +1,16 @@
-// T9 / V2 / V3 — SoA -> instance-matrix packing correctness, compaction, variation, capacity guard.
+// T9 / V2 / V3 — SoA -> GPU-input packing: compaction, pose/meta passthrough, variation, capacity guard.
+// The instance transform mat4 is assembled on the GPU (compute shader) from these inputs, so the CPU test
+// asserts only the pure compaction + per-instance input values.
 
 import { describe, it, expect } from 'vitest';
-import { Matrix4, Quaternion, Vector3 } from 'three';
 import { allocateSoa, ZOMBIE_FIELDS } from '../../game/core/contracts/soa';
-import { packInstances, variationSeed, FLOATS_PER_MATRIX, FLOATS_PER_VARIATION } from './packing';
+import {
+  packCrowdInputs,
+  variationSeed,
+  variationScale,
+  FLOATS_PER_POSE,
+  FLOATS_PER_META,
+} from './packing';
 
 const CAP = 8;
 
@@ -16,12 +23,18 @@ function makeSoa() {
     heading: soa.views['heading'] as Float32Array,
     archetype: soa.views['archetype'] as Uint16Array,
     animState: soa.views['animState'] as Uint8Array,
-    animPhase: soa.views['animPhase'] as Float32Array,
   };
 }
 
-describe('packInstances (V2/V3)', () => {
-  it('packs a live zombie into a column-major matrix matching THREE.Matrix4.compose', () => {
+function buffers() {
+  return {
+    pose: new Float32Array(CAP * FLOATS_PER_POSE),
+    meta: new Float32Array(CAP * FLOATS_PER_META),
+  };
+}
+
+describe('packCrowdInputs (V2/V3)', () => {
+  it('packs a live zombie pose [x,y,z,heading] into the input buffer', () => {
     const s = makeSoa();
     s.alive[0] = 1;
     s.position[0] = 3;
@@ -29,10 +42,8 @@ describe('packInstances (V2/V3)', () => {
     s.position[2] = -7;
     s.heading[0] = 0.7;
 
-    const matrices = new Float32Array(CAP * FLOATS_PER_MATRIX);
-    const variation = new Float32Array(CAP * FLOATS_PER_VARIATION);
-    // variationCount 1 + equal scale band => deterministic scale 1, so compose uses unit scale.
-    const res = packInstances(s.soa.views, matrices, variation, {
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
       count: 1,
       capacity: CAP,
       variationCount: 1,
@@ -40,15 +51,12 @@ describe('packInstances (V2/V3)', () => {
       scaleMax: 1,
     });
     expect(res.liveCount).toBe(1);
-
-    const expected = new Matrix4().compose(
-      new Vector3(3, 0, -7),
-      new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), 0.7),
-      new Vector3(1, 1, 1),
-    );
-    for (let i = 0; i < 16; i++) {
-      expect(matrices[i]).toBeCloseTo(expected.elements[i]!, 5);
-    }
+    expect(pose[0]).toBeCloseTo(3, 6);
+    expect(pose[1]).toBeCloseTo(0, 6);
+    expect(pose[2]).toBeCloseTo(-7, 6);
+    expect(pose[3]).toBeCloseTo(0.7, 6);
+    // variationCount 1 + equal scale band => deterministic mid-band scale = 1.
+    expect(meta[0]).toBeCloseTo(1, 6);
   });
 
   it('skips dead slots and compacts live instances to the front', () => {
@@ -59,9 +67,8 @@ describe('packInstances (V2/V3)', () => {
     s.position[1 * 3 + 1] = 2;
     s.position[1 * 3 + 2] = 5;
 
-    const matrices = new Float32Array(CAP * FLOATS_PER_MATRIX);
-    const variation = new Float32Array(CAP * FLOATS_PER_VARIATION);
-    const res = packInstances(s.soa.views, matrices, variation, {
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
       count: 2,
       capacity: CAP,
       variationCount: 1,
@@ -69,45 +76,57 @@ describe('packInstances (V2/V3)', () => {
       scaleMax: 1,
     });
     expect(res.liveCount).toBe(1);
-    // Live instance occupies index 0; translation is the surviving slot's position.
-    expect(matrices[12]).toBeCloseTo(11, 5);
-    expect(matrices[13]).toBeCloseTo(2, 5);
-    expect(matrices[14]).toBeCloseTo(5, 5);
+    // Live instance occupies input index 0; pose is the surviving slot's position.
+    expect(pose[0]).toBeCloseTo(11, 6);
+    expect(pose[1]).toBeCloseTo(2, 6);
+    expect(pose[2]).toBeCloseTo(5, 6);
   });
 
-  it('writes per-instance variation [seed, archetype, animState, animPhase]', () => {
+  it('writes per-instance meta [scale, seed, archetype, animState]', () => {
     const s = makeSoa();
     s.alive[0] = 1;
     s.archetype[0] = 4;
     s.animState[0] = 2;
-    s.animPhase[0] = 0.5;
 
-    const matrices = new Float32Array(CAP * FLOATS_PER_MATRIX);
-    const variation = new Float32Array(CAP * FLOATS_PER_VARIATION);
-    packInstances(s.soa.views, matrices, variation, {
+    const { pose, meta } = buffers();
+    packCrowdInputs(s.soa.views, pose, meta, {
       count: 1,
       capacity: CAP,
       variationCount: 16,
       scaleMin: 0.9,
       scaleMax: 1.1,
     });
-    expect(variation[0]).toBe(variationSeed(0, 16));
-    expect(variation[1]).toBe(4);
-    expect(variation[2]).toBe(2);
-    expect(variation[3]).toBeCloseTo(0.5, 6);
+    const seed = variationSeed(0, 16);
+    expect(meta[0]).toBeCloseTo(variationScale(seed, 16, 0.9, 1.1), 6);
+    expect(meta[1]).toBe(seed);
+    expect(meta[2]).toBe(4);
+    expect(meta[3]).toBe(2);
   });
 
   it('throws if count exceeds capacity (no silent drop, V4)', () => {
     const s = makeSoa();
-    const matrices = new Float32Array(CAP * FLOATS_PER_MATRIX);
-    const variation = new Float32Array(CAP * FLOATS_PER_VARIATION);
+    const { pose, meta } = buffers();
     expect(() =>
-      packInstances(s.soa.views, matrices, variation, {
+      packCrowdInputs(s.soa.views, pose, meta, {
         count: CAP + 1,
         capacity: CAP,
         variationCount: 1,
         scaleMin: 1,
         scaleMax: 1,
+      }),
+    ).toThrow();
+  });
+
+  it('throws on an inverted scale band', () => {
+    const s = makeSoa();
+    const { pose, meta } = buffers();
+    expect(() =>
+      packCrowdInputs(s.soa.views, pose, meta, {
+        count: 0,
+        capacity: CAP,
+        variationCount: 1,
+        scaleMin: 1.2,
+        scaleMax: 0.8,
       }),
     ).toThrow();
   });

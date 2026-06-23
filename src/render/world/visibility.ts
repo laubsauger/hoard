@@ -6,6 +6,7 @@
 
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
+import { postFXConfig } from '../../config/domains/postFX';
 import type { QualityTier } from '../../config/types';
 
 /** Building surfaces the cutaway system reasons about. */
@@ -91,6 +92,52 @@ export function resolveSurfaceVisibility(
       return { visible: false, targetOpacity: 0, reason: 'interior hidden — camera height alone does not reveal (V20)' };
     }
   }
+}
+
+// ---- Cutaway depth bias (B3 — reveal faces must not z-fight retained base/ground/roof) ----
+
+export interface CutawayDepthSettings {
+  readonly polygonOffsetFactor: number;
+  readonly polygonOffsetUnits: number;
+  readonly insetMeters: number;
+}
+
+export function resolveCutawayDepthSettings(tier: QualityTier): CutawayDepthSettings {
+  return {
+    polygonOffsetFactor: resolve(postFXConfig.cutawayPolygonOffsetFactor, tier),
+    polygonOffsetUnits: resolve(postFXConfig.cutawayPolygonOffsetUnits, tier),
+    insetMeters: resolve(postFXConfig.cutawayInsetMeters, tier),
+  };
+}
+
+export interface CutawayDepthOffset {
+  /** Enable material polygonOffset (push fragments back in depth). */
+  readonly polygonOffset: boolean;
+  readonly polygonOffsetFactor: number;
+  readonly polygonOffsetUnits: number;
+  /** Draw fading sections AFTER opaque base/ground so the transparent reveal composites cleanly. */
+  readonly renderOrder: number;
+  /** Vertical gap (m) to lift a fading upper section off the retained base so faces aren't coplanar. */
+  readonly verticalInsetMeters: number;
+}
+
+/**
+ * Decide the depth bias for a fading cutaway surface (B3). The cutaway fades roof + upper walls whose
+ * faces sit coplanar with the retained wall base (upper bottom == base top) and the ground/roof line —
+ * coplanar faces z-fight on reveal. We push fading faces back with polygonOffset, draw them after the
+ * opaque base (renderOrder > 0), and lift upper walls by a small vertical inset so the shared seam is gone.
+ * Base/interior surfaces never bias (they own the depth buffer). Pure logic.
+ */
+export function resolveCutawayDepthOffset(kind: SurfaceKind, settings: CutawayDepthSettings): CutawayDepthOffset {
+  const fades = kind === 'roof' || kind === 'upperWall';
+  return {
+    polygonOffset: fades,
+    polygonOffsetFactor: fades ? settings.polygonOffsetFactor : 0,
+    polygonOffsetUnits: fades ? settings.polygonOffsetUnits : 0,
+    renderOrder: fades ? 1 : 0,
+    // Only the upper wall shares a horizontal seam with the base; the roof sits at the wall top already.
+    verticalInsetMeters: kind === 'upperWall' ? settings.insetMeters : 0,
+  };
 }
 
 // ---- Threat visual language (V20 / V29) ----

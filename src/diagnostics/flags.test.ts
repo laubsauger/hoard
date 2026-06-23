@@ -50,6 +50,10 @@ describe('DebugFlagState', () => {
       'visualizeFlowFields',
       'inspectDirtyNavTiles',
       'showStructuralCells',
+      'showSightRadius',
+      'showAttackRadius',
+      'showZombieState',
+      'showSoundField',
     ]);
   });
 });

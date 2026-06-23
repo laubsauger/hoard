@@ -9,6 +9,7 @@
 
 import { useEffect, useRef } from 'react';
 import { Plane, Raycaster, Vector2, Vector3 } from 'three';
+import Stats from 'stats.js';
 import {
   RendererHost,
   createWebGpuBackendFactory,
@@ -24,6 +25,8 @@ import { combatConfig } from '../config/domains/combat';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
+import { SceneGizmos } from '../render/debug';
+import { debugViewStore } from '../diagnostics/store';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
 import { buildCityDistrict } from '../game/scene';
@@ -46,6 +49,22 @@ function accessibilityFromSettings(s: SettingsState): RenderAccessibility {
 }
 
 const DEG2RAD = Math.PI / 180;
+
+/**
+ * Dev-only real-time perf meter (FPS / frame-ms / heap) over the live WebGPU frame loop. Established
+ * stats.js panel, mounted top-right; click the panel to cycle FPS↔MS↔MB. Never ships to players
+ * (gated on `import.meta.env.DEV`). True GPU-timestamp timing needs the engine to expose its
+ * `WebGPURenderer`; until then this measures the real per-frame wall-clock of update+compute+render.
+ */
+function createDevStats(): Stats | null {
+  if (!import.meta.env.DEV) return null;
+  const stats = new Stats();
+  stats.showPanel(0); // 0 = fps, 1 = ms, 2 = mb
+  const dom = stats.dom;
+  dom.style.cssText = 'position:fixed;top:8px;right:8px;left:auto;z-index:1000;cursor:pointer;';
+  document.body.appendChild(dom);
+  return stats;
+}
 
 /** The engine handle the React shell uses to issue slice-level intent (save/load/modify/weather). */
 export interface EngineHandle {
@@ -106,6 +125,9 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
     let cmdSeq = 1;
     const cleanups: (() => void)[] = [];
 
+    const stats = createDevStats();
+    if (stats) cleanups.push(() => stats.dom.remove());
+
     sessionStore.getState().setPhase('loading');
 
     void (async () => {
@@ -157,6 +179,15 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       const unsubAccessibility = settingsStore.subscribe((s) => scene?.setAccessibility(accessibilityFromSettings(s)));
       cleanups.push(unsubAccessibility);
 
+      // Dev-tools scene gizmos (perception/attack radii, FSM-state markers, sound field). Toggled via the
+      // debug-flag store; the layer self-hides when no flag is set, so it is free in normal play.
+      const gizmos = new SceneGizmos(tier);
+      scene.scene.add(gizmos.group);
+      cleanups.push(() => {
+        scene?.scene.remove(gizmos.group);
+        gizmos.dispose();
+      });
+
       const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
 
       const resize = (): void => {
@@ -194,6 +225,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const dz = hit ? hit.z - p.z : Math.sin(runtime.playerAim());
         runtime.aim(dx, dz);
         runtime.fire(dx, dz, 'torsoUpper');
+        scene?.fireFeedback(dx, dz); // B7: muzzle flash + tracer + report on fire
       };
       const onWheel = (e: WheelEvent): void => {
         e.preventDefault();
@@ -263,6 +295,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       const frame = (): void => {
         if (cancelled) return;
+        stats?.begin();
         const nowMs = performance.now();
         const dt = Math.min(0.1, (nowMs - last) / 1000);
         last = nowMs;
@@ -279,9 +312,29 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
         const p = runtime.player();
         camera.setTarget(p.x, 0, p.z);
+        // B7: drain the runtime's event queues and feed the visual stream into the combat-feedback gore
+        // system BEFORE syncFrame ages/renders it (this path was previously never called — gore drained
+        // nowhere). World events are not consumed by the viewport.
+        const drained = runtime.pollEvents();
+        scene?.ingestCombatEvents(drained.visual, camera.camera.position);
         scene?.syncFrame(dt, camera.camera);
-        if (scene) host?.render(scene.scene, camera.camera);
+        gizmos.update(runtime.zombies, debugViewStore.getState().flags, p, (qx, qz) =>
+          runtime.stimulus
+            .query(qx, qz, runtime.tick)
+            .filter((h) => h.stimulus.kind === 'sound')
+            .map((h) => ({ x: h.stimulus.x, z: h.stimulus.z, intensity: h.intensity })),
+        );
+        if (scene) {
+          // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
+          host?.setToneMapping(scene.toneMappingMode, scene.currentExposure);
+          // Assemble per-instance crowd transforms + advance animation phase on the GPU (V2) before the
+          // render reads them via the crowd material's positionNode. computeAsync is deprecated (r181);
+          // the renderer is initialized, so host.compute() runs synchronously.
+          host?.compute(scene.crowd.computeNode);
+          host?.render(scene.scene, camera.camera);
+        }
 
+        stats?.end();
         rafHandle = requestAnimationFrame(frame);
       };
       rafHandle = requestAnimationFrame(frame);

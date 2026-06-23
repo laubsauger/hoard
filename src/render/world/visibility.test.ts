@@ -4,6 +4,8 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveVisibilitySettings,
   resolveSurfaceVisibility,
+  resolveCutawayDepthSettings,
+  resolveCutawayDepthOffset,
   classifyThreat,
   threatMarkerStyle,
   type OcclusionContext,
@@ -55,6 +57,33 @@ describe('resolveSurfaceVisibility (T28/V20)', () => {
   it('reveals an interior only via player presence or portal/LOS', () => {
     expect(resolveSurfaceVisibility('interior', ctx({ playerInside: true }), settings).visible).toBe(true);
     expect(resolveSurfaceVisibility('interior', ctx({ portalOrLosToCamera: true }), settings).visible).toBe(true);
+  });
+});
+
+describe('cutaway depth offset (B3 — reveal faces must not z-fight)', () => {
+  const depth = resolveCutawayDepthSettings('desktop-high');
+
+  it('biases fading roof + upper-wall faces back and draws them after the opaque base', () => {
+    for (const kind of ['roof', 'upperWall'] as const) {
+      const o = resolveCutawayDepthOffset(kind, depth);
+      expect(o.polygonOffset).toBe(true);
+      expect(o.polygonOffsetFactor).toBeGreaterThan(0);
+      expect(o.renderOrder).toBeGreaterThan(0);
+    }
+  });
+
+  it('lifts the upper wall off the base by a vertical inset (the coplanar seam), but not the roof', () => {
+    expect(resolveCutawayDepthOffset('upperWall', depth).verticalInsetMeters).toBeGreaterThan(0);
+    expect(resolveCutawayDepthOffset('roof', depth).verticalInsetMeters).toBe(0);
+  });
+
+  it('never biases the retained base/interior (they own the depth buffer)', () => {
+    for (const kind of ['baseWall', 'interior'] as const) {
+      const o = resolveCutawayDepthOffset(kind, depth);
+      expect(o.polygonOffset).toBe(false);
+      expect(o.renderOrder).toBe(0);
+      expect(o.verticalInsetMeters).toBe(0);
+    }
   });
 });
 

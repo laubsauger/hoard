@@ -7,6 +7,48 @@ import { num, enumOf } from '../spec';
 import { registerDomain } from '../registry';
 
 export const postFXConfig = registerDomain('postFX', {
+  // ---- Tone mapping / exposure (B6 — wired to the WebGPURenderer output) ----
+  toneMappingMode: enumOf({
+    owner: 'postFX',
+    doc: 'Output tone-mapping operator applied by the renderer (HDR scene -> displayable range, B6).',
+    values: ['aces', 'agx', 'neutral', 'none'] as const,
+    default: 'agx', // AgX preserves shadow detail at night without crushing to black
+  }),
+  baseExposure: num({
+    owner: 'postFX',
+    unit: 'ratio',
+    doc: 'Base tone-mapping exposure multiplier before interior/night compensation (B6).',
+    default: 1,
+    min: 0.05,
+    max: 8,
+  }),
+
+  // ---- Cutaway depth bias (B3 — stop reveal faces z-fighting coplanar wall/ground/roof) ----
+  cutawayPolygonOffsetFactor: num({
+    owner: 'postFX',
+    unit: 'ratio',
+    doc: 'polygonOffsetFactor pushed onto roof/upper-wall cutaway materials so reveal faces never z-fight the retained base/ground (B3).',
+    default: 1,
+    min: 0,
+    max: 16,
+  }),
+  cutawayPolygonOffsetUnits: num({
+    owner: 'postFX',
+    unit: 'ratio',
+    doc: 'polygonOffsetUnits for cutaway reveal faces (B3).',
+    default: 1,
+    min: 0,
+    max: 64,
+  }),
+  cutawayInsetMeters: num({
+    owner: 'postFX',
+    unit: 'meters',
+    doc: 'Vertical gap inset between the retained wall base and the fading upper section so their shared faces are never coplanar (B3).',
+    default: 0.01,
+    min: 0,
+    max: 0.5,
+  }),
+
   // ---- Anti-aliasing / reconstruction (must keep outlines stable, T31/T32) ----
   antialiasMode: enumOf({
     owner: 'postFX',

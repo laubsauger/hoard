@@ -3,8 +3,24 @@
 // GPUDevice.lost promise (V23) via a narrow, documented accessor on three's backend.
 
 import type { Camera, Scene } from 'three';
-import { WebGPURenderer } from 'three/webgpu';
-import type { RendererBackend, RendererBackendFactory } from './renderer';
+import {
+  WebGPURenderer,
+  type ComputeNode,
+  ACESFilmicToneMapping,
+  AgXToneMapping,
+  NeutralToneMapping,
+  NoToneMapping,
+  type ToneMapping,
+} from 'three/webgpu';
+import type { RendererBackend, RendererBackendFactory, ToneMappingMode } from './renderer';
+
+/** Map the engine's tone-mapping mode onto three's tone-mapping constant (B6). Isolated to the GPU backend. */
+const TONE_MAPPING: Record<ToneMappingMode, ToneMapping> = {
+  aces: ACESFilmicToneMapping,
+  agx: AgXToneMapping,
+  neutral: NeutralToneMapping,
+  none: NoToneMapping,
+};
 
 /** three's base Backend type does not surface `device`; the WebGPU backend does. Narrow accessor. */
 interface WithGpuDevice {
@@ -38,6 +54,17 @@ class WebGpuRendererBackend implements RendererBackend {
   render(scene: Scene, camera: Camera): void {
     // render() may return a Promise in some paths; we drive it fire-and-forget within the frame loop.
     void this.requireRenderer().render(scene, camera);
+  }
+
+  setToneMapping(mode: ToneMappingMode, exposure: number): void {
+    const renderer = this.requireRenderer();
+    renderer.toneMapping = TONE_MAPPING[mode];
+    renderer.toneMappingExposure = exposure;
+  }
+
+  compute(node: ComputeNode): void {
+    // Synchronous compute (computeAsync deprecated since r181); the renderer is initialized in init().
+    this.requireRenderer().compute(node);
   }
 
   setSize(width: number, height: number): void {

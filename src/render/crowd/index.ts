@@ -1,10 +1,11 @@
 // T9 — crowd barrel.
 
 export {
-  packInstances,
+  packCrowdInputs,
   variationSeed,
-  FLOATS_PER_MATRIX,
-  FLOATS_PER_VARIATION,
+  variationScale,
+  FLOATS_PER_POSE,
+  FLOATS_PER_META,
   type PackOptions,
   type PackResult,
 } from './packing';

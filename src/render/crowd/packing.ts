@@ -1,14 +1,16 @@
-// T9 / V2 / V3 — pure SoA -> instance-buffer packing. NO per-zombie object/shader; one InstancedMesh
-// family reads the frozen ZOMBIE_FIELDS SoA views and we pack a single instance-matrix + variation buffer.
-// This function constructs NO GPU object and is fully unit-testable. Matrices match THREE.Matrix4.compose
-// (column-major) so they drop straight into InstancedMesh.instanceMatrix.
+// T9 / V2 / V3 — pure SoA -> GPU-input packing. NO per-zombie object/shader; one InstancedMesh family
+// reads the frozen ZOMBIE_FIELDS SoA views and we compact the LIVE instances into a small set of
+// per-instance INPUT arrays (pose + meta). The actual instance transform (mat4) is assembled on the GPU
+// in a TSL compute shader from these inputs (V2 "GPU-readable animation data") — the CPU no longer builds
+// matrices. This function constructs NO GPU object and is fully unit-testable: it only fills plain typed
+// arrays the renderer later wraps in storage buffers.
 
 import type { FieldViews } from '../../game/core/contracts/soa';
 
-/** 16 floats per instance (a column-major mat4), matching InstancedMesh.instanceMatrix layout. */
-export const FLOATS_PER_MATRIX = 16;
-/** 4 floats of per-instance variation: [variationSeed, archetype, animState, animPhase]. */
-export const FLOATS_PER_VARIATION = 4;
+/** 4 floats of per-instance pose input: [posX, posY, posZ, headingRadians]. */
+export const FLOATS_PER_POSE = 4;
+/** 4 floats of per-instance meta input: [scale, variationSeed, archetype, animState]. */
+export const FLOATS_PER_META = 4;
 
 function requireView<T>(views: FieldViews, name: string): T {
   const v = views[name];
@@ -42,24 +44,31 @@ export interface PackResult {
   readonly liveCount: number;
 }
 
+/** Deterministic per-slot scale within [scaleMin, scaleMax] derived from the variation seed. */
+export function variationScale(seed: number, variationCount: number, scaleMin: number, scaleMax: number): number {
+  const range = scaleMax - scaleMin;
+  return variationCount > 1 ? scaleMin + range * (seed / (variationCount - 1)) : scaleMin + range * 0.5;
+}
+
 /**
- * Pack live zombies from SoA views into a column-major instance-matrix buffer + a variation buffer.
- * Dead slots (alive == 0) are skipped and live instances are compacted to the front, so the caller sets
- * InstancedMesh.count = liveCount. Throws if live instances would exceed capacity (V4 — no silent drop).
+ * Pack live zombies from SoA views into the per-instance GPU INPUT arrays (pose + meta). Dead slots
+ * (alive == 0) are skipped and live instances are compacted to the front, so the caller sets
+ * InstancedMesh.count = liveCount and the compute shader assembles transforms for index 0..liveCount-1.
+ * Throws if live instances would exceed capacity (V4 — no silent drop).
  */
-export function packInstances(
+export function packCrowdInputs(
   views: FieldViews,
-  outMatrices: Float32Array,
-  outVariation: Float32Array,
+  outPose: Float32Array,
+  outMeta: Float32Array,
   opts: PackOptions,
 ): PackResult {
   const { count, capacity, variationCount, scaleMin, scaleMax } = opts;
   if (count < 0 || count > capacity) throw new Error(`count ${count} exceeds capacity ${capacity}`);
-  if (outMatrices.length < capacity * FLOATS_PER_MATRIX) {
-    throw new Error(`outMatrices too small: need ${capacity * FLOATS_PER_MATRIX}, got ${outMatrices.length}`);
+  if (outPose.length < capacity * FLOATS_PER_POSE) {
+    throw new Error(`outPose too small: need ${capacity * FLOATS_PER_POSE}, got ${outPose.length}`);
   }
-  if (outVariation.length < capacity * FLOATS_PER_VARIATION) {
-    throw new Error(`outVariation too small: need ${capacity * FLOATS_PER_VARIATION}, got ${outVariation.length}`);
+  if (outMeta.length < capacity * FLOATS_PER_META) {
+    throw new Error(`outMeta too small: need ${capacity * FLOATS_PER_META}, got ${outMeta.length}`);
   }
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
 
@@ -68,51 +77,25 @@ export function packInstances(
   const heading = requireView<Float32Array>(views, 'heading');
   const archetype = requireView<Uint16Array>(views, 'archetype');
   const animState = requireView<Uint8Array>(views, 'animState');
-  const animPhase = requireView<Float32Array>(views, 'animPhase');
 
-  const scaleRange = scaleMax - scaleMin;
   let live = 0;
   for (let slot = 0; slot < count; slot++) {
     if (alive[slot]! === 0) continue;
 
     const seed = variationSeed(slot, variationCount);
-    // Map seed -> [scaleMin, scaleMax] deterministically for per-instance size variation.
-    const sc = variationCount > 1 ? scaleMin + scaleRange * (seed / (variationCount - 1)) : scaleMin + scaleRange * 0.5;
+    const sc = variationScale(seed, variationCount, scaleMin, scaleMax);
 
-    const theta = heading[slot]!;
-    const c = Math.cos(theta);
-    const s = Math.sin(theta);
-    const px = position[slot * 3]!;
-    const py = position[slot * 3 + 1]!;
-    const pz = position[slot * 3 + 2]!;
+    const p = live * FLOATS_PER_POSE;
+    outPose[p] = position[slot * 3]!;
+    outPose[p + 1] = position[slot * 3 + 1]!;
+    outPose[p + 2] = position[slot * 3 + 2]!;
+    outPose[p + 3] = heading[slot]!;
 
-    const m = live * FLOATS_PER_MATRIX;
-    // column 0
-    outMatrices[m] = c * sc;
-    outMatrices[m + 1] = 0;
-    outMatrices[m + 2] = -s * sc;
-    outMatrices[m + 3] = 0;
-    // column 1
-    outMatrices[m + 4] = 0;
-    outMatrices[m + 5] = sc;
-    outMatrices[m + 6] = 0;
-    outMatrices[m + 7] = 0;
-    // column 2
-    outMatrices[m + 8] = s * sc;
-    outMatrices[m + 9] = 0;
-    outMatrices[m + 10] = c * sc;
-    outMatrices[m + 11] = 0;
-    // column 3 (translation)
-    outMatrices[m + 12] = px;
-    outMatrices[m + 13] = py;
-    outMatrices[m + 14] = pz;
-    outMatrices[m + 15] = 1;
-
-    const vbase = live * FLOATS_PER_VARIATION;
-    outVariation[vbase] = seed;
-    outVariation[vbase + 1] = archetype[slot]!;
-    outVariation[vbase + 2] = animState[slot]!;
-    outVariation[vbase + 3] = animPhase[slot]!;
+    const m = live * FLOATS_PER_META;
+    outMeta[m] = sc;
+    outMeta[m + 1] = seed;
+    outMeta[m + 2] = archetype[slot]!;
+    outMeta[m + 3] = animState[slot]!;
 
     live++;
     if (live > capacity) throw new Error(`live instance count exceeded capacity ${capacity}`);

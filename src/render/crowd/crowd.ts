@@ -1,42 +1,59 @@
 // T9 / V2 / V33 — GPU-instanced animated crowd. ONE shared mesh family + ONE InstancedMesh; NO per-zombie
-// object/shader/mixer. Reads the frozen SoA views and packs them via the pure packInstances() fn.
-// A per-instance variation buffer drives shader-side diversity. Resources are tracked for disposal (V24).
+// object/shader/mixer. The authoritative simulation owns the SoA on the CPU (V3); each frame we compact the
+// LIVE instances' inputs (pose + meta) into GPU storage buffers (packCrowdInputs), and a TSL COMPUTE shader
+// assembles the per-instance transform mat4 + advances the animation phase on the GPU (V2 "GPU-readable
+// animation data"). The material's positionNode reads the computed transform from the storage buffer.
+// Resources are tracked for disposal (V24).
 //
-// V33 — the per-instance matrix is routed through the WebGPU node/storage-attribute path (a node
-// MeshStandardNodeMaterial whose positionNode reads the instance matrix from instanced vertex buffer
-// attributes). This avoids three's auto InstanceNode, which for an InstancedMesh built from CORE
-// `three` uploads the WHOLE capacity-sized matrix array as a single UNIFORM buffer when the live count
-// is small (<=1000). At high capacity (e.g. desktop-high 4000 -> 4000*64 = 256000 bytes) that overflows
-// the 65536-byte max uniform binding, invalidating the bind group and silently dropping the crowd draw.
+// V33 history: r171 bound the capacity-sized instanceMatrix array as a single UNIFORM buffer, overflowing
+// the 65536-byte max-uniform-binding at high capacity and silently dropping the crowd. That required a
+// manual interleaved-vertex-buffer hack. three r184 fixed this natively — InstanceNode now checks
+// getUniformBufferLimit() and auto-falls-back to instanced vertex-buffer attributes — so the hack is gone.
+// We go further: the instance transform is no longer a CPU-built instanceMatrix at all. It is produced by a
+// compute shader into a storage buffer and consumed via material.positionNode (the canonical WebGPU/TSL path).
 
+import { BoxGeometry, Color, InstancedMesh } from 'three';
 import {
-  BoxGeometry,
-  DynamicDrawUsage,
-  InstancedBufferAttribute,
-  InstancedInterleavedBuffer,
-  InstancedMesh,
-} from 'three';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
+  MeshStandardNodeMaterial,
+  type ComputeNode,
+  type StorageBufferNode,
+  type UniformNode,
+} from 'three/webgpu';
 import {
   Fn,
-  instancedDynamicBufferAttribute,
+  cos,
+  float,
+  fract,
+  instanceIndex,
+  instancedArray,
   mat4,
   normalLocal,
   positionLocal,
+  sin,
   transformNormal,
+  uniform,
+  vec3,
+  vec4,
 } from 'three/tsl';
 import type { FieldViews } from '../../game/core/contracts/soa';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
-import { FLOATS_PER_MATRIX, FLOATS_PER_VARIATION, packInstances } from './packing';
+import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed } from './packing';
+
+/** Base crowd flesh/clothing tint; per-instance variation modulates its brightness in the shader (V2). */
+const CROWD_BASE_COLOR = 0x4a5a3a;
+const TAU = Math.PI * 2;
 
 export interface CrowdSettings {
   readonly capacity: number;
   readonly variationCount: number;
   readonly scaleMin: number;
   readonly scaleMax: number;
+  readonly phaseSpeedHz: number;
+  readonly bobMeters: number;
+  readonly brightnessSpread: number;
 }
 
 export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
@@ -45,63 +62,118 @@ export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
     variationCount: resolve(renderingConfig.crowdVariationCount, tier),
     scaleMin: resolve(renderingConfig.crowdInstanceScaleMin, tier),
     scaleMax: resolve(renderingConfig.crowdInstanceScaleMax, tier),
+    phaseSpeedHz: resolve(renderingConfig.crowdAnimPhaseSpeed, tier),
+    bobMeters: resolve(renderingConfig.crowdAnimBobMeters, tier),
+    brightnessSpread: resolve(renderingConfig.crowdVariationBrightnessSpread, tier),
   };
 }
 
 /**
- * Owns the shared crowd InstancedMesh. Construction is CPU-only (no GPU) so it can be instantiated in
- * tests, but the heavy correctness logic lives in the pure packInstances() fn which we unit-test directly.
+ * Owns the shared crowd InstancedMesh and its GPU storage buffers + compute node. Construction is CPU-only:
+ * building TSL node graphs (instancedArray/Fn/compute/uniform) needs NO GPU device, so the Crowd can be
+ * instantiated in node tests. Only renderer.compute(computeNode) execution needs the device — that happens
+ * in the frame loop, not here. The pure compaction/packing lives in packCrowdInputs() and is unit-tested.
  */
 export class Crowd {
   readonly mesh: InstancedMesh;
   readonly settings: CrowdSettings;
+  /** The TSL compute node the frame loop runs (renderer.compute(crowd.computeNode)) before each render. */
+  readonly computeNode: ComputeNode;
+
   private readonly geometry: BoxGeometry;
   private readonly material: MeshStandardNodeMaterial;
-  private readonly variationAttr: InstancedBufferAttribute;
-  /** Instanced vertex-buffer view over instanceMatrix.array; the storage/attribute instancing path (V33). */
-  private readonly matrixBuffer: InstancedInterleavedBuffer;
+
+  // CPU-side input arrays (compacted live instances). Wrapped in storage buffers; re-uploaded each frame.
+  private readonly poseInput: Float32Array;
+  private readonly metaInput: Float32Array;
+  private readonly poseBuffer: StorageBufferNode<'vec4'>;
+  private readonly metaBuffer: StorageBufferNode<'vec4'>;
+  /** Per-frame real delta fed to the GPU phase advance. */
+  private readonly dtUniform: UniformNode<'float', number>;
 
   constructor(settings: CrowdSettings, registry: ResourceRegistry) {
     this.settings = settings;
+    const cap = settings.capacity;
+
     // Shared mesh family placeholder (real archetype meshes land in T30). Capsule-ish box for the spike.
     this.geometry = registry.track(new BoxGeometry(0.5, 1.8, 0.4), 'geometry', 'crowd.geometry');
-    this.material = registry.track(new MeshStandardNodeMaterial({ color: 0x4a5a3a }), 'material', 'crowd.material');
-    this.mesh = new InstancedMesh(this.geometry, this.material, settings.capacity);
+    this.material = registry.track(new MeshStandardNodeMaterial({ color: CROWD_BASE_COLOR }), 'material', 'crowd.material');
+    this.mesh = new InstancedMesh(this.geometry, this.material, cap);
     this.mesh.count = 0;
     this.mesh.frustumCulled = false; // crowd spans large bounds; cull per-cluster later (T30)
     registry.track(this.mesh, 'buffer', 'crowd.instancedMesh');
 
-    // V33 — route the per-instance matrix through the node/storage-attribute path. Disabling three's
-    // auto InstanceNode (which keys off this flag) keeps the capacity-sized matrix array OUT of a uniform
-    // binding; the draw instance count still derives from mesh.count, so this changes only the GPU path.
-    (this.mesh.instanceMatrix as { isInstancedBufferAttribute: boolean }).isInstancedBufferAttribute = false;
-    this.matrixBuffer = new InstancedInterleavedBuffer(this.mesh.instanceMatrix.array, FLOATS_PER_MATRIX, 1);
-    this.matrixBuffer.setUsage(DynamicDrawUsage);
-    // Read the column-major mat4 as four instanced vec4 vertex attributes (matches packInstances layout).
-    const instanceMatrix = mat4(
-      instancedDynamicBufferAttribute(this.matrixBuffer, 'vec4', FLOATS_PER_MATRIX, 0),
-      instancedDynamicBufferAttribute(this.matrixBuffer, 'vec4', FLOATS_PER_MATRIX, 4),
-      instancedDynamicBufferAttribute(this.matrixBuffer, 'vec4', FLOATS_PER_MATRIX, 8),
-      instancedDynamicBufferAttribute(this.matrixBuffer, 'vec4', FLOATS_PER_MATRIX, 12),
-    );
+    // ---- GPU storage buffers (V24-tracked; StorageBufferNode is a disposable three Node) ----
+    // Inputs: pose [px,py,pz,heading] and meta [scale,seed,archetype,animState], compacted per frame.
+    this.poseInput = new Float32Array(cap * FLOATS_PER_POSE);
+    this.metaInput = new Float32Array(cap * FLOATS_PER_META);
+    this.poseBuffer = registry.track(instancedArray(this.poseInput, 'vec4'), 'buffer', 'crowd.poseBuffer');
+    this.metaBuffer = registry.track(instancedArray(this.metaInput, 'vec4'), 'buffer', 'crowd.metaBuffer');
+
+    // animPhase: GPU-resident animation phase state (V2). Seeded with per-slot offsets so instances are not
+    // in lockstep, then advanced on the GPU each frame. The compute output is the per-instance transform
+    // mat4, stored as FOUR per-instance vec4 column buffers: one entry per instance keeps each buffer at
+    // capacity*16 bytes (<= the 65536 uniform limit) AND lets the material read them as instanced VERTEX
+    // attributes via toAttribute() — the canonical zero-copy compute->render handoff (storage buffers are
+    // not bindable in the vertex stage, so a single fat storage buffer would be (mis)bound as a uniform).
+    const phaseSeed = new Float32Array(cap);
+    for (let i = 0; i < cap; i++) phaseSeed[i] = variationSeed(i, Math.max(1, settings.variationCount)) / Math.max(1, settings.variationCount);
+    const animPhase = registry.track(instancedArray(phaseSeed, 'float'), 'buffer', 'crowd.animPhase');
+    const cols = [0, 1, 2, 3].map((k) => registry.track(instancedArray(cap, 'vec4'), 'buffer', `crowd.transformCol${k}`));
+
+    this.dtUniform = uniform(0);
+    const phaseSpeed = uniform(settings.phaseSpeedHz);
+    const bobMeters = uniform(settings.bobMeters);
+
+    // ---- Compute: assemble per-instance transform mat4 + advance animation phase (over capacity) ----
+    this.computeNode = Fn(() => {
+      const pose = this.poseBuffer.element(instanceIndex);
+      const meta = this.metaBuffer.element(instanceIndex);
+      const pos = pose.xyz;
+      const heading = pose.w;
+      const scale = meta.x;
+
+      // Advance the GPU-resident phase, wrap to [0,1), and derive a subtle vertical walk-bob (V2).
+      const phase = fract(animPhase.element(instanceIndex).add(phaseSpeed.mul(this.dtUniform))).toVar();
+      animPhase.element(instanceIndex).assign(phase);
+      const bob = sin(phase.mul(TAU)).mul(bobMeters);
+
+      // Column-major TRS mat4: rotate about +Y by heading, uniform scale, translate by position (+bob in y).
+      const c = cos(heading);
+      const s = sin(heading);
+      cols[0]!.element(instanceIndex).assign(vec4(c.mul(scale), 0, s.mul(scale).negate(), 0));
+      cols[1]!.element(instanceIndex).assign(vec4(0, scale, 0, 0));
+      cols[2]!.element(instanceIndex).assign(vec4(s.mul(scale), 0, c.mul(scale), 0));
+      cols[3]!.element(instanceIndex).assign(vec4(pos.x, pos.y.add(bob), pos.z, 1));
+    })().compute(cap);
+
+    // ---- Material: rebuild the transform from the computed instanced column attributes (positionNode) ----
     this.material.positionNode = Fn(() => {
-      // Rotate normals by the instance transform so lighting stays correct per instance (matches three's
-      // own InstanceNode), then return the instance-space position the rest of the pipeline projects.
-      normalLocal.assign(transformNormal(normalLocal, instanceMatrix));
-      return instanceMatrix.mul(positionLocal).xyz;
+      const m = mat4(cols[0]!.toAttribute(), cols[1]!.toAttribute(), cols[2]!.toAttribute(), cols[3]!.toAttribute());
+      // Rotate the normal by the instance transform so per-instance lighting stays correct.
+      normalLocal.assign(transformNormal(normalLocal, m));
+      return m.mul(positionLocal).xyz;
     })();
 
-    const variation = new Float32Array(settings.capacity * FLOATS_PER_VARIATION);
-    this.variationAttr = new InstancedBufferAttribute(variation, FLOATS_PER_VARIATION);
-    this.variationAttr.setUsage(DynamicDrawUsage);
-    this.geometry.setAttribute('aVariation', this.variationAttr);
+    // Per-instance colour variation from the meta storage buffer (seed -> brightness band). NO new material.
+    const base = new Color(CROWD_BASE_COLOR);
+    const denom = Math.max(1, settings.variationCount - 1);
+    const spread = settings.brightnessSpread;
+    this.material.colorNode = Fn(() => {
+      const seed = this.metaBuffer.toAttribute().y; // per-instance variation seed (vertex attr -> varying)
+      const t = seed.div(denom); // 0..1 across the variation seeds
+      const brightness = float(1 - spread).add(t.mul(spread * 2)); // [1-spread, 1+spread]
+      return vec3(base.r, base.g, base.b).mul(brightness);
+    })();
   }
 
-  /** Pack `count` SoA slots into the instance buffer and flag the GPU buffers dirty. */
-  update(views: FieldViews, count: number): number {
-    const matrices = this.mesh.instanceMatrix.array as Float32Array;
-    const variation = this.variationAttr.array as Float32Array;
-    const { liveCount } = packInstances(views, matrices, variation, {
+  /**
+   * Compact `count` SoA slots into the GPU input buffers, flag them for re-upload, and stage the frame
+   * delta for the compute phase-advance. Returns the live instance count (also set as mesh.count so only
+   * live instances are drawn). The transform mat4 itself is assembled later by renderer.compute(computeNode).
+   */
+  update(views: FieldViews, count: number, dtSeconds: number): number {
+    const { liveCount } = packCrowdInputs(views, this.poseInput, this.metaInput, {
       count,
       capacity: this.settings.capacity,
       variationCount: this.settings.variationCount,
@@ -109,8 +181,11 @@ export class Crowd {
       scaleMax: this.settings.scaleMax,
     });
     this.mesh.count = liveCount;
-    this.matrixBuffer.needsUpdate = true; // re-upload the instanced matrix attribute (V33 storage path)
-    this.variationAttr.needsUpdate = true;
+    // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
+    // backend re-uploads the freshly compacted inputs this frame. The compute reads these next.
+    (this.poseBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
+    (this.metaBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
+    this.dtUniform.value = dtSeconds;
     return liveCount;
   }
 }

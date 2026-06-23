@@ -32,6 +32,14 @@ export const lightingConfig = registerDomain('lighting', {
     min: 0,
     max: 5,
   }),
+  minAmbientIntensity: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Hard floor on ambient fill so a night spawn never crushes the scene to black (B6 viewable-night floor).',
+    default: 0.12,
+    min: 0,
+    max: 2,
+  }),
 
   // ---- Dynamic local lights (flashlight/fire/alarm/vehicle) — V22 scaling step #5 ----
   localLightBudget: num({
@@ -80,6 +88,62 @@ export const lightingConfig = registerDomain('lighting', {
     default: 6,
     min: 1,
     max: 50,
+  }),
+  fogVisibilityTransmittance: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Transmittance at which the scene has fully faded to fog colour — sets the analytic fog far plane (B5).',
+    default: 0.12,
+    min: 0.001,
+    max: 0.99,
+  }),
+  fogFarMinMeters: num({
+    owner: 'lighting',
+    unit: 'meters',
+    doc: 'Lower clamp on the fog far distance (heavy weather) so the far plane never collapses onto the player (B5).',
+    default: 60,
+    min: 5,
+    max: 2000,
+  }),
+  fogFarMaxMeters: num({
+    owner: 'lighting',
+    unit: 'meters',
+    doc: 'Upper clamp on the fog far distance (clear weather) so distant geometry still fades into atmosphere (B5).',
+    default: 360,
+    min: 10,
+    max: 4000,
+  }),
+  fogNearRatio: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Fog near distance as a fraction of the fog far distance (linear fog onset).',
+    default: 0.35,
+    min: 0,
+    max: 0.95,
+  }),
+  fogDistanceSmoothingPerSecond: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Per-second exponential approach rate for fog near/far toward their target — decouples fog from per-frame severity changes so the boundary never sweeps the screen as bands (B5).',
+    default: 4,
+    min: 0.1,
+    max: 60,
+  }),
+  fogFloorLuminance: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Minimum luminance of the fog/background colour (lifts it off near-black so the scene reads against the far plane — B5).',
+    default: 0.16,
+    min: 0,
+    max: 1,
+  }),
+  nightExposureBoostStops: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc: 'Extra exposure stops applied at full darkness (scene-brightness 0) so a night scene stays viewable after tone mapping (B6).',
+    default: 1.5,
+    min: 0,
+    max: 6,
   }),
 
   // ---- Interior exposure transitions (eyes adapting going in/out of buildings) ----

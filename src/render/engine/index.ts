@@ -20,6 +20,7 @@ export {
   type RendererBackendFactory,
   type HostStatus,
   type HostEvents,
+  type ToneMappingMode,
 } from './renderer';
 export { createWebGpuBackendFactory, type WebGpuBackendOptions } from './webgpuBackend';
 export {

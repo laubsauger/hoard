@@ -12,3 +12,10 @@ export {
   type SpatialHashOptions,
   type CollisionSettings,
 } from './spatialHash';
+export {
+  resolveSeparation,
+  type SeparationAgent,
+  type SeparationParams,
+  type NeighborQuery,
+  type WalkableTest,
+} from './separation';

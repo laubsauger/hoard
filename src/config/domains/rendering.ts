@@ -132,6 +132,31 @@ export const renderingConfig = registerDomain('rendering', {
     min: 1,
     max: 2,
   }),
+  // ---- Crowd GPU-compute transform/animation (T9 / V2 GPU-readable animation data) ----
+  crowdAnimPhaseSpeed: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Cycles/sec the crowd compute shader advances each instance animation phase (drives the walk bob).',
+    default: 1.4,
+    min: 0,
+    max: 8,
+  }),
+  crowdAnimBobMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Peak vertical bob amplitude applied per instance from the GPU-advanced animation phase.',
+    default: 0.06,
+    min: 0,
+    max: 1,
+  }),
+  crowdVariationBrightnessSpread: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-instance shader brightness spread (+/-) around the base crowd colour, keyed by variation seed.',
+    default: 0.2,
+    min: 0,
+    max: 0.9,
+  }),
 
   // ---- Device-loss recovery (V23) ----
   deviceLossMaxRecoveries: num({
@@ -289,6 +314,48 @@ export const renderingConfig = registerDomain('rendering', {
     max: 200,
   }),
 
+  // ---- Combat feedback (B7 — muzzle flash / tracer / impact spark fed by VisualEvent + fire) ----
+  combatSparkLifetimeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'Lifetime of a pooled impact-spark/blood marker spawned from a hit VisualEvent before it is recycled (B7).',
+    default: 0.4,
+    min: 0.05,
+    max: 5,
+  }),
+  combatMuzzleFlashSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'Duration of the muzzle-flash light + sprite pulse on player fire (B7).',
+    default: 0.06,
+    min: 0.01,
+    max: 1,
+  }),
+  combatTracerSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'Duration the shot tracer segment stays visible after firing (B7).',
+    default: 0.08,
+    min: 0.01,
+    max: 1,
+  }),
+  combatMuzzleFlashIntensity: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Peak intensity of the muzzle-flash point light at full feedback before accessibility flash reduction (B7).',
+    default: 6,
+    min: 0,
+    max: 50,
+  }),
+  combatTracerRangeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Length of the rendered shot tracer from the muzzle along the aim direction (B7).',
+    default: 30,
+    min: 1,
+    max: 400,
+  }),
+
   // ---- Visibility / cutaway (T28 / V20): roof+upper-wall fade, base preserved, interiors stay hidden ----
   roofFadeSeconds: num({
     owner: 'rendering',
@@ -297,6 +364,14 @@ export const renderingConfig = registerDomain('rendering', {
     default: 0.25,
     min: 0,
     max: 5,
+  }),
+  wallPanelThicknessMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Thickness of a wall-shell panel (≪ navCell). Walls are thin oriented shells on exposed cell edges, not cell-filling blocks (B3).',
+    default: 0.25,
+    min: 0.02,
+    max: 2,
   }),
   wallBasePreservedHeightMeters: num({
     owner: 'rendering',

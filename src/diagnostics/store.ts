@@ -6,7 +6,7 @@
 import { createStore } from 'zustand/vanilla';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { EMPTY_SNAPSHOT, type DiagnosticsSnapshot } from './collector';
-import { DEFAULT_DEBUG_FLAGS, type DebugFlags } from './flags';
+import { DEFAULT_DEBUG_FLAGS, type BooleanDebugFlag, type DebugFlags } from './flags';
 
 export interface DebugViewState {
   readonly snapshot: DiagnosticsSnapshot;
@@ -14,6 +14,8 @@ export interface DebugViewState {
   readonly overlayVisible: boolean;
   applySnapshot(snapshot: DiagnosticsSnapshot): void;
   applyFlags(flags: DebugFlags): void;
+  /** Flip one boolean debug flag (used by the dev-tools toggle panel). */
+  toggleFlag(key: BooleanDebugFlag): void;
   setOverlayVisible(visible: boolean): void;
   toggleOverlay(): void;
 }
@@ -26,6 +28,7 @@ export function createDebugViewStore(overlayVisible = false) {
       overlayVisible,
       applySnapshot: (snapshot) => set({ snapshot }),
       applyFlags: (flags) => set({ flags }),
+      toggleFlag: (key) => set((s) => ({ flags: { ...s.flags, [key]: !s.flags[key] } })),
       setOverlayVisible: (overlayVisible_) => set({ overlayVisible: overlayVisible_ }),
       toggleOverlay: () => set((s) => ({ overlayVisible: !s.overlayVisible })),
     })),

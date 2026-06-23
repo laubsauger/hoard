@@ -11,6 +11,9 @@ import {
   resolveLocalLightBudget,
   fogTransmittance,
   interiorExposure,
+  resolveFogDistances,
+  approach,
+  resolveToneExposure,
   type ShadowCaster,
 } from './lighting';
 
@@ -104,5 +107,90 @@ describe('atmosphere (T29)', () => {
     expect(interiorExposure(1, 'desktop-high')).toBeGreaterThan(0);
     expect(interiorExposure(0.5, 'desktop-high')).toBeLessThan(interiorExposure(1, 'desktop-high'));
     expect(() => interiorExposure(1.5, 'desktop-high')).toThrow();
+  });
+});
+
+describe('fog distances (B5 — analytic + clamped + smoothed)', () => {
+  it('returns near as the configured fraction of far, far within the clamp band', () => {
+    const clear = resolveFogDistances(0, 'desktop-high');
+    expect(clear.far).toBeGreaterThan(clear.near);
+    expect(clear.near).toBeCloseTo(clear.far * 0.35, 5); // fogNearRatio default
+    expect(clear.far).toBeLessThanOrEqual(360); // fogFarMax default
+    expect(clear.far).toBeGreaterThanOrEqual(60); // fogFarMin default
+  });
+
+  it('pulls the far plane nearer as weather severity rises (monotonic), still clamped', () => {
+    const clear = resolveFogDistances(0, 'desktop-high').far;
+    const mid = resolveFogDistances(0.5, 'desktop-high').far;
+    const heavy = resolveFogDistances(1, 'desktop-high').far;
+    expect(mid).toBeLessThanOrEqual(clear);
+    expect(heavy).toBeLessThanOrEqual(mid);
+    expect(heavy).toBeGreaterThanOrEqual(60); // never collapses below the floor
+  });
+
+  it('is continuous (no navCell-quantized banding) — tiny severity steps give tiny far steps', () => {
+    const a = resolveFogDistances(0.30, 'desktop-high').far;
+    const b = resolveFogDistances(0.31, 'desktop-high').far;
+    expect(Math.abs(a - b)).toBeLessThan(5); // smooth, not a multi-meter jump
+  });
+
+  it('rejects out-of-range severity (V4)', () => {
+    expect(() => resolveFogDistances(-0.1, 'desktop-high')).toThrow();
+    expect(() => resolveFogDistances(1.1, 'desktop-high')).toThrow();
+  });
+});
+
+describe('approach (B5 — frame-rate-independent smoothing)', () => {
+  it('snaps to target when dt<=0 (construction-time prime)', () => {
+    expect(approach(10, 100, 5, 0)).toBe(100);
+    expect(approach(10, 100, 5, -1)).toBe(100);
+  });
+
+  it('moves toward the target but does not overshoot in one step', () => {
+    const next = approach(0, 100, 4, 1 / 60);
+    expect(next).toBeGreaterThan(0);
+    expect(next).toBeLessThan(100);
+  });
+
+  it('converges toward the target over repeated steps', () => {
+    let v = 0;
+    for (let i = 0; i < 240; i++) v = approach(v, 100, 4, 1 / 60);
+    expect(v).toBeCloseTo(100, 0);
+  });
+
+  it('rejects a negative rate (V4)', () => {
+    expect(() => approach(0, 1, -1, 0.1)).toThrow();
+  });
+});
+
+describe('tone-mapping exposure compensation (B6)', () => {
+  const base = 1;
+  const nightBoostStops = 1.5;
+
+  it('equals the base exposure at full daylight, exterior (no compensation)', () => {
+    expect(resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 1, nightBoostStops })).toBeCloseTo(base, 6);
+  });
+
+  it('lifts exposure as the scene darkens (night floor), monotonically', () => {
+    const day = resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 1, nightBoostStops });
+    const dusk = resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 0.5, nightBoostStops });
+    const night = resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 0, nightBoostStops });
+    expect(dusk).toBeGreaterThan(day);
+    expect(night).toBeGreaterThan(dusk);
+    // full dark adds exactly nightBoostStops -> 2^stops multiplier over base.
+    expect(night).toBeCloseTo(base * Math.pow(2, nightBoostStops), 6);
+  });
+
+  it('adds interior stops multiplicatively on top of the night term', () => {
+    const exterior = resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 0.5, nightBoostStops });
+    const interior = resolveToneExposure({ baseExposure: base, interiorStops: 1, sceneBrightness: 0.5, nightBoostStops });
+    expect(interior).toBeCloseTo(exterior * 2, 6); // +1 stop = x2
+  });
+
+  it('rejects invalid inputs (V4)', () => {
+    expect(() => resolveToneExposure({ baseExposure: 0, interiorStops: 0, sceneBrightness: 1, nightBoostStops })).toThrow();
+    expect(() => resolveToneExposure({ baseExposure: base, interiorStops: -1, sceneBrightness: 1, nightBoostStops })).toThrow();
+    expect(() => resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 1.5, nightBoostStops })).toThrow();
+    expect(() => resolveToneExposure({ baseExposure: base, interiorStops: 0, sceneBrightness: 1, nightBoostStops: -1 })).toThrow();
   });
 });

@@ -3,13 +3,23 @@
 // factory. Tests pass a fake backend; this host never constructs a GPU object itself.
 
 import type { Camera, Scene } from 'three';
+import type { ComputeNode } from 'three/webgpu';
 import { ResourceRegistry } from './resources';
+
+/** Output tone-mapping operator (B6). Mapped to three's tone-mapping constants inside the WebGPU backend. */
+export type ToneMappingMode = 'aces' | 'agx' | 'neutral' | 'none';
 
 /** Minimal renderer surface the host needs. The real WebGPU backend adapts three's WebGPURenderer. */
 export interface RendererBackend {
   /** Async device/adapter init (R4). */
   init(): Promise<void>;
   render(scene: Scene, camera: Camera): void;
+  /** Set the output tone-mapping operator + exposure (B6). The exposure is updated per frame for the
+   *  interior/night compensation; the operator rarely changes. */
+  setToneMapping(mode: ToneMappingMode, exposure: number): void;
+  /** Run a TSL compute node before rendering (e.g. the crowd transform/animation pass). Optional so the
+   *  non-GPU test fake need not implement it; the WebGPU backend forwards to renderer.compute(). */
+  compute?(node: ComputeNode): void;
   setSize(width: number, height: number): void;
   setPixelRatio(ratio: number): void;
   /** Register a device-loss listener; returns an unsubscribe fn (V23). */
@@ -88,8 +98,20 @@ export class RendererHost {
     this.backend.render(scene, camera);
   }
 
+  /** Run a TSL compute pass (e.g. crowd transform assembly) before the frame's render. Skipped while not
+   *  ready, mirroring render()'s controlled device-loss handling (V23). */
+  compute(node: ComputeNode): void {
+    if (this._status !== 'ready' || !this.backend) return;
+    this.backend.compute?.(node);
+  }
+
   setSize(width: number, height: number): void {
     this.backend?.setSize(width, height);
+  }
+
+  /** Apply the output tone-mapping operator + exposure (B6). No-op until a backend is ready. */
+  setToneMapping(mode: ToneMappingMode, exposure: number): void {
+    this.backend?.setToneMapping(mode, exposure);
   }
 
   setPixelRatio(ratio: number): void {

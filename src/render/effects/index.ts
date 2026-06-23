@@ -9,6 +9,13 @@ export {
   type GoreSettings,
 } from './gore';
 export {
+  CombatFeedbackSystem,
+  CombatFeedbackView,
+  resolveCombatFeedbackSettings,
+  type CombatFeedbackSettings,
+  type IngestContext,
+} from './combatFeedback';
+export {
   SCALING_STAGES,
   INITIAL_SCALING_STATE,
   isScalingLever,

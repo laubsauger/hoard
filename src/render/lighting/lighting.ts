@@ -148,3 +148,74 @@ export function interiorExposure(t: number, tier: QualityTier): number {
   const smooth = t * t * (3 - 2 * t);
   return smooth * stops;
 }
+
+export interface FogDistances {
+  readonly near: number;
+  readonly far: number;
+}
+
+/**
+ * Analytic linear-fog distances for the current weather severity (B5). The far plane is the distance at
+ * which Beer-Lambert transmittance reaches the configured visibility floor — solved in CLOSED FORM
+ * (far = -ln(transmittance) / extinction) rather than the old per-frame stepping loop that quantized far
+ * into navCell-sized jumps (the bands that swept the near-ortho frame). The result is continuous in
+ * severity and hard-clamped to [fogFarMin, fogFarMax]; near is a fixed fraction of far. Pure + monotonic:
+ * worse weather => nearer far. The scene smooths the live fog toward these targets (decoupling, B5).
+ */
+export function resolveFogDistances(weatherSeverity: number, tier: QualityTier): FogDistances {
+  if (weatherSeverity < 0 || weatherSeverity > 1) throw new Error(`weatherSeverity must be in [0,1], got ${weatherSeverity}`);
+  const base = resolve(lightingConfig.fogExtinctionPerMeter, tier);
+  const maxMul = resolve(lightingConfig.weatherExtinctionMultiplierMax, tier);
+  const threshold = resolve(lightingConfig.fogVisibilityTransmittance, tier);
+  const farMin = resolve(lightingConfig.fogFarMinMeters, tier);
+  const farMax = resolve(lightingConfig.fogFarMaxMeters, tier);
+  const nearRatio = resolve(lightingConfig.fogNearRatio, tier);
+  if (farMin > farMax) throw new Error(`fog far band invalid: min ${farMin} > max ${farMax}`);
+
+  const extinction = base * (1 + weatherSeverity * (maxMul - 1));
+  // extinction is strictly positive (base > 0), so the closed-form distance is finite.
+  const rawFar = -Math.log(threshold) / extinction;
+  const far = Math.min(farMax, Math.max(farMin, rawFar));
+  return { near: far * nearRatio, far };
+}
+
+/**
+ * Exponentially approach a target value at `ratePerSecond` over `dtSeconds` (frame-rate independent).
+ * Used to glide the live fog distances toward their analytic targets so a weather change never snaps the
+ * fog boundary across the frame (B5). dt <= 0 snaps to target (construction-time prime).
+ */
+export function approach(current: number, target: number, ratePerSecond: number, dtSeconds: number): number {
+  if (ratePerSecond < 0) throw new Error(`ratePerSecond must be non-negative, got ${ratePerSecond}`);
+  if (dtSeconds <= 0) return target;
+  const alpha = 1 - Math.exp(-ratePerSecond * dtSeconds);
+  return current + (target - current) * alpha;
+}
+
+export interface ExposureInputs {
+  /** Base exposure multiplier (postFX.baseExposure). */
+  readonly baseExposure: number;
+  /** Interior compensation in stops (output of interiorExposure(), 0 = exterior). */
+  readonly interiorStops: number;
+  /** Normalized scene brightness 0 (full dark / night) .. 1 (bright daylight). */
+  readonly sceneBrightness: number;
+  /** Extra stops applied at full darkness (lighting.nightExposureBoostStops). */
+  readonly nightBoostStops: number;
+}
+
+/**
+ * Resolve the renderer tone-mapping exposure (B6). Exposure compensation is expressed in STOPS and applied
+ * multiplicatively (2^stops): the interior transition lifts exposure as the player enters an enclosure, and
+ * a night term adds up to `nightBoostStops` extra stops as scene brightness falls to 0 — guaranteeing a
+ * viewable floor at a low-key night spawn after AgX/ACES tone mapping. Pure + monotonic in both terms;
+ * equals baseExposure exactly at full daylight, exterior. No magic numbers (all curve inputs are config).
+ */
+export function resolveToneExposure(i: ExposureInputs): number {
+  if (i.baseExposure <= 0) throw new Error(`baseExposure must be positive, got ${i.baseExposure}`);
+  if (i.interiorStops < 0) throw new Error(`interiorStops must be non-negative, got ${i.interiorStops}`);
+  if (i.sceneBrightness < 0 || i.sceneBrightness > 1) throw new Error(`sceneBrightness must be in [0,1], got ${i.sceneBrightness}`);
+  if (i.nightBoostStops < 0) throw new Error(`nightBoostStops must be non-negative, got ${i.nightBoostStops}`);
+  const darkness = 1 - i.sceneBrightness;
+  const nightStops = darkness * darkness * i.nightBoostStops; // ease-in: only deep dark gets the full lift
+  const totalStops = i.interiorStops + nightStops;
+  return i.baseExposure * Math.pow(2, totalStops);
+}

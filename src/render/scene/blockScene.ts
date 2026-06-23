@@ -30,11 +30,26 @@ import { playerConfig } from '../../config/domains/player';
 import { lightingConfig } from '../../config/domains/lighting';
 import { weatherConfig } from '../../config/domains/weather';
 import { renderingConfig } from '../../config/domains/rendering';
+import { postFXConfig } from '../../config/domains/postFX';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
+import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
-import { resolveSurfaceVisibility, resolveVisibilitySettings, type OcclusionContext } from '../world/visibility';
-import { fogTransmittance } from '../lighting/lighting';
+import {
+  resolveSurfaceVisibility,
+  resolveVisibilitySettings,
+  resolveCutawayDepthSettings,
+  resolveCutawayDepthOffset,
+  type OcclusionContext,
+  type CutawayDepthSettings,
+} from '../world/visibility';
+import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
+import {
+  CombatFeedbackSystem,
+  CombatFeedbackView,
+  resolveCombatFeedbackSettings,
+} from '../effects/combatFeedback';
+import type { VisualEvent } from '../../game/core/contracts/events';
 import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
@@ -58,8 +73,11 @@ interface FadeSurface {
   opacity: number;
 }
 
-const FOG_VISIBILITY_TRANSMITTANCE = 0.12; // distance at which the scene fades to fog colour
 const PLAYER_BASE_EMISSIVE = 0.4; // authored player-rim glow at full outline strength (scaled by V29 setting)
+// Authored cool-grey fog/atmosphere hue (relative channel weights); luminance is lifted off near-black to
+// the configured floor so the far plane never reads as a black void (B5). Slightly warmer/brighter by day.
+const FOG_HUE = { r: 0.62, g: 0.68, b: 0.78 } as const;
+const FOG_DAY_LUMINANCE_BONUS = 0.06;
 
 export class BlockScene {
   readonly scene = new Scene();
@@ -78,7 +96,13 @@ export class BlockScene {
   private readonly lighting = resolveDomain(lightingConfig, this.tierOf());
   private readonly weatherCfg = resolveDomain(weatherConfig, this.tierOf());
   private readonly visibility = resolveVisibilitySettings(this.tierOf());
+  private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
+  private readonly wallPanelThickness = resolve(renderingConfig.wallPanelThicknessMeters, this.tierOf());
+  /** Tone-mapping operator + base exposure (B6) — applied to the renderer by the host each frame. */
+  readonly toneMappingMode = resolve(postFXConfig.toneMappingMode, this.tierOf()) as ToneMappingMode;
+  private readonly baseExposure = resolve(postFXConfig.baseExposure, this.tierOf());
+  private readonly exposureTransitionSeconds = resolve(lightingConfig.exposureTransitionSeconds, this.tierOf());
 
   private readonly navCellSize: number;
   private readonly sun: DirectionalLight;
@@ -89,6 +113,14 @@ export class BlockScene {
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
+
+  /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
+  private readonly combat: CombatFeedbackSystem;
+  private readonly combatView: CombatFeedbackView;
+  /** Smoothed interior/exterior exposure transition 0..1 (B6) — eyes adapting, not a snap. */
+  private interiorTransition = 0;
+  /** Live tone-mapping exposure (B6) — read by the renderer host each frame. */
+  private exposure = 1;
 
   // shared, tracked GPU resources (V24)
   private readonly mats: MeshStandardMaterial[] = [];
@@ -123,6 +155,12 @@ export class BlockScene {
 
     this.crowd = new Crowd(resolveCrowdSettings(this.tier), this.registry);
     this.scene.add(this.crowd.mesh);
+
+    // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
+    const combatSettings = resolveCombatFeedbackSettings(this.tier);
+    this.combat = new CombatFeedbackSystem(combatSettings);
+    this.combatView = new CombatFeedbackView(combatSettings, this.registry);
+    this.combatView.attachTo(this.scene);
 
     this.syncBreach();
     this.syncFrame(0, undefined);
@@ -181,12 +219,25 @@ export class BlockScene {
     const wallH = this.world.buildingWallHeightMeters;
     const baseH = Math.min(this.visibility.baseHeightMeters, wallH);
     const upperH = Math.max(0, wallH - baseH);
+    const th = Math.min(this.wallPanelThickness, this.navCellSize); // thin shell, never wider than the cell
 
-    const baseGeo = this.geo('wallBase.geo', new BoxGeometry(this.navCellSize, baseH, this.navCellSize));
-    const upperGeo = upperH > 0 ? this.geo('wallUpper.geo', new BoxGeometry(this.navCellSize, upperH, this.navCellSize)) : null;
+    // B3: walls are THIN oriented shells on exposed cell edges (not cell-filling blocks). Two geometries per
+    // band: one for edges running along X (thickness in Z), one for edges along Z (thickness in X).
+    const baseGeoX = this.geo('wallBaseX.geo', new BoxGeometry(this.navCellSize, baseH, th));
+    const baseGeoZ = this.geo('wallBaseZ.geo', new BoxGeometry(th, baseH, this.navCellSize));
+    const upperGeoX = upperH > 0 ? this.geo('wallUpperX.geo', new BoxGeometry(this.navCellSize, upperH, th)) : null;
+    const upperGeoZ = upperH > 0 ? this.geo('wallUpperZ.geo', new BoxGeometry(th, upperH, this.navCellSize)) : null;
     const baseMat = this.mat('wallBase', { color: 0x6b6256, roughness: 0.85 });
     const upperMat = this.mat('wallUpper', { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
     const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 }); // the destructible wall, tinted
+
+    // B3: bias the fading upper-wall faces back + lift them off the retained base so reveal faces never
+    // z-fight the coplanar base top / ground (cutaway). Decision is pure (resolveCutawayDepthOffset).
+    const upperOffset = resolveCutawayDepthOffset('upperWall', this.cutawayDepth);
+    upperMat.polygonOffset = upperOffset.polygonOffset;
+    upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+    upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+    const upperBottomY = baseH + upperOffset.verticalInsetMeters;
 
     // structural-section nav cells get distinct, hideable meshes; everything else is a plain wall.
     const sectionByNav = new Map<number, number>(); // navIndex -> structuralCell
@@ -199,6 +250,19 @@ export class BlockScene {
     const wallsGroup = new Group();
     const upperGroup = new Group();
 
+    // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
+    const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
+      const open = (nx: number, ny: number): boolean =>
+        nx < 0 || ny < 0 || nx >= grid.width || ny >= grid.height || !grid.isBlocked(grid.index(nx, ny));
+      const out: { dx: number; dz: number; along: 'x' | 'z' }[] = [];
+      if (open(cx, cy - 1)) out.push({ dx: 0, dz: -1, along: 'x' });
+      if (open(cx, cy + 1)) out.push({ dx: 0, dz: 1, along: 'x' });
+      if (open(cx + 1, cy)) out.push({ dx: 1, dz: 0, along: 'z' });
+      if (open(cx - 1, cy)) out.push({ dx: -1, dz: 0, along: 'z' });
+      return out;
+    };
+
+    const half = this.navCellSize / 2;
     for (let cy = 0; cy < grid.height; cy++) {
       for (let cx = 0; cx < grid.width; cx++) {
         const idx = grid.index(cx, cy);
@@ -206,34 +270,40 @@ export class BlockScene {
         const wx = (cx + 0.5) * this.navCellSize;
         const wz = (cy + 0.5) * this.navCellSize;
         const sc = sectionByNav.get(idx);
-        if (sc !== undefined) {
-          // Destructible section cell — tracked so a breach hides exactly this footprint.
-          const objs: Object3D[] = [];
-          const seg = new Mesh(baseGeo, sectionMat);
-          seg.position.set(wx, baseH / 2, wz);
-          seg.castShadow = true;
-          wallsGroup.add(seg);
-          objs.push(seg);
+        const exposed = edges(cx, cy);
+        // A fully-enclosed wall cell would have no exposed edge — emit a single thin core panel so it still
+        // reads (and, for a section cell, still has a hideable mesh for breach). Walls border open space.
+        const faces = exposed.length > 0 ? exposed : [{ dx: 0, dz: 1, along: 'x' as const }];
+        const sectionObjs: Object3D[] = [];
+
+        for (const e of faces) {
+          const px = wx + e.dx * half;
+          const pz = wz + e.dz * half;
+          const baseGeo = e.along === 'x' ? baseGeoX : baseGeoZ;
+          const upperGeo = e.along === 'x' ? upperGeoX : upperGeoZ;
+
+          const base = new Mesh(baseGeo, sc !== undefined ? sectionMat : baseMat);
+          base.position.set(px, baseH / 2, pz);
+          base.castShadow = true;
+          base.receiveShadow = true;
+          wallsGroup.add(base);
+          if (sc !== undefined) sectionObjs.push(base);
+
           if (upperGeo) {
-            const segU = new Mesh(upperGeo, sectionMat);
-            segU.position.set(wx, baseH + upperH / 2, wz);
-            wallsGroup.add(segU);
-            objs.push(segU);
+            const upper = new Mesh(upperGeo, sc !== undefined ? sectionMat : upperMat);
+            upper.position.set(px, upperBottomY + upperH / 2, pz);
+            upper.castShadow = true;
+            if (sc !== undefined) {
+              // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
+              wallsGroup.add(upper);
+              sectionObjs.push(upper);
+            } else {
+              upper.renderOrder = upperOffset.renderOrder;
+              upperGroup.add(upper);
+            }
           }
-          this.sectionMeshes.push({ cell: sc, objects: objs });
-          continue;
         }
-        const base = new Mesh(baseGeo, baseMat);
-        base.position.set(wx, baseH / 2, wz);
-        base.castShadow = true;
-        base.receiveShadow = true;
-        wallsGroup.add(base);
-        if (upperGeo) {
-          const upper = new Mesh(upperGeo, upperMat);
-          upper.position.set(wx, baseH + upperH / 2, wz);
-          upper.castShadow = true;
-          upperGroup.add(upper);
-        }
+        if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
       }
     }
     this.scene.add(wallsGroup, upperGroup);
@@ -246,8 +316,13 @@ export class BlockScene {
     const rw = (b.maxCx - b.minCx + 1) * this.navCellSize;
     const rd = (b.maxCy - b.minCy + 1) * this.navCellSize;
     const roofMat = this.mat('roof', { color: 0x4c4a44, roughness: 0.9, transparent: true, opacity: 1 });
+    const roofOffset = resolveCutawayDepthOffset('roof', this.cutawayDepth);
+    roofMat.polygonOffset = roofOffset.polygonOffset;
+    roofMat.polygonOffsetFactor = roofOffset.polygonOffsetFactor;
+    roofMat.polygonOffsetUnits = roofOffset.polygonOffsetUnits;
     const roof = new Mesh(this.geo('roof.geo', new PlaneGeometry(rw, rd)), roofMat);
     roof.rotation.x = -Math.PI / 2;
+    roof.renderOrder = roofOffset.renderOrder;
     roof.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, wallH, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
     this.scene.add(roof);
     this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', heightMeters: wallH, opacity: 1 });
@@ -310,15 +385,46 @@ export class BlockScene {
    * `camera` is optional only for the construction-time prime; the live loop always passes it.
    */
   syncFrame(dtSeconds: number, camera: Camera | undefined): void {
-    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count);
+    // Compact live crowd inputs into the GPU storage buffers; the transform mat4 + animation phase are
+    // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport).
+    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds);
 
     const p = this.runtime.player();
     this.playerMesh.position.set(p.x, 0, p.z);
     this.playerMesh.rotation.y = -this.runtime.playerAim() + Math.PI / 2;
 
     this.syncBreach();
-    this.syncLighting();
+    this.syncLighting(dtSeconds);
     this.syncCutaway(dtSeconds, camera);
+
+    // Combat feedback (B7): age pulses + gore, then reflect onto the GPU objects.
+    this.combat.update(Math.max(0, dtSeconds));
+    this.combatView.sync(this.combat, this.accessibility.feedback.reduceFlashes);
+  }
+
+  /**
+   * Consume this frame's drained VisualEvents (B7) — feeds the pooled GoreSystem so hits produce blood /
+   * sever feedback. `cameraPos` lets distant gore simplify (V8). Called by the viewport after pollEvents().
+   */
+  ingestCombatEvents(events: readonly VisualEvent[], cameraPos: { x: number; y: number; z: number }): void {
+    this.combat.ingest(events, {
+      cameraX: cameraPos.x,
+      cameraY: cameraPos.y,
+      cameraZ: cameraPos.z,
+      goreIntensity: this.accessibility.goreIntensity,
+    });
+  }
+
+  /** Player fired (B7) — flash the muzzle + draw a tracer from the player's muzzle along the aim direction. */
+  fireFeedback(dirX: number, dirZ: number): void {
+    const p = this.runtime.player();
+    const muzzleY = this.player.bodyHeightMeters * 0.6;
+    this.combat.fire(p.x, muzzleY, p.z, dirX, dirZ);
+  }
+
+  /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */
+  get currentExposure(): number {
+    return this.exposure;
   }
 
   private syncBreach(): void {
@@ -328,7 +434,7 @@ export class BlockScene {
     }
   }
 
-  private syncLighting(): void {
+  private syncLighting(dtSeconds: number): void {
     const severity = this.runtime.weatherSeverity;
     const sky = computeSkyState(this.runtime.timeOfDay(), this.lighting, this.weatherCfg, severity);
 
@@ -337,19 +443,37 @@ export class BlockScene {
     this.sun.target.position.set(0, 0, 0);
     this.sun.intensity = sky.keyIntensity;
     this.sun.color.setHex(sky.isDay ? 0xfff2dc : 0xaebed8);
-    this.ambient.intensity = sky.ambientIntensity;
-    this.hemi.intensity = sky.ambientIntensity * 0.5;
+    // B6: floor the ambient/hemisphere fill so a low-key night spawn never crushes unlit faces to black.
+    const ambient = Math.max(sky.ambientIntensity, this.lighting.minAmbientIntensity);
+    this.ambient.intensity = ambient;
+    this.hemi.intensity = ambient * 0.5;
 
-    // Fog far = the distance at which the weather extinction drops transmittance below the threshold.
-    let far = 400;
-    for (let d = this.navCellSize; d <= 400; d += this.navCellSize) {
-      if (fogTransmittance(d, severity, this.tier) <= FOG_VISIBILITY_TRANSMITTANCE) { far = d; break; }
-    }
-    this.fog.near = far * 0.25;
-    this.fog.far = far;
-    const night = sky.isDay ? 0 : 1;
-    this.fog.color.setRGB(0.043 + 0.02 * (1 - night), 0.051, 0.039);
+    // B5: analytic, clamped fog distances (no per-frame stepping-loop banding), smoothed toward target so a
+    // weather change never sweeps the fog boundary across the near-ortho frame as bands.
+    const target = resolveFogDistances(severity, this.tier);
+    const rate = this.lighting.fogDistanceSmoothingPerSecond;
+    this.fog.far = approach(this.fog.far, target.far, rate, dtSeconds);
+    this.fog.near = approach(this.fog.near, target.near, rate, dtSeconds);
+
+    // B5: lift the fog/background colour off near-black to the configured luminance floor (brighter by day)
+    // so distant geometry fades into atmosphere instead of a black void.
+    const lum = this.lighting.fogFloorLuminance + (sky.isDay ? FOG_DAY_LUMINANCE_BONUS : 0);
+    this.fog.color.setRGB(FOG_HUE.r * lum, FOG_HUE.g * lum, FOG_HUE.b * lum);
     (this.scene.background as Color).copy(this.fog.color);
+
+    // B6: resolve the renderer tone-mapping exposure — interior compensation + a night floor so the scene
+    // stays viewable after AgX/ACES tone mapping. Smooth the interior transition (eyes adapting).
+    const insideTarget = this.isPlayerInsideBuilding() ? 1 : 0;
+    const transitionRate = this.exposureTransitionSeconds > 0 ? 1 / this.exposureTransitionSeconds : Infinity;
+    this.interiorTransition = approach(this.interiorTransition, insideTarget, transitionRate, dtSeconds);
+    const dayMax = this.lighting.sunIntensity + this.lighting.ambientIntensity;
+    const sceneBrightness = dayMax > 0 ? Math.min(1, Math.max(0, (sky.keyIntensity + sky.ambientIntensity) / dayMax)) : 0;
+    this.exposure = resolveToneExposure({
+      baseExposure: this.baseExposure,
+      interiorStops: interiorExposure(Math.min(1, Math.max(0, this.interiorTransition)), this.tier),
+      sceneBrightness,
+      nightBoostStops: this.lighting.nightExposureBoostStops,
+    });
   }
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {

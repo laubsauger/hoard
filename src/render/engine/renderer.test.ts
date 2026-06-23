@@ -16,6 +16,10 @@ class FakeBackend implements RendererBackend {
   render(): void {
     this.renderCalls += 1;
   }
+  toneMappingCalls = 0;
+  setToneMapping(): void {
+    this.toneMappingCalls += 1;
+  }
   setSize(): void {}
   setPixelRatio(): void {}
   onDeviceLost(cb: (reason: string) => void): () => void {

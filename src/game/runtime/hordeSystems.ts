@@ -7,7 +7,13 @@ import type { FixedClock, SystemContext } from '@/game/core';
 import type { StimulusField } from '@/game/stimulus';
 import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/game/simulation';
 import { steer, type FlowFieldCache } from '@/game/navigation';
-import { CollisionLayer, layerMask, type SpatialHash } from '@/game/navigation/collision';
+import {
+  CollisionLayer,
+  layerMask,
+  resolveSeparation,
+  type SeparationAgent,
+  type SpatialHash,
+} from '@/game/navigation/collision';
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
@@ -15,6 +21,9 @@ import type { TestBlock, Vec3 } from '@/game/scene';
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
+
+/** Strips readonly so pooled penetration-resolution agents can be re-filled in place across ticks. */
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 /** Planar (XZ) distance from a zombie slot to the player — shared by the horde steps and snapshots. */
 export function planarDistanceToPlayer(
@@ -57,6 +66,12 @@ export class HordeSimulation {
   private soundLureCell: number | null = null;
   private soundLureUntilTick = -1;
 
+  // Reused per-tick work buffers for the penetration-resolution pass — pooled so the everyTick step
+  // allocates nothing in steady state (keeps the crowd-scale benchmark's p99 free of GC spikes).
+  private readonly resolvePool: SeparationAgent[] = [];
+  private readonly resolveBySlot = new Map<number, SeparationAgent>();
+  private readonly resolveNeighbors: SeparationAgent[] = [];
+
   constructor(private readonly d: HordeSimulationDeps) {}
 
   /** everyTick: shared-flow steering + movement integrate (V12/V15/V19). */
@@ -94,6 +109,81 @@ export class HordeSimulation {
         zombies.setVelocity(slot, 0, 0, 0);
       }
     });
+
+    // B4 / V19: the steering above only SOFT-separates. Resolve any remaining hard interpenetration
+    // among the individually-visible tiers so bodies never visibly overlap. Abstract/low stays exempt.
+    this.resolveCrowdOverlap();
+  }
+
+  /**
+   * Hard min-spacing penetration resolution (B4 / V19). Runs AFTER the movement integrate: gathers the
+   * visible-tier agents (sim tier <= configured max), pushes overlapping pairs apart to at least their
+   * min spacing via a pure relaxation pass, keeps the walkable check authoritative (no wall push-through),
+   * then writes the corrected positions back to the store and re-buckets the moved agents in the spatial
+   * hash so subsequent queries stay correct. Abstract-tier agents are exempt (compressed horde may overlap).
+   */
+  private resolveCrowdOverlap(): void {
+    const { zombies, spatial } = this.d;
+    const { minSpacingScale, separationIterations, maxResolvedSimTier, broadPhaseCellSize } =
+      spatial.settings;
+    if (separationIterations <= 0) return;
+
+    // Build the resolvable set (visible tiers only) into the pooled buffers. The SeparationAgent x/z
+    // are mutated in place by the resolver; abstract/low tier (sim tier > max) is excluded so it stays
+    // free to compress/overlap (V19).
+    const pool = this.resolvePool;
+    const bySlot = this.resolveBySlot;
+    bySlot.clear();
+    let n = 0;
+    zombies.forEachAlive((slot) => {
+      if (zombies.getSimTier(slot) > maxResolvedSimTier) return;
+      const a = spatial.get(slot);
+      let agent = pool[n] as Mutable<SeparationAgent> | undefined;
+      if (!agent) {
+        agent = { id: slot, x: a.x, z: a.z, radius: a.radius };
+        pool[n] = agent;
+      } else {
+        agent.id = slot;
+        agent.x = a.x;
+        agent.z = a.z;
+        agent.radius = a.radius;
+      }
+      bySlot.set(slot, agent);
+      n += 1;
+    });
+    pool.length = n; // present only the agents filled this tick (no allocation; pooled objects reused)
+    if (n < 2) return;
+
+    // Neighbour candidates come from the broad-phase hash (bounded, V19), filtered to the resolvable set.
+    // The query radius covers the largest possible min spacing within a cell window; live distances are
+    // recomputed from the mutated agent positions inside the resolver. The neighbour scratch array is
+    // reused — the resolver fully consumes it before requesting the next agent's neighbours.
+    const queryRadius = minSpacingScale * 2 * spatial.settings.defaultAgentRadius + broadPhaseCellSize;
+    const scratch = this.resolveNeighbors;
+    const neighborsOf = (agent: SeparationAgent): SeparationAgent[] => {
+      const ids = spatial.query(agent.x, agent.z, queryRadius, MOVEMENT_MASK, { exclude: agent.id });
+      scratch.length = 0;
+      for (const id of ids) {
+        const neighbor = bySlot.get(id);
+        if (neighbor) scratch.push(neighbor);
+      }
+      return scratch;
+    };
+
+    const moved = resolveSeparation(
+      pool,
+      neighborsOf,
+      (x, z) => this.d.scene.isWalkableWorld(x, z),
+      { iterations: separationIterations, minSpacingScale },
+    );
+
+    const pos: [number, number, number] = [0, 0, 0];
+    for (const slot of moved) {
+      const agent = bySlot.get(slot)!;
+      zombies.getPosition(slot, pos);
+      zombies.setPosition(slot, agent.x, pos[1], agent.z);
+      spatial.update(slot, agent.x, agent.z);
+    }
   }
 
   /**

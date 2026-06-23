@@ -59,6 +59,8 @@ NON-GOALS at launch (unless separately approved):
 
 Decision rule on conflict: feature vs (readability | systemic consequence | stable perf | production capacity) → preserve central promise (§G) first.
 
+Reference-fidelity bar: `docs/ART-DIRECTION.md` + `docs/inspo/` = the visual target (residential decay diorama; hand-painted outlined survivors; voxel substrate hidden until breach). Gray-box primitives = GATE-0 scaffolding only; M1+ "done" requires the authored look (V37).
+
 ---
 
 ## §I — External surfaces
@@ -167,6 +169,20 @@ Architecture-boundary + non-negotiable rules. Numbered, monotonic.
 - **V31** Survival systems = slow pressure, not constant meter babysitting. Hunger/thirst, fatigue/sleep (quality depends on security/pain/noise/temp), bleeding/pain (persist, readable severity), infection risk (consistent rules, communicated via symptoms), encumbrance (weight+container capacity+quick-access cost), stress/panic (affect control + awareness, no agency removal). Progression increases competence/options/reliability, NOT superhuman damage. Tension rule: every major system feeds "how safe is this place now, and what did the player do to change that?"
 - **V32** (backprop B1) Each fixed tick within a multi-tick frame MUST advance the tick index passed to systems. A frame running N catch-up ticks invokes scheduler/systems with tick, tick+1, … tick+N-1 — NOT the final index N times. Else interval-cadence systems (perception/tier/sound) misfire under variable-dt frames. Test with a variable-dt frame that advances >1 tick.
 - **V33** (backprop B2) Per-instance / crowd GPU data that scales with entity capacity MUST use storage buffers or instanced vertex attributes via the WebGPU node path — NEVER a uniform buffer. Respect `maxUniformBufferBindingSize` (65536). A capacity-sized uniform (e.g. instanceMatrix as uniform = capacity×64B) silently invalidates the bind group and drops the draw. Verify by zero WebGPU validation errors in the in-browser smoke check at max horde capacity.
+- **V34** (backprop B3) Visible structural geometry = thin authored shells, NOT cell-filling solids. Wall panel thickness ≪ nav-cell; cutaway/reveal faces MUST NOT be coplanar with retained walls/ground — inset + `polygonOffset`/`renderOrder` to kill z-fighting. Breach still hides cell shape (V30).
+- **V35** (backprop B4) Hero/active/visible-tier agents MUST resolve agent-agent penetration to a min center distance (~2×radius) AFTER movement integrate. Soft steering separation alone (V19) is insufficient for visible tiers; only low/abstract tiers may interpenetrate. Doorway queueing/compression preserved.
+- **V36** Desktop-high reference scene MUST present readable lighting: directional key + visible cast shadows + tone-mapped exposure + ambient/contact AO. Raw unlit/flat-ambient = release-blocker. Verify in-browser (not unit-only), per V8.
+- **V37** Authored environment MUST read as its named real-world place (residential block = rooms, doors, windows, furniture, façade/interior materials per ART-DIRECTION) before a slice counts done (V27). Gray-box = scaffolding, not deliverable.
+- **V38** Atmosphere stays readable + stable: fog is smooth distance/height-based with continuous params (no per-frame near/far snapping that sweeps visible bands); fog colour ≠ near-black background crushing all geometry; at reference tier the player + nearby ground stay legible across weather/time (V8, V36).
+- **V39** Every authoritative combat outcome surfaces a render reaction. The frozen VisualEvent stream (hitReaction / bloodSpray / partDetached / entityDied / soundEmitted) MUST be drained each rendered frame and turned into feedback: muzzle flash + report on fire, hit flinch, directional blood, sever silhouettes, death reaction. A built effect system never fed events = not done (V8, V27).
+- **V40** Death is a visible state transition, not an instant despawn. A killed entity plays a death reaction and leaves a compact persistent corpse (settled prop, pooled, configured lifetime, saved as delta per V9/V18) before eviction; render NEVER pops a live body off-screen without a death event. Dismemberment consequences persist on the corpse.
+- **V41** Aim is single-sourced: ONE heading convention shared by sim + render (no ad-hoc per-mesh offset). The player avatar MUST face the aim/cursor target each frame within a small tolerance; firing direction == displayed facing.
+- **V42** Agent movement respects body radius against STATIC blockers: a move is validated against impassable cells (walls / closed-or-locked doors / boarded / obstruction) with the agent's radius margin, NOT just the centre point — no part of a body penetrates a blocked cell; reject or slide. Pairs with agent-agent min-spacing (V35); together no visible body overlaps a wall or another body beyond the V19 low-tier tolerance.
+- **V43** Interaction is context-filtered: the verbs offered on a target = f(target type, held items/tools, skills, proximity). NEVER offer an action the player cannot perform — omit it, or show it disabled with the missing requirement. ONE context surface (radial/menu) is the single entry point; a default-verb key (`E`) performs the top action without opening it.
+- **V44** World actions are timed + interruptible: non-instant interactions run as queued timed actions with an on-character progress indicator, cancellable by the player and auto-cancelled by movement/threat. The sim (not the UI) owns action duration + completion; skill scales duration (V1/V12).
+- **V45** ONE unified container model: furniture, floor tile, corpse, vehicle compartment = the same container abstraction behind one dual-pane transfer UI (player ↔ nearby/floor/container) with grab-all. Capacity is flat — NO recursive bag-in-bag capacity stacking. Carry limit (hard, strength-based) is separate from encumbrance (soft penalty curve).
+- **V46** Two-channel survival feedback: an explicit per-body-part health panel for TREATABLE injuries (bleeding/wound/fracture → bandage/suture/splint) + a deliberately AMBIGUOUS moodle layer; the zombie infection is NOT UI-confirmed (inferred from generic moodles — the dread engine). Ties V29/V31.
+- **V47** Perception + stimulus propagation are occlusion-aware: sight / attack / trigger checks and the sound/noise field MUST be attenuated or blocked by intervening walls / closed-or-locked doors / obstructions — a zombie does NOT see or hear through solid structure (line-of-sight for sight; material attenuation links for sound, V28). A breach/open door restores propagation locally (V5). Deepens V14/V28.
 
 ---
 
@@ -277,12 +293,77 @@ T16+T33 minimal subsets are pulled forward into T41 (firearm anatomical hit path
 | T38 | x | INT | M1 vertical slice: one city block — street + multi-room building, cutaway camera, loot, shelter actions, melee+firearm, sound attraction, save/load, day/night+weather, one full modify-defend-escape loop | W2 done | V27, milestone-1 |
 | T40 | x | INT | M2 vertical slice: representative district final-quality art, medium-term objective + decisive horde event shaped by player mods, production pipeline, benchmark suite, accessibility pass, stable save migration, reference desktop quality on named hw | T38, T34, T36, T37, T39 | milestone-2, V27 |
 
+### Wave 4 — Fidelity & UX (close the reference gap; PARALLEL lanes R / S / U / A)
+
+Closes the gap between spec-done and the `docs/ART-DIRECTION.md` reference. Prior Wave-2/3 systems (T13/T28/T29/T38/T40) shipped functional but gray-box; these deliver the authored look + missing UX shell. Additive — supersedes the fidelity gaps without reopening prior status.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T43 | x | R | thin wall-shell geometry + fix cutaway z-fighting (inset/polygonOffset/renderOrder); base-vs-upper split reads enclosure | T28,T13 | V20,V34 |
+| T44 | x | S | agent separation hardening: post-integrate penetration resolve to min spacing for hero/active/visible tiers; doorway queueing preserved; low/abstract may overlap | T12,T20 | V19,V35,collision-config |
+| T58 | . | S | radius-aware static collision: validate moves against impassable cells (wall/closed-locked door/boarded/obstruction) with body-radius margin (not centre-point); reject/slide so bodies never clip into walls; pairs with T44 | T12,T13,T25 | V6,V42,collision-config |
+| T45 | ~ | R | lighting+shadow delivery: directional key w/ visible cast shadows, tone-mapped exposure (wired to renderer), ambient+contact AO, stable readable fog, diorama grade per time/weather; in-browser verify | T29,T31 | V8,V36,V38,shadows-config,lighting-config |
+| T46 | . | S | doors as structural+interactive modules: open/close/lock/board/breach; per-state block/clear of nav+sight+sound; destructible w/ damage states | T13,T25 | V30,V37,destruction-config |
+| T47 | . | A | residential content kit: room layouts, furniture/prop library, window+door meshes, façade/interior material families; art-direction pass so block reads residential | T34 | V7,V37,ART-DIRECTION |
+| T48 | . | R | environment dressing: replace gray-box primitives w/ authored materials + overgrowth/decay/weathering per ART-DIRECTION; outline+grade integration | T31,T32,T47 | V8,V20,V37,ART-DIRECTION |
+| T49 | . | U | pause/ESC menu: ESC toggles authoritative pause (sim halts, V12-safe), resume/settings/quit; single-player slowdown option | T6 | V29,I.stores |
+| T50 | . | U | input/hotkeys + rebinding UI: full key remap + separate sensitivity, persisted to settings; binds move/aim/fire/interact/inventory/tools | T4 | V29,input-config,I.stores |
+| T51 | . | U | settings panel: graphics-tier override (safe-limit guard V25), audio, accessibility (outline/gore/shake/flashes/motion/contrast/subtitles), reachable from pause | T49,T37 | V25,V29 |
+| T52 | . | A | authored character meshes: player survivor + zombie archetypes (shambler/bloated/runner/crawler) per ART-DIRECTION T-pose + archetype sheets, replacing capsule/box + instanced placeholders; skeleton+regions feed dismemberment | T34,T9 | V7,V17,V37,ART-DIRECTION |
+
+### Wave 5 — Combat feel & feedback (PARALLEL lanes R / S)
+
+The combat systems resolve authoritatively but surface nothing: VisualEvents are emitted into the ring queue and drained nowhere; the (built) GoreSystem is never constructed/fed; death frees the slot with no corpse; the avatar does not face the cursor. These wire the feedback loop end-to-end.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T53 | x | R | combat feedback render: drain VisualEvents/frame → muzzle flash + tracer + report on fire, hit flinch on hitReaction, directional blood spray/stains + sever silhouettes via the (already-built) GoreSystem | T19,T30 | V8,V39,effects-config |
+| T54 | . | S | death→corpse state: replace instant `free` with a death transition + compact persistent corpse (settled prop, pooled, configured lifetime, saved delta); dismemberment consequences persist | T17,T33 | V18,V40,combat-config |
+| T55 | . | R | death + corpse + dismemberment render: topple/death reaction, corpse meshes/impostors, detached-part props consume `partDetached` | T54,T30 | V8,V17,V40 |
+| T56 | . | R | aim/firing avatar: single-source heading (sim+render), avatar faces cursor each frame, firing pose + recoil | T7,T52 | V21,V41 |
+| T57 | . | S | combat lethality + reactions tuning: non-head hits wound/stagger (not instakill), wound state drives behaviour; head-kill stays; emit `hitReaction` per resolved hit | T16,T17 | V16,V17,combat-config |
+
+### Wave 6 — Interaction & menus (PARALLEL lanes S / U)
+
+Context-driven player↔environment interaction + the menu surfaces (interaction wheel, inventory, character/health). Sim foundations already exist (commands `equip`/`moveItem`/`craft`/`confirmAction`/`modifyStructure`; contextual affordances in `crafting.ts`; door access-states + `boarded` in `modifications.ts`; containers in `inventory/`) — the gap is interaction RESOLUTION + UI. Design reference: `docs/research/project-zomboid-interactions.md` (PZ mechanics breakdown — what to steal vs simplify) + `docs/ART-DIRECTION.md`.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T59 | . | S | interaction resolution: from player pos+facing+held items+skills, enumerate valid contextual verbs on nearby targets (door/window/container/barricade/furniture/corpse/structure); publish as a filtered affordance list contract. Reuse `crafting.ts` affordances + `modifications.ts` access-states | T24,T25 | V43,crafting-config,destruction-config,PZ-research |
+| T60 | . | U | interaction wheel / context menu UI: radial/list at cursor showing filtered verbs (disabled + missing-req shown), default-verb key (`E`), click → `confirmAction`/`modifyStructure` command | T59,T6 | V43,V1,I.cmd,PZ-research |
+| T61 | . | S | timed-action queue: per-player action queue, durations from config scaled by skill, progress in player-view snapshot, cancel on Esc / movement / threat | T3 | V44,V12,PZ-research |
+| T62 | . | U | inventory menu: dual-pane (player ↔ nearby/floor/container), drag + grab-all via `moveItem`, equip primary/secondary, hard carry-cap vs soft encumbrance readout, per-item context verbs | T23,T4 | V45,V1,V11,inventory-config,PZ-research |
+| T63 | . | S | unified container surfacing: expose furniture/floor/corpse/vehicle as one container type via `ContainerRef`, proximity-populated; flat capacity (no recursive bag stacking) | T23 | V45,inventory-config,PZ-research |
+| T64 | . | U | character/health panel: per-body-part treatable injuries (bleeding/wound/fracture → bandage/suture/splint), moodle row, skills/XP tab, clothing/protection; infection stays ambiguous (no UI confirm) | T22,T4 | V29,V31,V46,survival-config,PZ-research |
+| T65 | . | S | barricade siege model: barricade = sacrificial HP layer in front of door/window; board/reinforce tiers gated by skill (skill also raises HP); zombie COUNT (not strength) drives structure damage; key/lock-bypass verb | T13,T25 | V18,V30,V42,destruction-config,PZ-research |
+
+| Cite token | Resolves to |
+|---|---|
+| PZ-research | `docs/research/project-zomboid-interactions.md` (Project Zomboid interaction-model breakdown) |
+| ART-DIRECTION | `docs/ART-DIRECTION.md` (visual target / reference-fidelity bar) |
+
+### Wave 7 — Dev iteration & scene fidelity (PARALLEL lanes R / S / U)
+
+Live-iteration instrumentation + the scene-fidelity fixes the dev loop surfaced. Reference: `docs/research/project-zomboid-interactions.md`, `docs/ART-DIRECTION.md`.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T66 | . | U | dev spawn controls: dev-tools sliders/actions to raise live zombie count + spawn rate up to SoA capacity for limit-testing; read back actual alive count + frame cost | T35,T58 | V10,zombies-config |
+| T67 | . | R | real GPU-time panel: expose a `RendererHost` renderer/timestamp getter → stats-gl GPU panel + feed `renderer.info` (draw calls/triangles/GPU mem) into `DiagnosticsCollector` | T5,T35 | V10,V24,V27 |
+| T68 | . | S | occlusion-aware perception + sound: gate sight/attack/trigger by line-of-sight vs walls/closed doors; attenuate the stimulus field through intervening structure (V28 links); breach/open restores | T13,T20,T27 | V14,V28,V47,perception-config,audio-config |
+| T69 | . | S | shootable car + car alarm in the dev street scene: shooting the car triggers a looping car-alarm sound stimulus to test/iterate the noise field; alarm draws the horde via the shared flow (V15) | T25,T27,T59 | V14,V28,destruction-config |
+| T70 | . | R | house geometry pass: ONE solid wall per span (not doubled slim panels with a gap), reasonable height (`buildingWallHeightMeters`), window + door openings, base+upper reading as a single wall; fixes the gap regression | T43,T28 | V20,V34,V37,world-config,ART-DIRECTION |
+
 **Suggested 2-agent assignment** (parallel-safe by lane):
 - **W0** — 1 agent: T1→T2→T3→T42 (contracts must be serial + frozen).
 - **W1** — α=lane S (T8,T10,T11,T12,T13,T14); β=lane R (T5,T7,T9)+lane U (T4,T6). Lane A (T34) = optional 3rd agent, fully independent.
 - **GATE 0** — 1 coordinator: T41 (stitch only, no concurrent lane edits to glue).
 - **W2** — α=lane S systems (T16→T17/T18, T20→T21, T22,T23→T24, T25→T26, T27); β=lane R systems (T30,T19,T28,T29,T31,T32)+X (T35).
 - **W3** — α=S (T33), β=R (T37)+X (T36,T39); then 1 coordinator for INT (T38→T40).
+- **W4** — α=lane R (T43,T45,T48); β=lane S (T44,T46)+lane U (T49,T50,T51); lane A (T47,T52) independent. T48 deps T47 (cross-lane, sequence content→dressing).
+- **W5** — α=lane R (T53,T55,T56); β=lane S (T54,T57). T55 deps T54 (cross-lane corpse-state→render), T56 deps T52 (char meshes).
+- **W6** — α=lane S (T58,T59,T61,T63,T65); β=lane U (T60,T62,T64). T60 deps T59 (cross-lane resolution→wheel UI).
+- **W7** — α=lane R (T67,T70); β=lane S (T68,T69)+lane U (T66). Independent except T69 builds on the T68 sound work.
 
 Five decisions to lock before vertical-slice brief finalized (OPEN, §C): campaign+ending+sandbox role; death+save model (do modified worlds survive death); min desktop GPU + WebGPU/compat policy; max launch scope collapse/fire/obstruction; camera rotation+zoom+control model.
 
@@ -293,5 +374,16 @@ Five decisions to lock before vertical-slice brief finalized (OPEN, §C): campai
 | id | date | cause | fix |
 |---|---|---|---|
 | B1 | 2026-06-22 | `GameRuntime.update` ran every scheduler tick of a multi-tick frame with a constant `ctx.tick` (final index) → interval-cadence systems (perception/tier/sound) misfired under variable-dt rAF frames advancing >1 tick. GATE-0 tests only stepped 1 tick/update so never exposed it. | Per-tick index reconstruction in `update` (mirrors `FrameLoop`); invariant V32 + variable-dt multi-tick test. |
-| B2 | 2026-06-22 | Crowd `instanceMatrix` bound as a WebGPU uniform buffer (core `MeshStandardMaterial`+`InstancedMesh` auto-convert path); at desktop-high capacity 4000 → 256000 B > 65536 max uniform binding → `bindGroup_object` invalid → crowd draw silently dropped (canvas empty). GPU-free unit tests couldn't catch it; found via in-browser CDP smoke check. | Route crowd instance data through the `three/webgpu` node/storage-buffer path; invariant V33 + CDP check asserts zero WebGPU validation errors at max capacity. |
+| B2 | 2026-06-22 | Crowd `instanceMatrix` bound as a WebGPU uniform buffer (core `MeshStandardMaterial`+`InstancedMesh` auto-convert on three r171); at desktop-high capacity 4000 → 256000 B > 65536 max uniform binding → `bindGroup_object` invalid → crowd draw silently dropped (canvas empty). GPU-free unit tests couldn't catch it; found via in-browser CDP smoke check. | Initial (r171): hand-rolled interleaved-buffer + `positionNode` workaround. Superseded 2026-06-23: upgraded three r171→r184 (whose `InstanceNode` auto-falls-back to instanced attributes past the uniform limit) → workaround removed; crowd rewritten to canonical storage-buffer instancing + TSL GPU-compute transform node (V2 GPU-readable animation). V33 + CDP assert zero WebGPU validation errors at max capacity. |
+| B3 | 2026-06-23 | Walls rendered as cell-filling `BoxGeometry(navCellSize, h, navCellSize)` (`render/scene/blockScene.ts`) → visually too thick + cutaway reveal faces coplanar with retained wall/ground → z-fighting on reveal. | Thin wall-shell geometry (config panel thickness ≪ cell) + inset/`polygonOffset`/`renderOrder` on cutaway faces; invariant V34; T43. **✓ FIXED 2026-06-23 (code; CDP-verified).** |
+| B4 | 2026-06-23 | Crowd uses soft steering separation only (`steerSeparationMeters` blend); movement integrate checks walkable but never resolves agent-agent penetration → visible-tier zombies interpenetrate ("glitch into each other"). | Hard min-spacing resolution for hero/active/visible tiers after integrate; invariant V35; T44. **✓ FIXED 2026-06-23 (V35-compliant: hero+active+visible resolved; benchmark baseline re-recorded for new cost).** |
+| B5 | 2026-06-23 | Linear `Fog` near/far recomputed every frame from oscillating weather severity (`blockScene.ts`); near-ortho camera renders the moving fog boundary as bands sweeping the screen; fog colour == near-black background (`0x0b0d0a`) → "can't see anything". | Smooth/clamp fog distances (or exponential height fog), decouple from per-frame severity noise, lift fog floor colour; invariant V38; T45. **✓ FIXED 2026-06-23 (CDP-verified scene now lit).** |
+| B6 | 2026-06-23 | Renderer never sets `toneMapping`/`toneMappingExposure`; `interiorExposure` computed in `lighting.ts` but never applied; night spawn (low sky key+ambient) crushes the scene to black, player barely visible. | Wire ACES/AgX tone mapping + exposure (incl. interior/exterior compensation) to the WebGPURenderer; ensure a viewable night floor; invariant V36; T45. **✓ FIXED 2026-06-23 (AgX tonemapping+exposure wired; T45 still owes cast shadows + contact AO).** |
+| B7 | 2026-06-23 | Render lane built `GoreSystem` + the full VisualEvent contract (hitReaction/bloodSpray/partDetached) but the live path never calls `runtime.pollEvents()` and never constructs/feeds the GoreSystem → combat emits events into the ring queue, drained nowhere → no muzzle, hit flinch, blood, sever, or death feedback. | Drain VisualEvents per frame in viewport/scene; construct + feed GoreSystem; add muzzle/report on fire; invariant V39; T53. **✓ FIXED 2026-06-23 (pollEvents drained, GoreSystem fed, muzzle/tracer/blood/flinch).** |
+| B8 | 2026-06-23 | Player avatar rotation `playerMesh.rotation.y = -playerAim() + π/2` (`blockScene.ts`) does not match the aim heading convention (`atan2(dz,dx)`) → the player does not point at the mouse cursor. | Single-source the heading convention; avatar faces aim target each frame; invariant V41; T56. |
+| B9 | 2026-06-23 | Zombie death (`onEntityDied → despawn → zombies.free`) frees the slot immediately with no corpse or death state → bodies instantly disappear on a single hit, no body/blood remains. | Death state transition + persistent corpse (settled prop, pooled, saved); invariant V40; T54/T55. |
+| B10 | 2026-06-23 | Movement integrate validates only the centre point against walkable cells (`hordeSystems.ts stepMovement` → `isWalkableWorld(nx,nz)`), ignoring agent radius → bodies clip half into walls; agent-agent penetration was steering-soft only → zombies overlap each other + walls. | Radius-aware static collision (reject/slide) + post-integrate agent-agent separation; invariants V42/V35; T58/T44. |
+| B11 | 2026-06-23 | Dev scene gizmos drew at y=0.06, under the authored floor slab (y=0.2), with depthTest on → debug overlays invisible. | Lift gizmo Y clear of the slab + `depthTest:false`/`depthWrite:false` so the debug layer always draws on top (`render/debug/sceneGizmos.ts`). Fixed. |
+| B12 | 2026-06-23 | Thin-wall rework (T43) produced TWO slim wall panels per span separated by a large gap, no window/door openings, low height → reads as parallel fences, not a house wall. | One solid wall per span at `buildingWallHeightMeters` with window/door openings; base+upper read as a single wall; V20/V34/V37; T70. |
+| B13 | 2026-06-23 | Live scene still renders black street + no cast shadows: tone-mapped exposure (B6) + directional shadow casting (T45) not yet delivered in `blockScene` (computed but not applied / shadows not enabled). | Apply exposure + enable shadow map + ambient floor so the street is lit; in-browser verify; invariants V36/V38; T45 (still open). |
 |---|---|---|---|

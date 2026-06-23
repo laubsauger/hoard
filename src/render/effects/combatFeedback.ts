@@ -1,0 +1,293 @@
+// B7 — combat feedback. The render lane built GoreSystem + the VisualEvent contract but the live path
+// never consumed runtime.pollEvents(), so firing produced NO muzzle flash, tracer, blood, sever or hit
+// feedback. This module closes that gap: a PURE CombatFeedbackSystem ingests the drained VisualEvent
+// stream (feeding the pooled, capped GoreSystem) + the player's fire action, and a thin GPU
+// CombatFeedbackView reflects that state into ONE instanced blood/spark batch + a muzzle light + a tracer.
+// Everything is pooled + capped (no per-shot allocation) and gore-intensity / reduce-flashes accessibility
+// is respected (V29). The system is GPU-free so the ingest/aging logic is unit-tested without a device.
+
+import {
+  BoxGeometry,
+  InstancedMesh,
+  Matrix4,
+  Mesh,
+  MeshBasicMaterial,
+  Object3D,
+  PlaneGeometry,
+  PointLight,
+  Vector3,
+} from 'three';
+import type { VisualEvent } from '../../game/core/contracts/events';
+import { resolve } from '../../config/spec';
+import { renderingConfig } from '../../config/domains/rendering';
+import type { QualityTier } from '../../config/types';
+import type { ResourceRegistry } from '../engine/resources';
+import { GoreSystem, resolveGoreSettings, type GoreParticle, type GoreSettings } from './gore';
+
+const BLOOD_COLOR = 0x7a0c0c;
+const MUZZLE_COLOR = 0xffd9a0;
+const TRACER_COLOR = 0xfff2c4;
+
+export interface CombatFeedbackSettings {
+  readonly gore: GoreSettings;
+  readonly sparkLifetimeSeconds: number;
+  readonly muzzleFlashSeconds: number;
+  readonly tracerSeconds: number;
+  readonly muzzleFlashIntensity: number;
+  readonly tracerRangeMeters: number;
+}
+
+export function resolveCombatFeedbackSettings(tier: QualityTier): CombatFeedbackSettings {
+  return {
+    gore: resolveGoreSettings(tier),
+    sparkLifetimeSeconds: resolve(renderingConfig.combatSparkLifetimeSeconds, tier),
+    muzzleFlashSeconds: resolve(renderingConfig.combatMuzzleFlashSeconds, tier),
+    tracerSeconds: resolve(renderingConfig.combatTracerSeconds, tier),
+    muzzleFlashIntensity: resolve(renderingConfig.combatMuzzleFlashIntensity, tier),
+    tracerRangeMeters: resolve(renderingConfig.combatTracerRangeMeters, tier),
+  };
+}
+
+/** A timed one-shot effect (muzzle flash / tracer). Lives until age reaches ttl. */
+interface Pulse {
+  x: number;
+  y: number;
+  z: number;
+  dirX: number;
+  dirZ: number;
+  age: number;
+  ttl: number;
+}
+
+export interface IngestContext {
+  /** Camera world position — gore is simplified beyond goreDistantSimplifyMeters (V8). */
+  readonly cameraX: number;
+  readonly cameraY: number;
+  readonly cameraZ: number;
+  /** Gore-intensity accessibility multiplier 0..1 (V29). 0 fully suppresses gore. */
+  readonly goreIntensity: number;
+}
+
+/**
+ * Pure combat-feedback state. Owns the pooled GoreSystem and the timed muzzle/tracer pulses. No Three.js.
+ *
+ * Hit feedback comes from the sim's paired (hitReaction -> bloodSpray) emission: hitReaction carries the
+ * impact energy + direction but no position, bloodSpray carries the world position. We pair them in
+ * emission order so a single positioned, energy-weighted blood spray is spawned per hit (the visible hit
+ * flinch + blood). partDetached adds a sever marker at the last impact. soundEmitted is not gore.
+ */
+export class CombatFeedbackSystem {
+  readonly gore: GoreSystem;
+  private readonly settings: CombatFeedbackSettings;
+  private muzzle: Pulse | null = null;
+  private tracer: Pulse | null = null;
+  private pending: { energy: number; dirX: number; dirZ: number } | null = null;
+  private lastImpact: { x: number; y: number; z: number } | null = null;
+
+  constructor(settings: CombatFeedbackSettings) {
+    this.settings = settings;
+    this.gore = new GoreSystem(settings.gore);
+  }
+
+  /** Player fired — flash the muzzle + draw a tracer from the muzzle along the aim direction (B7). */
+  fire(x: number, y: number, z: number, dirX: number, dirZ: number): void {
+    const len = Math.hypot(dirX, dirZ) || 1;
+    const nx = dirX / len;
+    const nz = dirZ / len;
+    this.muzzle = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.muzzleFlashSeconds };
+    this.tracer = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.tracerSeconds };
+  }
+
+  /** Consume one frame's drained VisualEvents, feeding the pooled GoreSystem (B7). */
+  ingest(events: readonly VisualEvent[], ctx: IngestContext): void {
+    for (const e of events) {
+      switch (e.kind) {
+        case 'hitReaction':
+          // Position-less: remember the impact energy/direction for the paired bloodSpray.
+          this.pending = { energy: e.energy, dirX: e.dirX, dirZ: e.dirZ };
+          break;
+        case 'bloodSpray': {
+          const dist = Math.hypot(e.x - ctx.cameraX, e.y - ctx.cameraY, e.z - ctx.cameraZ);
+          const rec = this.gore.ingest(e, dist, ctx.goreIntensity);
+          this.lastImpact = { x: e.x, y: e.y, z: e.z };
+          if (rec && this.pending) {
+            // Inherit the hit's energy so spray size reads the weapon impact (gore-intensity already applied).
+            rec.energy = this.pending.energy * ctx.goreIntensity;
+          }
+          this.pending = null;
+          break;
+        }
+        case 'partDetached': {
+          const at = this.lastImpact;
+          const dist = at ? Math.hypot(at.x - ctx.cameraX, at.y - ctx.cameraY, at.z - ctx.cameraZ) : 0;
+          const rec = this.gore.ingest(e, dist, ctx.goreIntensity);
+          if (rec && at) {
+            rec.x = at.x;
+            rec.y = at.y;
+            rec.z = at.z;
+          }
+          break;
+        }
+        case 'soundEmitted':
+          break; // not gore.
+      }
+    }
+  }
+
+  /** Advance timed pulses + age the gore pools, recycling expired records (B7). */
+  update(dtSeconds: number): void {
+    if (dtSeconds < 0) throw new Error(`dtSeconds must be non-negative, got ${dtSeconds}`);
+    if (this.muzzle) {
+      this.muzzle.age += dtSeconds;
+      if (this.muzzle.age >= this.muzzle.ttl) this.muzzle = null;
+    }
+    if (this.tracer) {
+      this.tracer.age += dtSeconds;
+      if (this.tracer.age >= this.tracer.ttl) this.tracer = null;
+    }
+    this.gore.update(dtSeconds, this.settings.sparkLifetimeSeconds);
+  }
+
+  /** Muzzle-flash brightness 0..1 (linear fade over its ttl), or 0 if inactive. */
+  muzzleIntensity01(): number {
+    return this.muzzle ? Math.max(0, 1 - this.muzzle.age / this.muzzle.ttl) : 0;
+  }
+
+  /** Tracer opacity 0..1 (linear fade over its ttl), or 0 if inactive. */
+  tracerAlpha01(): number {
+    return this.tracer ? Math.max(0, 1 - this.tracer.age / this.tracer.ttl) : 0;
+  }
+
+  get muzzlePulse(): Readonly<Pulse> | null {
+    return this.muzzle;
+  }
+  get tracerPulse(): Readonly<Pulse> | null {
+    return this.tracer;
+  }
+
+  /** Active blood/impact spray records (renderer lays these into the instanced batch). */
+  get sprayRecords(): readonly GoreParticle[] {
+    return this.gore.activeRecords('spray');
+  }
+  /** Active sever markers. */
+  get severRecords(): readonly GoreParticle[] {
+    return this.gore.activeRecords('sever');
+  }
+
+  /** Normalized age fade 0..1 for a record (1 fresh, 0 expired) — drives the spark shrink in the view. */
+  recordFade(rec: GoreParticle): number {
+    return Math.max(0, 1 - rec.age / this.settings.sparkLifetimeSeconds);
+  }
+}
+
+/**
+ * GPU side of combat feedback (V24-tracked). ONE instanced quad batch carries every blood/impact/sever
+ * spark; the muzzle is a single short-lived point light + emissive bead; the tracer is one thin reused
+ * box. Nothing is allocated per shot. sync() mirrors the pure system's state onto these objects each frame.
+ */
+export class CombatFeedbackView {
+  private readonly sparkMesh: InstancedMesh;
+  private readonly tracerMesh: Mesh;
+  private readonly muzzleLight: PointLight;
+  private readonly muzzleBead: Mesh;
+  private readonly settings: CombatFeedbackSettings;
+  private readonly scratch = new Matrix4();
+  private readonly scratchPos = new Vector3();
+  private readonly scratchScale = new Vector3();
+  private readonly identityQuat = new Object3D().quaternion;
+  private readonly sparkCapacity: number;
+
+  constructor(settings: CombatFeedbackSettings, registry: ResourceRegistry) {
+    this.settings = settings;
+    this.sparkCapacity = Math.max(1, settings.gore.sprayPoolSize + settings.gore.severPoolSize);
+
+    const sparkGeo = registry.track(new PlaneGeometry(0.35, 0.35), 'geometry', 'combat.sparkGeo');
+    const sparkMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.spark', color: BLOOD_COLOR, transparent: true, opacity: 0.9, depthWrite: false }),
+      'material',
+      'combat.sparkMat',
+    );
+    this.sparkMesh = registry.track(new InstancedMesh(sparkGeo, sparkMat, this.sparkCapacity), 'buffer', 'combat.sparkMesh');
+    this.sparkMesh.count = 0;
+    this.sparkMesh.frustumCulled = false;
+    this.sparkMesh.renderOrder = 2;
+
+    const tracerGeo = registry.track(new BoxGeometry(1, 0.03, 0.03), 'geometry', 'combat.tracerGeo');
+    const tracerMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.tracer', color: TRACER_COLOR, transparent: true, opacity: 0, depthWrite: false }),
+      'material',
+      'combat.tracerMat',
+    );
+    this.tracerMesh = new Mesh(tracerGeo, tracerMat);
+    this.tracerMesh.visible = false;
+    this.tracerMesh.renderOrder = 2;
+
+    this.muzzleLight = new PointLight(MUZZLE_COLOR, 0, settings.tracerRangeMeters * 0.5);
+    this.muzzleLight.visible = false;
+
+    const beadGeo = registry.track(new PlaneGeometry(0.5, 0.5), 'geometry', 'combat.muzzleBeadGeo');
+    const beadMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.muzzleBead', color: MUZZLE_COLOR, transparent: true, opacity: 0, depthWrite: false }),
+      'material',
+      'combat.muzzleBeadMat',
+    );
+    this.muzzleBead = new Mesh(beadGeo, beadMat);
+    this.muzzleBead.visible = false;
+    this.muzzleBead.renderOrder = 2;
+  }
+
+  /** Add the feedback objects to the scene graph (parent owns scene-graph membership, registry owns disposal). */
+  attachTo(parent: Object3D): void {
+    parent.add(this.sparkMesh, this.tracerMesh, this.muzzleLight, this.muzzleBead);
+  }
+
+  /** Mirror the pure system's current state onto the GPU objects (B7). `reduceFlashes` suppresses the
+   *  bright muzzle flash for the photosensitivity accessibility setting (V29) while keeping the tracer. */
+  sync(system: CombatFeedbackSystem, reduceFlashes: boolean): void {
+    // ---- blood / impact / sever sparks: one instanced batch, faded by age via scale ----
+    let i = 0;
+    const writeRecord = (rec: GoreParticle, baseSize: number): void => {
+      if (i >= this.sparkCapacity) return;
+      const fade = system.recordFade(rec);
+      const s = baseSize * (0.5 + 0.5 * rec.energy) * Math.max(0.001, fade);
+      this.scratchPos.set(rec.x, Math.max(rec.y, 0.05), rec.z);
+      this.scratchScale.set(s, s, s);
+      this.scratch.compose(this.scratchPos, this.identityQuat, this.scratchScale);
+      this.sparkMesh.setMatrixAt(i, this.scratch);
+      i += 1;
+    };
+    for (const rec of system.sprayRecords) writeRecord(rec, 1);
+    for (const rec of system.severRecords) writeRecord(rec, 1.6);
+    this.sparkMesh.count = i;
+    this.sparkMesh.instanceMatrix.needsUpdate = true;
+
+    // ---- muzzle flash ----
+    const flash = reduceFlashes ? 0 : system.muzzleIntensity01();
+    const m = system.muzzlePulse;
+    if (m && flash > 0) {
+      this.muzzleLight.position.set(m.x, m.y, m.z);
+      this.muzzleLight.intensity = flash * this.settings.muzzleFlashIntensity;
+      this.muzzleLight.visible = true;
+      this.muzzleBead.position.set(m.x, m.y, m.z);
+      (this.muzzleBead.material as MeshBasicMaterial).opacity = flash;
+      this.muzzleBead.visible = true;
+    } else {
+      this.muzzleLight.visible = false;
+      this.muzzleBead.visible = false;
+    }
+
+    // ---- tracer: stretch the reused box from the muzzle along the aim direction ----
+    const t = system.tracerPulse;
+    const alpha = system.tracerAlpha01();
+    if (t && alpha > 0) {
+      const range = this.settings.tracerRangeMeters;
+      this.tracerMesh.position.set(t.x + t.dirX * range * 0.5, t.y, t.z + t.dirZ * range * 0.5);
+      this.tracerMesh.scale.set(range, 1, 1);
+      this.tracerMesh.rotation.set(0, Math.atan2(-t.dirZ, t.dirX), 0);
+      (this.tracerMesh.material as MeshBasicMaterial).opacity = alpha;
+      this.tracerMesh.visible = true;
+    } else {
+      this.tracerMesh.visible = false;
+    }
+  }
+}
