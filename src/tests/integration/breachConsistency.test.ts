@@ -129,17 +129,21 @@ describe('integration: one breach propagates consistently across systems (V5/V9/
     expect(rt2.flowCache.get(rt2.scene.navGrid, target, MOVEMENT_PROFILE).isReachable(probe)).toBe(true);
   });
 
-  it('END-TO-END: in ONE run the breach lets the shared-field horde reach the player it was sealed from', () => {
+  it('END-TO-END: in ONE run the breach lets the horde reach the player it heard, sealed from', () => {
     rt.spawnHorde(20, 4);
     // distance to player before the route exists
     const distBefore = nearestZombieDistance(rt);
 
     rt.breachWall(); // nav + region + flow-field cache all update off this single edit
+    // V14: perception is stimulus-driven — a sealed, silent horde has no reason to migrate. The player
+    // fires, emitting a localized gunshot the horde HEARS (it lingers as a disturbance); each zombie now
+    // targets the noise and streams toward it THROUGH the freshly-opened breach (the central promise, §G).
+    rt.fire(1, 0, 'torsoUpper');
     for (let i = 0; i < 200; i++) rt.update(1 / 30);
 
     const distAfter = nearestZombieDistance(rt);
     expect(rt.aliveCount).toBe(20); // V16: navigation overlap never applies damage
-    expect(distAfter).toBeLessThan(distBefore); // the horde closed in THROUGH the breach
+    expect(distAfter).toBeLessThan(distBefore); // the horde closed in THROUGH the breach toward the noise
   });
 });
 

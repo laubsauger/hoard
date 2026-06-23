@@ -219,7 +219,7 @@ body,
 }
 
 .hbn-a11y {
-  position: absolute;
+  position: fixed;
   top: 16px;
   right: 16px;
   width: 320px;
@@ -231,7 +231,8 @@ body,
   border-radius: 8px;
   color: #e6ece6;
   pointer-events: auto;
-  z-index: 20;
+  /* Above the pause overlay (z 60) so settings opened FROM pause is interactable + on top of the FPS meter. */
+  z-index: 80;
 }
 .hbn-a11y--contrast {
   background: #000;
@@ -517,3 +518,17 @@ body,
 .hbn-wheel__verb.is-disabled { opacity: 0.5; cursor: not-allowed; }
 .hbn-wheel__verb-reason { font: 9px ui-monospace, Menlo; color: #c08a8a; }
 .hbn-wheel__hint { margin: 4px 0 0; text-align: center; font: 9px ui-monospace, Menlo; color: #7e8da9; }
+
+/* ---- InteractionPrompt: nearest-interactable hint "{key} to {action}" ---- */
+.hbn-prompt {
+  position: fixed; left: 50%; bottom: 156px; transform: translateX(-50%); z-index: 44; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+  background: rgba(16,20,27,0.85); border: 1px solid rgba(130,160,210,0.22); border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.hbn-prompt__key {
+  display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px;
+  font: 700 11px ui-monospace, Menlo; color: #0c0f14; background: #cdd9ef; border-radius: 5px;
+  box-shadow: 0 2px 0 rgba(0,0,0,0.4);
+}
+.hbn-prompt__action { font: 12px ui-sans-serif, system-ui; color: #dbe4f5; letter-spacing: 0.02em; }

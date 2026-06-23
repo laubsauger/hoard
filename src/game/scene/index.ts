@@ -24,6 +24,13 @@ export {
 export { buildCityBlock, CITY_BLOCK_WORLD_VERSION, REGION_STREET } from './cityBlock';
 export { buildCityDistrict, CITY_DISTRICT_WORLD_VERSION, type CityDistrict } from './cityDistrict';
 export {
+  DoorSystem,
+  doorAxis,
+  isDoorCell,
+  type DoorAccess,
+  type DoorView,
+} from './doors';
+export {
   authorHouseStyle,
   resolveHouseVariation,
   windowState,

@@ -792,8 +792,8 @@ export const renderingConfig = registerDomain('rendering', {
   bloodCoatRangeMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'A blood spray within this distance of the player splatters gore onto the PLAYER BODY (the body-gore coating layer). Beyond it, only world decals are placed (T79).',
-    default: 4.4,
+    doc: 'A blood spray within this distance of the player splatters gore onto the PLAYER BODY (the body-gore coating layer). Beyond it, only world decals are placed (T79). Point-blank only — must be right on top of the source to get coated.',
+    default: 1.3,
     min: 0,
     max: 30,
   }),

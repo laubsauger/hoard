@@ -318,12 +318,14 @@ export class Crowd {
       animPhase.element(instanceIndex).assign(phase);
       const bob = sin(phase.mul(TAU)).mul(bobMeters);
 
-      // Column-major TRS mat4: rotate about +Y by heading, uniform scale, translate by position (+bob in y).
+      // Column-major TRS mat4: RotY(-heading) so the model forward (+X) FACES the movement direction
+      // heading=atan2(dirZ,dirX) — matches the limb rig (col0 → (c,0,+s)); the prior (c,0,-s) mirrored Z so
+      // the horde walked turned/sideways. Uniform scale, translate by position (+bob in y).
       const c = cos(heading);
       const s = sin(heading);
-      cols[0]!.element(instanceIndex).assign(vec4(c.mul(scale), 0, s.mul(scale).negate(), 0));
+      cols[0]!.element(instanceIndex).assign(vec4(c.mul(scale), 0, s.mul(scale), 0));
       cols[1]!.element(instanceIndex).assign(vec4(0, scale, 0, 0));
-      cols[2]!.element(instanceIndex).assign(vec4(s.mul(scale), 0, c.mul(scale), 0));
+      cols[2]!.element(instanceIndex).assign(vec4(s.mul(scale).negate(), 0, c.mul(scale), 0));
       cols[3]!.element(instanceIndex).assign(vec4(pos.x, pos.y.add(bob), pos.z, 1));
     })().compute(cap);
 

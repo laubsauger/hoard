@@ -1,13 +1,21 @@
 // T41 — HordeSimulation: the per-tick horde systems lifted out of GameRuntime so the runtime stays an
-// orchestrator, not a god-object. Owns ONLY the shared-flow movement, sound-attraction lure, perception,
-// and tier-assignment steps (V12/V13/V14/V15/V19) plus the lure state they mutate. It reads player +
-// targeting state through accessors so GameRuntime remains the single authority over those (V1).
+// orchestrator, not a god-object. Owns the per-zombie target selection (V14), the grouped multi-field
+// movement (V15), perception, and tier-assignment steps (V12/V13/V14/V15/V19). It reads player + targeting
+// state through accessors so GameRuntime remains the single authority over those (V1).
+//
+// V14 sound model: sound is LOCALIZED perception, NOT a global flow retarget. Each zombie picks ITS OWN
+// target every perception tick: the PLAYER if it currently SEES it (sight range/cone + LOS), else the
+// LOUDEST sound it HEARS right now (stimulus.query at its own position; overlapping sounds → loudest-
+// reaching-this-zombie wins), else no target (idle/wander). Zombies that chose the same target cell SHARE
+// one cached flow field; a NW gunshot and an SE bottle thus produce two fields pulling two groups in two
+// directions. The number of distinct fields per tick is capped (perception.maxSimultaneousFlowFields) so
+// cost stays bounded; targets outside the cap fall back to idle/wander (B16: no global single-target lure).
 
 import type { FixedClock, SystemContext } from '@/game/core';
 import type { StimulusField } from '@/game/stimulus';
 import { ZombieState } from '@/game/simulation';
 import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/game/simulation';
-import { steer, type FlowFieldCache } from '@/game/navigation';
+import { steer, type FlowField, type FlowFieldCache } from '@/game/navigation';
 import {
   CollisionLayer,
   layerMask,
@@ -87,12 +95,23 @@ export interface HordeSimulationDeps {
  * (steering, lure, perception, tiering) lives in this one cohesive unit.
  */
 export class HordeSimulation {
-  /** Sound-attraction lure: while active the WHOLE horde reroutes to the loudest perceived sound (V15). */
-  private soundLureCell: number | null = null;
-  private soundLureUntilTick = -1;
-  /** True when ANY zombie currently senses the player by sight (set by stepPerception). Sight overrides a
-   *  stale sound lure (V14/B16) — you can't walk past a horde that sees you while it chases an old gunshot. */
-  private playerVisibleToHorde = false;
+  // ---- per-zombie target selection + grouped multi-field movement (V14/V15) ----
+  // The chosen target CELL per zombie lives in the SoA `target` column (reset to -1 on spawn, so a recycled
+  // slot never inherits a stale target — V26). `targetExpiry` is the tick until which a zombie keeps
+  // investigating its last-known target after the stimulus fades; it is gated by target >= 0 (which the SoA
+  // resets), so a stale expiry on a recycled slot is harmless. Sized to capacity, allocated once.
+  private readonly targetExpiry: Int32Array;
+  // Reused per-tick grouping buffers — cleared (not reallocated) each movement tick so the everyTick path
+  // allocates nothing in steady state (keeps the crowd-avenue benchmark p99 free of GC spikes).
+  private readonly targetCounts = new Map<number, number>();
+  private readonly activeFieldByCell = new Map<number, FlowField>();
+  private readonly activeCenterX = new Map<number, number>();
+  private readonly activeCenterZ = new Map<number, number>();
+  private readonly distinctTargets: number[] = [];
+  /** Orders distinct target cells by popularity (most-pursued first) with a deterministic cell-index
+   *  tie-break (V12/V26), so the capped flow-field budget is assigned the same way every replay. Bound once
+   *  in the constructor (references targetCounts) so sorting allocates no closure per tick. */
+  private readonly compareByPopularity: (a: number, b: number) => number;
 
   // Reused per-tick work buffers for the penetration-resolution pass — pooled so the everyTick step
   // allocates nothing in steady state (keeps the crowd-scale benchmark's p99 free of GC spikes).
@@ -110,13 +129,24 @@ export class HordeSimulation {
       armLossThreatPenalty: d.combatCfg.armLossThreatPenalty,
       legsLostToCrawl: d.combatCfg.legsLostToCrawl,
     };
+    this.targetExpiry = new Int32Array(d.zombies.capacity).fill(-1);
+    this.compareByPopularity = (a, b) => {
+      const ca = this.targetCounts.get(a) ?? 0;
+      const cb = this.targetCounts.get(b) ?? 0;
+      if (cb !== ca) return cb - ca; // more-pursued target first
+      return a - b; // deterministic tie-break: lower cell index first
+    };
   }
 
-  /** everyTick: shared-flow steering + movement integrate (V12/V15/V19). */
+  /**
+   * everyTick: grouped multi-field steering + movement integrate (V12/V15/V19). Each zombie follows the
+   * flow field for ITS OWN chosen target cell (set by perception, V14) — there is NO single global field.
+   * Zombies sharing a target cell share one cached field; the number of distinct fields is capped this tick
+   * (perception.maxSimultaneousFlowFields). A zombie with no target, or whose target lost the capped budget,
+   * holds position (idle/wander) — firing never reroutes a zombie that did not hear the shot.
+   */
   stepMovement(): void {
-    const { zombies, spatial, scene, flowCache, combatCfg, clock, agentRadius } = this.d;
-    const targetCell = this.flowTargetCell();
-    const field = flowCache.get(scene.navGrid, targetCell, MOVEMENT_PROFILE);
+    const { zombies, spatial, scene, combatCfg, clock, agentRadius } = this.d;
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
     const sep = combatCfg.steerSeparationMeters;
@@ -124,9 +154,11 @@ export class HordeSimulation {
     const pos: [number, number, number] = [0, 0, 0];
     // Arrival: once within this radius of the target, STOP steering so the body settles at the ring instead
     // of piling into the target and fighting the separation pass each tick (the jitter, V19/V35).
-    const tw = scene.navGrid.width;
-    const target = scene.cellCenter({ cx: targetCell % tw, cy: Math.floor(targetCell / tw) });
     const arriveR2 = combatCfg.hordeArriveRadiusMeters * combatCfg.hordeArriveRadiusMeters;
+
+    // Group zombies by target cell and resolve the capped set of shared flow fields for this tick (V15).
+    this.buildActiveFields();
+    const fieldByCell = this.activeFieldByCell;
 
     zombies.forEachAlive((slot) => {
       if (zombies.getNavGroup(slot) < 0) return;
@@ -146,9 +178,18 @@ export class HordeSimulation {
         return;
       }
 
+      // Each zombie steers toward the field for the target cell perception chose for it (V14). A target of
+      // -1 (idle) or one that did not win the capped field budget has no field → the body holds position.
+      const targetCell = zombies.getTarget(slot);
+      const field = targetCell >= 0 ? fieldByCell.get(targetCell) : undefined;
+      if (!field) {
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+
       zombies.getPosition(slot, pos);
-      const adx = target.x - pos[0];
-      const adz = target.z - pos[2];
+      const adx = this.activeCenterX.get(targetCell)! - pos[0];
+      const adz = this.activeCenterZ.get(targetCell)! - pos[2];
       if (adx * adx + adz * adz <= arriveR2) {
         zombies.setVelocity(slot, 0, 0, 0); // arrived — hold position, let separation settle (no jiggle)
         return;
@@ -207,6 +248,55 @@ export class HordeSimulation {
     // B4 / V19: the steering above only SOFT-separates. Resolve any remaining hard interpenetration
     // among the individually-visible tiers so bodies never visibly overlap. Abstract/low stays exempt.
     this.resolveCrowdOverlap();
+  }
+
+  /**
+   * Group the live horde by chosen target cell and resolve the capped set of shared flow fields for this
+   * tick (V14/V15). Counts how many zombies pursue each distinct target cell, then assigns the bounded
+   * field budget (perception.maxSimultaneousFlowFields) to the most-pursued cells (deterministic tie-break
+   * by cell index, V12/V26). For each winning cell it fetches the cached field (a cache hit after the first
+   * compute — cheap with the heap-based Dijkstra) and precomputes the cell centre once for the arrival test.
+   * Cells outside the budget — and cells that became blocked since perception — get no field, so their
+   * zombies idle/wander. All buffers are cleared, not reallocated, so a steady-state tick allocates nothing.
+   */
+  private buildActiveFields(): void {
+    const { zombies, scene, flowCache, perception } = this.d;
+    const navGrid = scene.navGrid;
+    const tw = navGrid.width;
+    const counts = this.targetCounts;
+    const distinct = this.distinctTargets;
+    counts.clear();
+    distinct.length = 0;
+    zombies.forEachAlive((slot) => {
+      if (zombies.getNavGroup(slot) < 0) return;
+      const tc = zombies.getTarget(slot);
+      if (tc < 0) return;
+      const prev = counts.get(tc);
+      if (prev === undefined) {
+        counts.set(tc, 1);
+        distinct.push(tc);
+      } else {
+        counts.set(tc, prev + 1);
+      }
+    });
+
+    this.activeFieldByCell.clear();
+    this.activeCenterX.clear();
+    this.activeCenterZ.clear();
+    if (distinct.length === 0) return;
+
+    distinct.sort(this.compareByPopularity);
+    const limit = Math.min(perception.maxSimultaneousFlowFields, distinct.length);
+    for (let i = 0; i < limit; i++) {
+      const cell = distinct[i]!;
+      // A field can only be built toward a walkable cell; guard the invariant rather than let the field
+      // constructor throw if a nav edit blocked the cell between perception and this movement tick (V5).
+      if (navGrid.isBlocked(cell)) continue;
+      this.activeFieldByCell.set(cell, flowCache.get(navGrid, cell, MOVEMENT_PROFILE));
+      const center = scene.cellCenter({ cx: cell % tw, cy: Math.floor(cell / tw) });
+      this.activeCenterX.set(cell, center.x);
+      this.activeCenterZ.set(cell, center.z);
+    }
   }
 
   /**
@@ -281,65 +371,33 @@ export class HordeSimulation {
   }
 
   /**
-   * Sound attraction (V14/V15): retire decayed stimuli, then read the loudest SOUND reaching the horde's
-   * cluster from the shared field — NOT the player coordinate directly. If one is heard, lure the whole
-   * horde to its source for the configured investigate window; the lure expires back to tracking the
-   * player. Because every agent shares ONE flow field, retargeting reroutes the entire horde at once.
+   * interval: stimulus-driven per-zombie perception + target selection (V14). Retires decayed stimuli, then
+   * for EACH zombie picks its own target this tick (no global lure): the PLAYER if it currently sees it
+   * (sight range + forward cone + line-of-sight, V47), else the LOUDEST sound it hears at its own position
+   * (overlapping sounds → loudest-reaching-this-zombie wins, V28 wall occlusion applied), else — if it still
+   * has a live target within the investigate window — its last-known target (investigating), else none
+   * (idle). The chosen target CELL is written to the SoA `target` column (read by stepMovement to follow the
+   * matching field) and the player-entity stimulus column is set ONLY when the player is actually seen (the
+   * melee gate, V14). Sight beats sound beats investigate beats idle. Runs on a fixed cadence (V12/V26).
    */
-  stepSound(ctx: SystemContext): void {
-    const { stimulus, scene, perception } = this.d;
-    stimulus.update(ctx.tick);
-    const here = scene.cellCenter(scene.spawnCenterCell);
-    const hits = stimulus.query(here.x, here.z, ctx.tick);
-    let bestX = 0;
-    let bestZ = 0;
-    let bestIntensity = 0;
-    for (const h of hits) {
-      if (h.stimulus.kind !== 'sound') continue;
-      // V28: structure muffles sound. A sound whose path to the horde is blocked by a wall reaches it at a
-      // reduced intensity — a breach/open door restores the loud path (V5/V47).
-      const occluded = !hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, here.x, here.z);
-      const intensity = occluded ? h.intensity * perception.soundWallOcclusion : h.intensity;
-      if (intensity > bestIntensity) {
-        bestIntensity = intensity;
-        bestX = h.stimulus.x;
-        bestZ = h.stimulus.z;
-      }
-    }
-    if (bestIntensity > 0 && scene.isWalkableWorld(bestX, bestZ)) {
-      const c = scene.navGrid.worldToCell(bestX, bestZ);
-      this.soundLureCell = scene.navGrid.index(c.cx, c.cy);
-      this.soundLureUntilTick = ctx.tick + perception.investigateTicks;
-    }
-  }
-
-  /** The shared flow-field target this tick: the active sound lure if any, else the live player cell. */
-  flowTargetCell(): number {
-    const { scene, clock, getPlayerPos } = this.d;
-    // B16/V14: sight beats a stale sound lure. The lure only steers the horde while NO zombie can see the
-    // player; the moment any does, the shared field retargets onto the player (drop the lure).
-    if (!this.playerVisibleToHorde && this.soundLureCell !== null && clock.tick <= this.soundLureUntilTick) {
-      return this.soundLureCell;
-    }
-    this.soundLureCell = null;
+  stepPerception(ctx: SystemContext): void {
+    const { zombies, perception, playerEntityId, getPlayerPos, scene, stimulus } = this.d;
+    stimulus.update(ctx.tick); // retire fully-decayed stimuli so each hearing query sees only live sources
     const p = getPlayerPos();
-    const c = scene.navGrid.worldToCell(p.x, p.z);
-    return scene.navGrid.index(c.cx, c.cy);
-  }
-
-  /** interval: stimulus-driven perception (V14) — a zombie senses the player only within sight range. */
-  stepPerception(): void {
-    const { zombies, perception, playerEntityId, getPlayerPos, scene } = this.d;
-    const p = getPlayerPos();
+    const navGrid = scene.navGrid;
     const sight = perception.sightRange;
     // V14: a zombie SEES the player only within its forward vision cone, not 360°. fovHalf = full angle/2.
     const fovHalf = (perception.fieldOfViewDegrees * Math.PI) / 360;
     const coned = fovHalf < Math.PI;
     const attackRange = perception.attackRangeMeters;
-    // Investigating a heard sound = the horde is lured + not yet seeing the player.
-    const lured = this.soundLureCell !== null && this.d.clock.tick <= this.soundLureUntilTick;
+    const investigate = perception.investigateTicks;
+    // The player's cell — the target a zombie that SEES the player pursues. Out-of-bounds player ⇒ -1.
+    const pc = navGrid.worldToCell(p.x, p.z);
+    const playerCell =
+      pc.cx >= 0 && pc.cy >= 0 && pc.cx < navGrid.width && pc.cy < navGrid.height
+        ? navGrid.index(pc.cx, pc.cy)
+        : -1;
     const pos: [number, number, number] = [0, 0, 0];
-    let seen = false;
     zombies.forEachAlive((slot) => {
       zombies.getPosition(slot, pos);
       const dx = p.x - pos[0];
@@ -349,20 +407,71 @@ export class HordeSimulation {
       if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
       // V47: walls / closed doors block sight — no seeing the player through solid structure.
       if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
-      zombies.setStimulus(slot, inSight ? playerEntityId : -1);
-      if (inSight) seen = true;
+      const sensesPlayer = inSight && playerCell >= 0;
+
+      // V14 per-zombie target: a freshly sensed player or sound (re)arms the investigate window; with
+      // nothing sensed now the zombie keeps its last-known target only until that window lapses, then idles.
+      let target: number;
+      let acquired = false;
+      if (sensesPlayer) {
+        target = playerCell;
+        acquired = true;
+      } else {
+        const heard = this.loudestHeardSoundCell(pos[0], pos[2], ctx.tick);
+        if (heard >= 0) {
+          target = heard;
+          acquired = true;
+        } else if (zombies.getTarget(slot) >= 0 && ctx.tick <= this.targetExpiry[slot]!) {
+          target = zombies.getTarget(slot); // investigating last-known origin until the window lapses
+        } else {
+          target = -1;
+        }
+      }
+      zombies.setTarget(slot, target);
+      if (acquired) this.targetExpiry[slot] = ctx.tick + investigate;
+      // The melee gate keys off the player-entity stimulus column — set ONLY when truly seen (V14).
+      zombies.setStimulus(slot, sensesPlayer ? playerEntityId : -1);
+
       // V17/T57: never clobber a transient combat-set stagger — it ticks down in stepMovement and the
-      // body re-acquires its FSM state once it expires. Sensing (the stimulus column) still updates above.
+      // body re-acquires its FSM state once it expires. Sensing (the columns above) still updates.
       if (zombies.getState(slot) === ZombieState.Stagger && zombies.getStateTimer(slot) > 0) return;
       // V20: drive the FSM state so behaviour + the debug indicator reflect what the zombie is doing.
       let state: number;
-      if (inSight) state = dist <= attackRange ? ZombieState.Attack : ZombieState.Pursue;
-      else if (lured) state = ZombieState.Wander; // searching/investigating a heard sound
+      if (sensesPlayer) state = dist <= attackRange ? ZombieState.Attack : ZombieState.Pursue;
+      else if (target >= 0) state = ZombieState.Wander; // pursuing/investigating a heard sound
       else state = ZombieState.Idle;
       zombies.setState(slot, state);
     });
-    // B16/V14: cache whether the horde sees the player so flowTargetCell can let sight override a stale lure.
-    this.playerVisibleToHorde = seen;
+  }
+
+  /**
+   * The cell of the LOUDEST sound stimulus actually reaching (x,z) right now, or -1 if nothing audible above
+   * the alert threshold (V14). Overlapping sounds resolve to the loudest-reaching-this-point; V28 wall
+   * occlusion muffles a sound whose path here is blocked by structure. A source on a blocked cell is skipped
+   * (no field can be built to it). Ties break to the lower cell index (deterministic, V12/V26).
+   */
+  private loudestHeardSoundCell(x: number, z: number, tick: number): number {
+    const { stimulus, scene, perception } = this.d;
+    const navGrid = scene.navGrid;
+    const threshold = perception.alertIntensityThreshold;
+    const hits = stimulus.query(x, z, tick);
+    let bestCell = -1;
+    let bestIntensity = -1;
+    for (const h of hits) {
+      if (h.stimulus.kind !== 'sound') continue;
+      const occluded = !hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, x, z);
+      const intensity = occluded ? h.intensity * perception.soundWallOcclusion : h.intensity;
+      if (intensity < threshold) continue;
+      const c = navGrid.worldToCell(h.stimulus.x, h.stimulus.z);
+      if (c.cx < 0 || c.cy < 0 || c.cx >= navGrid.width || c.cy >= navGrid.height) continue;
+      const cell = navGrid.index(c.cx, c.cy);
+      if (navGrid.isBlocked(cell)) continue;
+      if (intensity > bestIntensity || (intensity === bestIntensity && cell < bestCell)) {
+        bestIntensity = intensity;
+        bestCell = cell;
+      }
+    }
+    return bestCell;
   }
 
   /**

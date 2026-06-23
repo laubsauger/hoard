@@ -1,6 +1,7 @@
-// T38 — the M1 vertical-slice wiring on the GameRuntime: player movement intent, sound attraction
-// (firing reroutes the SHARED flow field toward the gunshot), command-contract routing for structural
-// modify + targeting, day/night derived from the clock, and the full save/load round-trip of the slice.
+// T38 — the M1 vertical-slice wiring on the GameRuntime: player movement intent, localized sound
+// perception (firing emits a sound only the zombies within its radius hear + retarget toward, V14),
+// command-contract routing for structural modify + targeting, day/night derived from the clock, and the
+// full save/load round-trip of the slice.
 
 import { describe, it, expect } from 'vitest';
 import { GameRuntime } from './gameRuntime';
@@ -43,7 +44,7 @@ describe('M1 slice: player movement (engine-validated intent, V1)', () => {
   });
 });
 
-describe('M1 slice: sound attraction reroutes the shared flow field (V14/V15)', () => {
+describe('M1 slice: a gunshot is LOCALIZED perception, not a global flow retarget (V14/V15)', () => {
   it('emits a gunshot stimulus the horde hears', () => {
     const rt = makeRuntime();
     const p = rt.player();
@@ -52,25 +53,20 @@ describe('M1 slice: sound attraction reroutes the shared flow field (V14/V15)', 
     expect(hits.some((h) => h.stimulus.kind === 'sound')).toBe(true);
   });
 
-  it('retargets the whole horde to the gunshot, then expires back to the player', () => {
+  it('a zombie that hears the gunshot adopts the gunshot cell as ITS OWN target — not the player', () => {
     const rt = makeRuntime();
-    rt.spawnHorde(30, RADIUS);
+    // The player is in room B; spawn a zombie in room A (the dividing wall blocks line-of-sight, so it can
+    // only HEAR the muffled gunshot, never see the player).
+    const a = rt.scene.cellCenter(rt.scene.spawnCenterCell);
+    const z = rt.spawnZombie({ x: a.x, y: 0, z: a.z });
     const fireSpot = { ...rt.player() };
 
-    rt.fire(1, 0, 'torsoUpper'); // gunshot at the player's current position
-    for (let i = 0; i < 20; i++) rt.movePlayer(1, 0, 0.1); // then walk away from the noise
-    rt.update(0.3); // run ticks incl. the sound system -> lure latches onto the gunshot
+    rt.fire(1, 0, 'torsoUpper'); // gunshot at the player's position (room B)
+    rt.update(0.2); // run perception → the zombie selects the heard sound as its target
 
-    const lureCell = rt.flowTargetCell;
-    expect(lureCell).toBe(navCellOf(rt, fireSpot.x, fireSpot.z));
-    const here = rt.player();
-    expect(lureCell).not.toBe(navCellOf(rt, here.x, here.z)); // chasing the SOUND, not the player
-
-    // No more noise: after the disturbance lingers + the investigate window, the shared target falls
-    // back to tracking the live player (gunfire registers a lingering disturbance, so this takes a while).
-    for (let i = 0; i < 130; i++) rt.update(0.2);
-    const after = rt.player();
-    expect(rt.flowTargetCell).toBe(navCellOf(rt, after.x, after.z));
+    const gunCell = navCellOf(rt, fireSpot.x, fireSpot.z);
+    expect(rt.zombieTargetCell(z)).toBe(gunCell); // chasing the SOUND it heard...
+    expect(gunCell).not.toBe(navCellOf(rt, a.x, a.z)); // ...which is NOT its own cell — it really moved target
   });
 });
 

@@ -123,7 +123,10 @@ export function composeLimbMatrix(
     return;
   }
   const cy = Math.cos(heading);
-  const sy = Math.sin(heading);
+  // RotY(-heading): heading = atan2(dirZ,dirX) is the movement direction, and three's Y-rotation maps the
+  // model's forward (+X) to (cos a, -sin a) in XZ — so we need a = -heading for the figure to FACE where it
+  // walks (was +heading → mirrored in Z → figures looked rotated/sliding diagonally). Negate sin only.
+  const sy = -Math.sin(heading);
   const sw = swing * placement.swingSign;
   const ca = Math.cos(sw);
   const sa = Math.sin(sw);

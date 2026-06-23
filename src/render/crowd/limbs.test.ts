@@ -111,13 +111,13 @@ describe('composeLimbMatrix — transform composition (V2)', () => {
 
   it('rotates the part offset by heading (yaw)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
-    // heading = +90deg: a +X lateral offset swings to -Z.
+    // heading = +90deg (moving +Z): the figure FACES +Z (forward +X → +Z), so a +X lateral offset swings to +Z.
     composeLimbMatrix(m, 0, [0, 0, 0], Math.PI / 2, 1, armRight, 0, 0, true);
     expect(m[12]).toBeCloseTo(0, 5); // x offset rotated away
-    expect(m[14]).toBeCloseTo(-0.34, 5); // now along -Z
-    // Column 0 = [cos, 0, -sin] = [0, 0, -1].
+    expect(m[14]).toBeCloseTo(0.34, 5); // now along +Z (faces the travel direction, not mirrored)
+    // Column 0 (forward +X) = [cos, 0, +sin] = [0, 0, 1] → points along +Z (the travel direction).
     expect(m[0]).toBeCloseTo(0, 6);
-    expect(m[2]).toBeCloseTo(-1, 6);
+    expect(m[2]).toBeCloseTo(1, 6);
   });
 
   it('applies uniform scale to the basis and offset', () => {

@@ -6,3 +6,11 @@ export {
   type InteractionContext,
   type InteractionVerb,
 } from './resolve';
+export {
+  nearestInteractable,
+  interactionActionLabel,
+  interactionPrompt,
+  type InteractionTargetWorld,
+  type NearestInteractable,
+  type InteractionPrompt,
+} from './nearest';

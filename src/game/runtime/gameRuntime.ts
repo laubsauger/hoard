@@ -65,11 +65,20 @@ import { CombatSystem, type ShotResult } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
+  DoorSystem,
   REGION_ROOM_A,
   REGION_ROOM_B,
   type TestBlock,
   type Vec3,
+  type DoorView,
 } from '@/game/scene';
+import {
+  nearestInteractable,
+  interactionPrompt,
+  type InteractionTargetWorld,
+  type InteractionPrompt,
+} from '@/game/interaction';
+import { structuresConfig } from '@/config/domains/structures';
 import {
   type PopulationEntry,
 } from './saveRecord';
@@ -206,6 +215,11 @@ export class GameRuntime {
   /** Latched so the death transition (set phase 'dead') fires exactly once. */
   private playerDeathHandled = false;
 
+  /** T46 — authoritative door state for the scene's front-door openings (open/closed clears/blocks nav). */
+  private readonly doorSystem: DoorSystem;
+  /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
+  private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
+
   private playerPos: Vec3;
   private playerHeading = 0;
   private weatherProfile: WeatherProfile;
@@ -218,6 +232,9 @@ export class GameRuntime {
     this.adapter = opts.adapter;
     this.partition = opts.partition ?? { district: 0, sector: 0 };
     this.rand = mulberry32(opts.scatterSeed ?? 1);
+    // T46: doors are the scene's front-door OPENINGS. Initial open/closed is read from the authored nav grid
+    // (a blocked door cell starts closed, an open gap starts open) so sim state matches the geometry.
+    this.doorSystem = new DoorSystem(this.scene.navGrid, this.scene.exitCells);
 
     const time = resolveDomain(timeConfig, this.tier);
     this.clock = new FixedClock({
@@ -259,8 +276,8 @@ export class GameRuntime {
     this.session = opts.sessionStore ?? sessionStore;
     this.weatherProfile = this.weatherCfg.defaultProfile as WeatherProfile;
 
-    // Shared stimulus field + audio model. Firing routes a sound into the field; the horde perceives it
-    // and reroutes via the shared flow field (the central promise made measurable, V15/V14).
+    // Shared stimulus field + audio model. Firing routes a localized sound into the field; only the zombies
+    // within its travel radius perceive it and retarget toward it per-zombie (V14 — no global reroute).
     this.stimulus = new StimulusField(this.audioCfg.stimulusFieldCapacity);
     this.audio = new AudioSim({ ids: this.ids, field: this.stimulus, tier: this.tier });
 
@@ -440,9 +457,17 @@ export class GameRuntime {
     return this.playerHeading;
   }
 
-  /** The shared flow-field target cell this tick (test/diagnostics accessor). */
-  get flowTargetCell(): number {
-    return this.horde.flowTargetCell();
+  /**
+   * The flow-field target CELL a live zombie chose this perception tick (test/diagnostics): the player cell
+   * if it sees the player, the cell of the loudest sound it hears, or -1 when it has no target (idle). There
+   * is no single global target anymore — sound is localized perception (V14). Throws on an unmapped entity.
+   */
+  zombieTargetCell(entity: EntityId): number {
+    const slot = this.entityToSlot.get(entity);
+    if (slot === undefined || !this.zombies.isAlive(slot)) {
+      throw new Error(`cannot read target of entity ${entity}: not alive`);
+    }
+    return this.zombies.getTarget(slot);
   }
 
   /** Active weather profile (drives the renderer's fog/grading; default from weather config). */
@@ -517,6 +542,61 @@ export class GameRuntime {
   /** The mid structural cell of the destructible section — the UI's default breach/board target. */
   defaultBreachCell(): number {
     return this.scene.wall.packCell(0, 0, Math.floor(this.scene.wall.sizeZ / 2));
+  }
+
+  // ---- T46 doors: authoritative open/close state (commands resolved here, never render-driven) ----
+
+  /** Live door views for the renderer (leaf orientation + rotation) + interaction resolution. */
+  doorViews(): readonly DoorView[] {
+    return this.doorSystem.list();
+  }
+
+  /** Open/close the door at a nav cell (authoritative). Clearing the cell opens nav + sight + sound through
+   *  it; blocking restores it (V5 local edit). Returns the resulting access, or undefined if no door/locked. */
+  setDoor(navCell: number, open: boolean): 'open' | 'closed' | 'locked' | undefined {
+    return open ? (this.doorSystem.open(navCell) ? 'open' : this.doorSystem.accessOf(navCell)) : (this.doorSystem.close(navCell) ? 'closed' : this.doorSystem.accessOf(navCell));
+  }
+
+  /** Toggle the door NEAREST the player within interaction reach (the wheel / prompt action). Returns the new
+   *  access, or null when no door is in reach. Input-driven (a command), not render-driven (V12). */
+  toggleNearestDoor(): 'open' | 'closed' | 'locked' | null {
+    const near = this.doorSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    if (!near) return null;
+    return this.doorSystem.toggle(near.navCell) ?? null;
+  }
+
+  /**
+   * The live interactable targets for the slice (T60): every door, the destructible wall section, and the
+   * lootable kitchen cupboard (anchored at the player's start room). Used by `nearestInteractionPrompt` and
+   * the interaction wheel to offer verbs by the NEAREST target's TYPE.
+   */
+  interactables(): InteractionTargetWorld[] {
+    const out: InteractionTargetWorld[] = [];
+    for (const d of this.doorSystem.list()) {
+      out.push({ kind: 'door', access: d.access, x: d.x, z: d.z, label: 'Door' });
+    }
+    // The destructible §G wall section — anchored at its mid nav cell.
+    const wallNav = this.scene.navCellForStructuralCell(this.defaultBreachCell());
+    const wallC = this.scene.cellCenter(wallNav);
+    const wallCell = this.scene.wall.getCell(this.defaultBreachCell());
+    out.push({ kind: 'structure', breached: wallCell?.breached ?? false, x: wallC.x, z: wallC.z, label: 'Wall section' });
+    // The lootable cupboard lives in the player's start room (T85).
+    const cup = this.scene.cellCenter(this.scene.playerCell);
+    out.push({ kind: 'container', x: cup.x, z: cup.z, label: 'Kitchen Cupboard' });
+    return out;
+  }
+
+  /** The "{key} to {action}" prompt for the NEAREST interactable in reach, or null (T60). Pure read of the
+   *  live sim state — the HUD polls it each frame and re-renders only when it changes (V1/V11). */
+  nearestInteractionPrompt(key: string): InteractionPrompt | null {
+    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    return near ? interactionPrompt(near.target, key) : null;
+  }
+
+  /** The NEAREST interactable target in reach (full state), or null — the wheel resolves its gated verbs. */
+  nearestInteractableTarget(): InteractionTargetWorld | null {
+    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    return near ? near.target : null;
   }
 
   /**
@@ -868,13 +948,12 @@ export class GameRuntime {
     this.scheduler.register('movement', { bucket: 'everyTick' }, () => this.horde.stepMovement());
     // everyTick: resolve any queued auto-fire shots (combat resolution slot in the tick).
     this.scheduler.register('combat-resolve', { bucket: 'everyTick' }, () => this.stepQueuedShots());
-    // interval: stimulus-driven perception (V14) — never omniscient player coords.
-    this.scheduler.register('perception', { bucket: 'interval', everyTicks: 4 }, () => this.horde.stepPerception(), 0);
+    // interval: stimulus-driven per-zombie perception + target selection (V14) — never omniscient player
+    // coords. Retires decayed stimuli, then each zombie picks its own target (seen player / loudest heard
+    // sound / idle). There is NO global sound lure: a localized sound only retargets zombies that hear it.
+    this.scheduler.register('perception', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepPerception(ctx), 0);
     // interval: tier assignment (V13), phase-offset so it does not share a tick with perception.
     this.scheduler.register('tier', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepTiers(ctx), 1);
-    // interval: sound attraction — retire decayed stimuli + reroute the shared field toward the loudest
-    // sound reaching the horde (V14/V15). Phase 2 so it never shares a tick with perception/tier.
-    this.scheduler.register('sound', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepSound(ctx), 2);
     // everyTick: zombie melee — a body that has reached the player bites it on its per-archetype cooldown
     // (V14/V16/V17). Registered AFTER perception so on a perception tick the freshly-set Attack state +
     // stimulus are visible to the swing this same tick. Damage routes to the player survival system (T22).

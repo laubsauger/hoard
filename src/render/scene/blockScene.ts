@@ -39,6 +39,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { resolve } from '../../config/spec';
 import { resolveDomain } from '../../config/registry';
 import { worldConfig } from '../../config/domains/world';
+import { structuresConfig } from '../../config/domains/structures';
 import { playerConfig } from '../../config/domains/player';
 import { lightingConfig } from '../../config/domains/lighting';
 import { weatherConfig } from '../../config/domains/weather';
@@ -76,6 +77,7 @@ import {
   windowState,
   roofHoles,
   hash01,
+  doorAxis,
   type GroundKind,
   type BuildingFootprint,
   type HouseStyle,
@@ -130,6 +132,7 @@ export class BlockScene {
   private readonly basePlayerEmissive: number;
 
   private readonly world = resolveDomain(worldConfig, this.tierOf());
+  private readonly structures = resolveDomain(structuresConfig, this.tierOf());
   private readonly player = resolveDomain(playerConfig, this.tierOf());
   private readonly lighting = resolveDomain(lightingConfig, this.tierOf());
   private readonly weatherCfg = resolveDomain(weatherConfig, this.tierOf());
@@ -166,6 +169,9 @@ export class BlockScene {
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
+  /** T46 door leaves: each leaf hangs off a hinge PIVOT group; syncDoors rotates the pivot toward the door's
+   *  authoritative open/closed target (the render only REFLECTS sim state, V12). Keyed by nav cell index. */
+  private readonly doorLeaves: { navCell: number; pivot: Object3D; openTarget: number; current: number }[] = [];
   /** The building that owns the destructible §G section — kept lightly weathered + readable (set at build). */
   private featureBuildingIndex = -1;
 
@@ -294,7 +300,7 @@ export class BlockScene {
     // sidewalk, grass yards) is layered on top by buildGroundRects.
     const ground = new Mesh(
       this.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
-      this.mat('ground', { color: 0x2a3120, roughness: 0.98 }),
+      this.mat('ground', { color: 0x57564a, roughness: 0.98 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(width / 2, 0, depth / 2);
@@ -302,7 +308,7 @@ export class BlockScene {
     this.scene.add(ground);
 
     // Per-building interior floor slab — slightly raised + lighter so each house's rooms read (multi-building).
-    const floorMat = this.mat('floor', { color: 0x3a3d38, roughness: 0.9 });
+    const floorMat = this.mat('floor', { color: 0x6b6e64, roughness: 0.9 });
     buildingsOf(this.runtime.scene).forEach((bld, i) => {
       const b = bld.bounds;
       const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
@@ -380,6 +386,12 @@ export class BlockScene {
       sectionByNav.set(grid.index(cell.cx, cell.cy), sc);
     }
 
+    // T46: a DOOR cell is a real opening — OMIT its wall panel even when the door is currently closed (the
+    // door leaf, built in buildDoorsAndWindows, fills the gap). This cuts the doorway so the leaf no longer
+    // floats on a solid wall. Open door cells are already unblocked (no panel); this also covers closed ones.
+    const doorNav = new Set<number>();
+    for (const e of ts.exitCells) doorNav.add(grid.index(e.cx, e.cy));
+
     // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
     const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
       const open = (nx: number, ny: number): boolean =>
@@ -431,6 +443,7 @@ export class BlockScene {
         for (let cx = b.minCx; cx <= b.maxCx; cx++) {
           const idx = grid.index(cx, cy);
           if (!grid.isBlocked(idx)) continue;
+          if (doorNav.has(idx)) continue; // T46: leave the doorway open — the door leaf fills it
           const wx = (cx + 0.5) * this.navCellSize;
           const wz = (cy + 0.5) * this.navCellSize;
           const sc = sectionByNav.get(idx);
@@ -974,27 +987,87 @@ export class BlockScene {
     const voidGeo = this.geo('window.void.geo', new BoxGeometry(0.04, winH, winSpan));
     const boardGeo = this.geo('window.board.geo', new BoxGeometry(0.06, winH * 0.26, winSpan + 0.1));
 
-    // ---- DOORS: a frame (posts + lintel) + an ajar leaf at each exit gap (exit gaps run along Z). ----
-    const postGeo = this.geo('door.post.geo', new BoxGeometry(0.14, wallH, 0.14));
-    const lintelGeo = this.geo('door.lintel.geo', new BoxGeometry(0.2, 0.2, cs));
-    const leafGeo = this.geo('door.leaf.geo', new BoxGeometry(0.06, wallH * 0.82, cs * 0.8));
+    // ---- DOORS (T46): the wall panel at a door cell is OMITTED (buildWallsAndRoof) so a real doorway GAP
+    // exists. Here we frame it (posts + lintel), fill the wall ABOVE the header back up to the building height
+    // (so a tall storey leaves no hole over the door), and hang a flat LEAF off a hinge pivot. Closed, the leaf
+    // lies in the wall plane and fills the opening; open, syncDoors swings the pivot ~90°. Orientation follows
+    // the wall run (doorAxis): a leaf in an X-running wall spans X and faces ±Z, and vice-versa. ----
+    const frameTh = this.structures.openingFrameThicknessMeters;
+    const leafTh = this.structures.doorLeafThicknessMeters;
+    const leafHeight = wallH * this.structures.doorLeafHeightFraction;
+    const buildingsForDoors = buildingsOf(ts);
     for (const cell of ts.exitCells) {
       const wx = (cell.cx + 0.5) * cs;
       const wz = (cell.cy + 0.5) * cs;
-      const post1 = new Mesh(postGeo, frameMat);
-      post1.position.set(wx, wallH / 2, wz - cs / 2);
-      post1.castShadow = true;
-      const post2 = new Mesh(postGeo, frameMat);
-      post2.position.set(wx, wallH / 2, wz + cs / 2);
-      post2.castShadow = true;
+      const navCell = grid.index(cell.cx, cell.cy);
+      const axis = doorAxis(grid, cell.cx, cell.cy); // 'x' = wall runs along X (leaf faces ±Z)
+      // the building this door belongs to → full wall height (for the header fill) + wall tint. Every exit cell
+      // lies on a building perimeter, so the lookup always resolves; the initial values are overwritten.
+      let bWallH = wallH;
+      let wallColor = 0x6b6e64;
+      for (let bi = 0; bi < buildingsForDoors.length; bi++) {
+        const bb = buildingsForDoors[bi]!.bounds;
+        if (cell.cx >= bb.minCx && cell.cx <= bb.maxCx && cell.cy >= bb.minCy && cell.cy <= bb.maxCy) {
+          const style = this.styleFor(buildingsForDoors[bi]!, bi);
+          bWallH = wallH * Math.max(1, style.storeys);
+          wallColor = style.wallColor;
+          break;
+        }
+      }
+      const leafW = cs * this.structures.doorLeafWidthFraction;
+      const headerY = leafHeight; // top of the doorway opening
+      const half = cs / 2; // opening half-width along the wall run
+
+      // frame posts at the opening edges + a lintel across the header.
+      const postGeo = this.geo(`door.post.${cell.cx}.${cell.cy}`, new BoxGeometry(frameTh, headerY, frameTh));
+      const mkPost = (ox: number, oz: number): Mesh => {
+        const p = new Mesh(postGeo, frameMat);
+        p.position.set(wx + ox, headerY / 2, wz + oz);
+        p.castShadow = true;
+        return p;
+      };
+      const lintelLen = cs + frameTh * 2;
+      const lintelGeo = this.geo(`door.lintel.${cell.cx}.${cell.cy}`, axis === 'x'
+        ? new BoxGeometry(lintelLen, frameTh, frameTh)
+        : new BoxGeometry(frameTh, frameTh, lintelLen));
       const lintel = new Mesh(lintelGeo, frameMat);
-      lintel.position.set(wx, wallH - 0.1, wz);
+      lintel.position.set(wx, headerY + frameTh / 2, wz);
       lintel.castShadow = true;
+      group.add(lintel);
+      if (axis === 'x') group.add(mkPost(-half, 0), mkPost(half, 0));
+      else group.add(mkPost(0, -half), mkPost(0, half));
+
+      // wall fill ABOVE the header up to the building height (covers the omitted panel over the door).
+      const fillH = Math.max(0, bWallH - (headerY + frameTh));
+      if (fillH > 0.01) {
+        const fillGeo = this.geo(`door.header.${cell.cx}.${cell.cy}`, axis === 'x'
+          ? new BoxGeometry(cs, fillH, frameTh)
+          : new BoxGeometry(frameTh, fillH, cs));
+        const fill = new Mesh(fillGeo, this.mat(`doorHeader.${cell.cx}.${cell.cy}`, { color: wallColor, roughness: 0.92 }));
+        fill.position.set(wx, headerY + frameTh + fillH / 2, wz);
+        fill.castShadow = true;
+        fill.receiveShadow = true;
+        group.add(fill);
+      }
+
+      // the hinged leaf: a flat slab on a PIVOT group at one vertical edge of the opening. Local leaf origin is
+      // offset by half its width so the pivot sits exactly on the hinge edge; closed = pivot rotation 0.
+      const leafGeo = this.geo(`door.leaf.${cell.cx}.${cell.cy}`, axis === 'x'
+        ? new BoxGeometry(leafW, leafHeight, leafTh)
+        : new BoxGeometry(leafTh, leafHeight, leafW));
       const leaf = new Mesh(leafGeo, leafMat);
-      leaf.position.set(wx, wallH * 0.41, wz - cs * 0.3);
-      leaf.rotation.y = 0.5; // hinged ajar
       leaf.castShadow = true;
-      group.add(post1, post2, lintel, leaf);
+      const pivot = new Group();
+      if (axis === 'x') {
+        pivot.position.set(wx - leafW / 2, 0, wz);
+        leaf.position.set(leafW / 2, leafHeight / 2, 0);
+      } else {
+        pivot.position.set(wx, 0, wz - leafW / 2);
+        leaf.position.set(0, leafHeight / 2, leafW / 2);
+      }
+      pivot.add(leaf);
+      group.add(pivot);
+      this.doorLeaves.push({ navCell, pivot, openTarget: this.structures.doorOpenSwingRadians, current: 0 });
     }
 
     // ---- WINDOWS: a framed opening on a deterministic subset of facade cells, per building, with a decay
@@ -1133,6 +1206,7 @@ export class BlockScene {
     this.playerMesh.rotation.y = -this.runtime.playerAim();
 
     this.syncBreach();
+    this.syncDoors(dtSeconds);
     this.syncLighting(dtSeconds);
     this.syncCutaway(dtSeconds, camera);
 
@@ -1172,6 +1246,24 @@ export class BlockScene {
     for (const s of this.sectionMeshes) {
       const breached = this.runtime.scene.wall.isBreached(s.cell);
       for (const o of s.objects) o.visible = !breached;
+    }
+  }
+
+  /**
+   * T46 — reflect the authoritative door state onto the rendered leaves: a CLOSED door's leaf lies in the wall
+   * plane (rotation 0); an OPEN one is swung ~90° about its hinge. The render only READS sim state (V12) —
+   * the pivot eases toward its target at a configured angular speed so the swing animates (snaps at dt<=0,
+   * e.g. the construction-time prime, so a door that starts open renders open immediately).
+   */
+  private syncDoors(dtSeconds: number): void {
+    if (this.doorLeaves.length === 0) return;
+    const access = new Map<number, string>();
+    for (const d of this.runtime.doorViews()) access.set(this.runtime.scene.navGrid.index(d.cx, d.cy), d.access);
+    const speed = this.structures.doorSwingSpeedRadiansPerSecond;
+    for (const leaf of this.doorLeaves) {
+      const target = access.get(leaf.navCell) === 'open' ? leaf.openTarget : 0;
+      leaf.current = dtSeconds > 0 ? approach(leaf.current, target, speed, dtSeconds) : target;
+      leaf.pivot.rotation.y = leaf.current;
     }
   }
 

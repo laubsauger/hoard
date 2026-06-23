@@ -14,6 +14,7 @@ import { PauseMenu } from '../ui/PauseMenu';
 import { InventoryMenu } from '../ui/InventoryMenu';
 import { CharacterPanel } from '../ui/CharacterPanel';
 import { InteractionWheel } from '../ui/InteractionWheel';
+import { InteractionPrompt } from '../ui/InteractionPrompt';
 import { LoadingScreen } from '../ui/LoadingScreen';
 import { DevToolsPanel } from '../ui/debug';
 import '../ui/styles.css';
@@ -37,6 +38,7 @@ export function App() {
           <PauseMenu />
           <InventoryMenu />
           <CharacterPanel />
+          <InteractionPrompt handle={handle} />
           <InteractionWheel handle={handle} />
           {import.meta.env.DEV && <DevToolsPanel />}
           {error && (

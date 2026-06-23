@@ -40,11 +40,12 @@ import { inventoryViewStore } from '../stores/inventoryView';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
 import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
+import type { InteractionPrompt, InteractionTargetWorld } from '../game/interaction';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
 import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
 import type { WeatherProfile } from '../config/domains/weather';
 import { sessionStore, simStepDt } from '../stores/session';
-import { inputStore } from '../stores/input';
+import { inputStore, formatKeyCode } from '../stores/input';
 import { settingsStore, type SettingsState } from '../stores/settings';
 import { GameAudio, resolveAudioOutTuning, type AudibleSound } from '../audio-out';
 
@@ -73,7 +74,9 @@ function createDevStats(): Stats | null {
   const stats = new Stats();
   stats.showPanel(0); // 0 = fps, 1 = ms, 2 = mb
   const dom = stats.dom;
-  dom.style.cssText = 'position:fixed;top:8px;right:8px;left:auto;z-index:1000;cursor:pointer;';
+  // z-index BELOW the UI modals (HUD 20 / pause 60 / settings 80) so the dev meter never overlaps a panel's
+  // controls (e.g. the settings close button, top-right). Visible during play; any open modal covers it.
+  dom.style.cssText = 'position:fixed;top:8px;right:8px;left:auto;z-index:15;cursor:pointer;';
   document.body.appendChild(dom);
   return stats;
 }
@@ -85,6 +88,14 @@ export interface EngineHandle {
   breach(): void;
   board(): void;
   ignite(): void;
+  /** T46/T60: toggle the door NEAREST the player (open↔closed). No-op when none is in reach. */
+  toggleNearestDoor(): void;
+  /** T60: the "{key} to {action}" prompt for the nearest interactable in reach, or null (HUD polls this). */
+  nearestInteraction(): InteractionPrompt | null;
+  /** T60: the nearest interactable target (full state) — the wheel resolves its context verbs. */
+  nearestInteractable(): InteractionTargetWorld | null;
+  /** T59: open a world container's loot panel (the "Search/Loot" verb for a storage target). */
+  loot(): void;
   rotate(dir: 1 | -1): void;
   zoom(delta: number): void;
   setWeather(profile: WeatherProfile): void;
@@ -428,6 +439,10 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'board' });
         },
         ignite: () => runtime.igniteRoute(runtime.defaultBreachCell()),
+        toggleNearestDoor: () => { runtime.toggleNearestDoor(); },
+        nearestInteraction: () => runtime.nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
+        nearestInteractable: () => runtime.nearestInteractableTarget(),
+        loot: () => inventoryViewStore.getState().setOpenContainer('Kitchen Cupboard'),
         rotate: (dir) => camera.rotate(dir),
         zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
         setWeather: (profile) => runtime.setWeather(profile),

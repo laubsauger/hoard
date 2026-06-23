@@ -136,4 +136,21 @@ export const perceptionConfig = registerDomain('perception', {
     min: 0.2,
     max: 12,
   }),
+  /**
+   * Cap on the number of DISTINCT active target cells that each get their own shared flow field per tick
+   * (V14/V15). Sound is localized perception, so the horde no longer follows one global field — each zombie
+   * picks its own target (seen player / loudest heard sound) and zombies sharing a target cell share one
+   * cached field. This bounds per-tick flow-field cost: the most-pursued targets win the budget; zombies
+   * whose target falls outside it idle/wander until a more-pursued target frees a slot. Must stay <= the
+   * navigation flowFieldCacheSize so the per-tick fields never thrash the LRU cache.
+   */
+  maxSimultaneousFlowFields: num({
+    owner: 'perception',
+    unit: 'count',
+    doc: 'Max distinct per-tick target cells that get their own shared flow field (caps recompute cost, V15).',
+    default: 4,
+    min: 1,
+    max: 32,
+    integer: true,
+  }),
 });

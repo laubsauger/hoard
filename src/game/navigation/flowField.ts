@@ -21,6 +21,59 @@ const NEIGHBORS: readonly { dx: number; dy: number; diag: boolean }[] = [
 ];
 const SQRT2 = Math.SQRT2;
 
+/** Binary min-heap over (key=distance, val=cell) on parallel arrays — the Dijkstra frontier. Replaces the
+ *  old O(N²) linear-scan + `includes` frontier that froze the frame when a flow field recomputed (e.g. a
+ *  gunshot retargeting the horde lure). Lazy deletion: stale entries are skipped on pop. O(N log N). */
+class MinHeap {
+  private readonly keys: number[] = [];
+  private readonly vals: number[] = [];
+  get size(): number {
+    return this.vals.length;
+  }
+  push(key: number, val: number): void {
+    this.keys.push(key);
+    this.vals.push(val);
+    let i = this.vals.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (this.keys[p]! <= this.keys[i]!) break;
+      this.swap(i, p);
+      i = p;
+    }
+  }
+  pop(): { key: number; val: number } {
+    const key = this.keys[0]!;
+    const val = this.vals[0]!;
+    const lastK = this.keys.pop()!;
+    const lastV = this.vals.pop()!;
+    const n = this.vals.length;
+    if (n > 0) {
+      this.keys[0] = lastK;
+      this.vals[0] = lastV;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = i * 2 + 2;
+        let m = i;
+        if (l < n && this.keys[l]! < this.keys[m]!) m = l;
+        if (r < n && this.keys[r]! < this.keys[m]!) m = r;
+        if (m === i) break;
+        this.swap(i, m);
+        i = m;
+      }
+    }
+    return { key, val };
+  }
+  private swap(a: number, b: number): void {
+    const k = this.keys[a]!;
+    this.keys[a] = this.keys[b]!;
+    this.keys[b] = k;
+    const v = this.vals[a]!;
+    this.vals[a] = this.vals[b]!;
+    this.vals[b] = v;
+  }
+}
+
 export class FlowField {
   /** Accumulated cost-to-target per cell (Infinity = unreachable). */
   readonly distance: Float64Array;
@@ -53,21 +106,15 @@ export class FlowField {
     if (grid.isBlocked(this.targetCell)) {
       throw new Error(`flow-field target cell ${this.targetCell} is blocked`);
     }
-    // Dijkstra from the target outward. Small grids → simple binary-search-free array frontier
-    // is adequate for the Wave-1 spike; a bucket/heap can replace it without changing the contract.
+    // Dijkstra from the target outward, binary-heap frontier (O(N log N)). Lazy deletion: a cell may be
+    // pushed multiple times; the stale pops (key > recorded distance) are skipped.
     this.distance[this.targetCell] = 0;
-    const frontier: number[] = [this.targetCell];
-    while (frontier.length > 0) {
-      // pop the lowest-distance frontier cell
-      let bestIdx = 0;
-      for (let i = 1; i < frontier.length; i++) {
-        if (this.distance[frontier[i]!]! < this.distance[frontier[bestIdx]!]!) bestIdx = i;
-      }
-      const cell = frontier[bestIdx]!;
-      frontier[bestIdx] = frontier[frontier.length - 1]!;
-      frontier.pop();
+    const heap = new MinHeap();
+    heap.push(0, this.targetCell);
+    while (heap.size > 0) {
+      const { key, val: cell } = heap.pop();
+      if (key > this.distance[cell]!) continue; // stale entry
       const { cx, cy } = grid.coordOf(cell);
-      const here = this.distance[cell]!;
       for (const nb of NEIGHBORS) {
         const nx = cx + nb.dx;
         const ny = cy + nb.dy;
@@ -75,10 +122,10 @@ export class FlowField {
         const ncell = ny * grid.width + nx;
         if (grid.isBlocked(ncell)) continue;
         const step = grid.getCost(ncell) * (nb.diag ? SQRT2 : 1);
-        const nd = here + step;
+        const nd = key + step;
         if (nd < this.distance[ncell]!) {
           this.distance[ncell] = nd;
-          if (!frontier.includes(ncell)) frontier.push(ncell);
+          heap.push(nd, ncell);
         }
       }
     }
