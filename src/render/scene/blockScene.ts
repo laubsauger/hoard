@@ -31,6 +31,7 @@ import { lightingConfig } from '../../config/domains/lighting';
 import { weatherConfig } from '../../config/domains/weather';
 import { renderingConfig } from '../../config/domains/rendering';
 import { postFXConfig } from '../../config/domains/postFX';
+import { shadowsConfig } from '../../config/domains/shadows';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { ToneMappingMode } from '../engine/renderer';
@@ -95,6 +96,7 @@ export class BlockScene {
   private readonly player = resolveDomain(playerConfig, this.tierOf());
   private readonly lighting = resolveDomain(lightingConfig, this.tierOf());
   private readonly weatherCfg = resolveDomain(weatherConfig, this.tierOf());
+  private readonly shadows = resolveDomain(shadowsConfig, this.tierOf());
   private readonly visibility = resolveVisibilitySettings(this.tierOf());
   private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
@@ -146,6 +148,22 @@ export class BlockScene {
     this.hemi = new HemisphereLight(0xa7b8c8, 0x2a2620, this.lighting.ambientIntensity * 0.5);
     this.sun = new DirectionalLight(0xfff2dc, this.lighting.sunIntensity);
     this.sun.castShadow = true;
+    // B13/V36: size the directional shadow ortho frustum to cover the block + set resolution/bias so the
+    // key actually casts readable shadows (renderer.shadowMap is enabled in the WebGPU backend).
+    {
+      const ext = this.worldExtent();
+      const half = Math.max(ext.width, ext.depth) * 0.6;
+      const sc = this.sun.shadow.camera;
+      sc.left = -half;
+      sc.right = half;
+      sc.top = half;
+      sc.bottom = -half;
+      sc.near = 1;
+      sc.far = 220;
+      sc.updateProjectionMatrix();
+      this.sun.shadow.mapSize.set(this.shadows.shadowMapResolution, this.shadows.shadowMapResolution);
+      this.sun.shadow.bias = -0.0005;
+    }
     this.scene.add(this.ambient, this.hemi, this.sun, this.sun.target);
 
     this.buildGround();
@@ -391,7 +409,10 @@ export class BlockScene {
 
     const p = this.runtime.player();
     this.playerMesh.position.set(p.x, 0, p.z);
-    this.playerMesh.rotation.y = -this.runtime.playerAim() + Math.PI / 2;
+    // B8/V41: single-source the aim heading. playerAim() is atan2(dz,dx); the avatar's nose is local +x,
+    // so the Y-rotation that points +x at world heading h is exactly -h (NO +π/2 offset — that bug left
+    // the player facing 90° off the cursor).
+    this.playerMesh.rotation.y = -this.runtime.playerAim();
 
     this.syncBreach();
     this.syncLighting(dtSeconds);

@@ -2,7 +2,7 @@
 // Implements the RendererBackend boundary consumed by RendererHost. Device-loss is wired to the real
 // GPUDevice.lost promise (V23) via a narrow, documented accessor on three's backend.
 
-import type { Camera, Scene } from 'three';
+import { PCFSoftShadowMap, type Camera, type Scene } from 'three';
 import {
   WebGPURenderer,
   type ComputeNode,
@@ -48,6 +48,10 @@ class WebGpuRendererBackend implements RendererBackend {
       ...(this.options.forceWebGL !== undefined ? { forceWebGL: this.options.forceWebGL } : {}),
     });
     await renderer.init();
+    // B13/V36: enable the shadow map so the directional key actually casts. Without this every
+    // `castShadow`/`receiveShadow` flag in the scene is inert and the street renders unlit/flat.
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = PCFSoftShadowMap;
     this.renderer = renderer;
   }
 

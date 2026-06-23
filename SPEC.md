@@ -320,7 +320,7 @@ The combat systems resolve authoritatively but surface nothing: VisualEvents are
 | T53 | x | R | combat feedback render: drain VisualEvents/frame → muzzle flash + tracer + report on fire, hit flinch on hitReaction, directional blood spray/stains + sever silhouettes via the (already-built) GoreSystem | T19,T30 | V8,V39,effects-config |
 | T54 | . | S | death→corpse state: replace instant `free` with a death transition + compact persistent corpse (settled prop, pooled, configured lifetime, saved delta); dismemberment consequences persist | T17,T33 | V18,V40,combat-config |
 | T55 | . | R | death + corpse + dismemberment render: topple/death reaction, corpse meshes/impostors, detached-part props consume `partDetached` | T54,T30 | V8,V17,V40 |
-| T56 | . | R | aim/firing avatar: single-source heading (sim+render), avatar faces cursor each frame, firing pose + recoil | T7,T52 | V21,V41 |
+| T56 | x | R | aim/firing avatar: single-source heading (sim+render), avatar faces cursor each frame, firing pose + recoil | T7,T52 | V21,V41 |
 | T57 | . | S | combat lethality + reactions tuning: non-head hits wound/stagger (not instakill), wound state drives behaviour; head-kill stays; emit `hitReaction` per resolved hit | T16,T17 | V16,V17,combat-config |
 
 ### Wave 6 — Interaction & menus (PARALLEL lanes S / U)
