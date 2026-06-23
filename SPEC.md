@@ -192,6 +192,8 @@ Architecture-boundary + non-negotiable rules. Numbered, monotonic.
 - **V54** Gore decals project onto the ACTUAL hit surface, never a fixed world-Y: a render-side raycast finds the real floor height (interior slabs included) OR a wall/obstacle plane and orients the decal to the surface normal — so blood lands correctly indoors AND splats VERTICALLY on a wall behind a shot zombie. Decal shape is ORGANIC: teardrop/streak elongated along the impact velocity, varied size + rotation (never a uniform circle/blob), amounts tuned + hard-capped (most hits modest, the odd one erupts). Decay is SLOW with a long-lived DRIED-blood phase (darkened, persists) before recycle. Player bloody footsteps are subtle, delayed (only when heavily soaked), small, and infrequent.
 - **V55** Muzzle flash / projectile / tracer originates at the weapon MUZZLE — in front of the player along the aim vector — never inside or behind the body. The player mesh faces the aim heading (single-source sim+render heading; cf. B8).
 - **V56** ONE coherent depth/transparency layering policy (so effects stop fighting it): opaque structure (walls, units, a NON-hidden roof) depth-writes + occludes normally. A cutaway-FADED roof / upper-wall sets `depthWrite=false` while faded (restores when fully opaque) so it never occludes the interior floor, ground decals, or units below it. Ground decals (blood/scorch) keep depth TEST on (walls / units / the player correctly occlude them) but `depthWrite=false` + a polygon-offset bias toward the camera so they read on the floor without z-fighting. Effects MUST NOT use `depthTest:false` to force visibility — that draws them over the player/world and breaks layering; fix the occluder's depth-write instead.
+- **V57** Impact response is by SURFACE type + gated on an actual damage hit: a ZOMBIE/player damage-hit (a body struck within the weapon's range) → blood spray (V51); a STRUCTURE / wall / clean-miss stop point → a distinct SPARK burst (bright, thrown OPPOSITE the impact direction — NOT red blood) + a persistent bullet-hole decal on the struck surface. Blood NEVER fires on a shot that did not damage a body within range. Struck bodies also take a wound decal at the hit region. The visual must let the player tell "I hit a wall" from "I hit a zombie" at a glance.
+- **V58** Cutaway removes ONLY the roof/walls actually occluding the camera→player sightline, DYNAMICALLY as camera/player move — never all four sides of a room by default (almost never all 4). Per V20 + the Project Zomboid cutaway reference + `docs/ART-DIRECTION.md`: fade the near/occluding faces to see in, the far walls stay to read enclosure.
 
 ---
 
@@ -392,6 +394,31 @@ In-browser feedback on the live build: shots pierce walls, the muzzle spawns beh
 
 W9 lane split: α = lane R (T77, T78) render/effects + GameViewport (raycast reads scene geometry, does NOT edit blockScene); β = lane S (T79) combat ray-vs-structure. Background jobs (concurrent with the spec agent); reconcile via full `npm run check`.
 
+### Wave 10 — Impact response & directional cutaway (PARALLEL lanes R)
+
+In-browser: shooting a wall/missing reads like blood (no distinct surface impact), no bullet holes, no wounds on bodies; and the cutaway strips whole rooms (all 4 walls) instead of just the occluders.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T80 | . | R | surface impact response: a STRUCTURE/wall/clean-miss stop → a distinct bright spark burst thrown OPPOSITE the impact (NOT red) + a persistent bullet-hole decal projected on the struck surface (via the existing surface raycaster); keep blood strictly on a zombie damage-hit within range (gate it). Applies to all surfaces | T74,T77 | V57,V51,effects-config |
+| T81 | . | R | wound decals at the struck region on zombie + player bodies (small dark wound mark at the hit point, accumulates, capped) | T17,T75 | V57,V17,effects-config |
+| T82 | . | R | directional dynamic cutaway: fade ONLY the roof/walls occluding the camera→player sightline (almost never all 4); far walls stay to read enclosure; updates as camera/player move (touches `blockScene`/visibility — coordinate w/ the house-geometry owner) | T28,T70 | V58,V20,ART-DIRECTION |
+
+W10 lane split: α = lane R (T80, T81) render/effects (sparks + bullet holes + wounds, blood-gating) — disjoint from blockScene; T82 directional cutaway touches `blockScene`/visibility (coordinate, sequence after the house-geometry settles). Car + car-alarm = the already-speced T69 ("after that").
+
+### Wave 11 — Playable loop: items, loot, the actual game (the missing core)
+
+REALITY CHECK: Waves 0–10 built the engine + combat rendering, but the GAME is not playable — there are no items in the world, containers/corpses hold no loot, and interaction is dummy top-bar buttons. The handout's M1 "loot" was foundations only (registry + container model), never content or a loot loop. These tasks + Wave-6 interaction/menus (T59–T65) are the real remaining work. PARALLEL lanes S / U / A.
+
+| id | st | lane | task | deps | cites |
+|---|---|---|---|---|---|
+| T83 | . | A | item catalog CONTENT: a real authored set of `ItemDef`s (melee/firearm weapons, ammo, food, drink, meds/bandages, tools, materials, valuables) with stats/weight/stack per the items config — populate the registry; validated (V4/V7) | T23 | V4,V7,items-config,inventory-config,PZ-research |
+| T84 | . | S | loot population + tables: per-container-type + per-zombie-type loot tables (weighted, deterministic seed V26); world build fills furniture/floor containers, zombie DEATH (T54) spawns a corpse container with loot; searched/looted state persists (V9) | T23,T54,T63,T83 | V9,V26,inventory-config,PZ-research |
+| T85 | . | S | item world-presence + pickup: dropped/loose items exist as world entities the floor-container surfaces; pick up / drop / transfer via `moveItem`; equipped weapon drives `runtime.fire` (T73) | T23,T63,T73 | V1,inventory-config |
+| T86 | . | INT | M3 playable loot loop (integration): enter a building → open a container/corpse → loot items into inventory (T62) → equip a weapon → use the equipped weapon; via the interaction wheel (T60), NOT the dummy bar; delete `Controls.tsx` dummy buttons | T59,T60,T62,T63,T83,T84,T85 | V27,V45,milestone-3 |
+
+W11 = the playable core. Build order: T83 (content) + T84/T85 (loot+pickup, lane S) ∥ T59→T60 + T62/T64 (interaction+menus, lane U), then T86 integration (delete the dummy bar). This — not the combat-render polish — is what makes it a game.
+
 **Suggested 2-agent assignment** (parallel-safe by lane):
 - **W0** — 1 agent: T1→T2→T3→T42 (contracts must be serial + frozen).
 - **W1** — α=lane S (T8,T10,T11,T12,T13,T14); β=lane R (T5,T7,T9)+lane U (T4,T6). Lane A (T34) = optional 3rd agent, fully independent.
@@ -432,4 +459,6 @@ Five decisions to lock before vertical-slice brief finalized (OPEN, §C): campai
 | B19 | 2026-06-23 | Blood spray reads too circular + excessive; floor decals too blobby + too many; player bloody footsteps too immediate/extreme/blobby after soaking. | Organic velocity-aligned teardrop/streak decals, varied size, reduced counts + caps, slow decay + long dried-blood phase; subtle delayed sparse footsteps (V54; T77). |
 | B20 | 2026-06-23 | Firearm shots pass THROUGH walls (`gatherAlongRay`/`fire` never test structure occlusion) → hit zombies behind walls; and the muzzle/tracer spawns at the player's BACK and travels through the body before exiting the front (wrong origin + player not facing aim). | Combat ray stops at the first structure blocker, no shoot-through (V53; T79); muzzle/tracer origin at the weapon muzzle in front of the player along aim + face the aim heading (V55; T78). |
 | B21 | 2026-06-23 | Blood floor decals invisible INDOORS: the cutaway-faded roof still depth-wrote, occluding the interior floor; an over-correction (`depthTest:false`) then drew blood OVER the player. Underlying: no coherent depth-layering policy. | Faded roof/upper-walls set `depthWrite=false` while faded (`blockScene`); decals keep depthTest ON + depthWrite OFF + polygon-offset bias; per V56. Also: horde jitter at target (separation vs steering) → arrival-stop ring (`hordeArriveRadiusMeters`, V19/V35); muzzle flash static rotation → orient to aim (V55); tracer drew full range through walls on a miss → wire `ShotResult.stopDistanceMeters` to `fireFeedback` (V49/V53). |
+| B22 | 2026-06-23 | Blood appears to fire on EVERY shot regardless of range/hit — actually `bloodSpray` is hit-gated in `hitPath`, but the impact SPARK on a wall/miss looks red/blood-like, so a miss reads as "blood beyond range". No distinct wall response. | Distinct STRUCTURE impact: spark burst (opposite dir, not red) + bullet-hole decal; keep blood strictly on a zombie damage-hit within range; bodies get a wound decal (V57; T80/T81). |
+| B23 | 2026-06-23 | Cutaway culls ALL walls of a room (all four sides) instead of only the camera-occluding ones → rooms read as roofless open boxes, loses enclosure. | Directional dynamic cutaway: fade only the roof/walls between camera and player; far walls stay; almost never all 4 (V58/V20, Project Zomboid ref; T82). |
 |---|---|---|---|
