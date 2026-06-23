@@ -362,6 +362,81 @@ body,
   font: 10px/1.4 ui-monospace, Menlo, monospace;
   color: #7e8da9;
 }
+.hbn-pause__speed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+.hbn-pause__speed-label {
+  font: 10px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #8fa1c2;
+}
+.hbn-pause__speed-btns {
+  display: flex;
+  gap: 6px;
+}
+.hbn-pause__chip {
+  font: 11px/1 ui-monospace, Menlo, monospace;
+  padding: 6px 9px;
+  color: #d7e0f2;
+  background: rgba(120, 150, 210, 0.12);
+  border: 1px solid rgba(130, 160, 210, 0.28);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hbn-pause__chip:hover { background: rgba(120, 150, 210, 0.22); }
+.hbn-pause__chip.is-active {
+  color: #06121f;
+  background: #5aa0ff;
+  border-color: #5aa0ff;
+  font-weight: 600;
+}
+
+/* ---- SettingsPanel: section headers + keymap rebind buttons ---- */
+.hbn-a11y__section {
+  margin: 14px 0 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  font: 600 0.78em/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9fb0cc;
+}
+.hbn-a11y__section:first-of-type {
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: 0;
+}
+.hbn-keybind {
+  min-width: 88px;
+  padding: 5px 9px;
+  font: 11px/1 ui-monospace, Menlo, monospace;
+  color: #d7e0f2;
+  background: rgba(120, 150, 210, 0.12);
+  border: 1px solid rgba(130, 160, 210, 0.28);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: center;
+}
+.hbn-keybind:hover { background: rgba(120, 150, 210, 0.22); }
+.hbn-keybind.is-capturing {
+  color: #06121f;
+  background: #ffcf6b;
+  border-color: #ffcf6b;
+  font-weight: 600;
+}
+.hbn-a11y select {
+  background: rgba(120, 150, 210, 0.12);
+  color: var(--hbn-text);
+  border: 1px solid rgba(130, 160, 210, 0.28);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+}
 
 /* ---- InventoryMenu: dual-pane loot/inventory ---- */
 .hbn-inv {
@@ -423,3 +498,22 @@ body,
 .hbn-char__fill { display: block; height: 100%; border-radius: 999px; transition: width 0.2s ease, background 0.2s ease; }
 .hbn-char__num { width: 26px; text-align: right; font: 10px ui-monospace, Menlo; color: #9fb0cc; }
 .hbn-char__hint { margin: 14px 0 0; font: 10px ui-monospace, Menlo; color: #7e8da9; text-align: center; }
+
+/* ---- InteractionWheel: context verbs (E) ---- */
+.hbn-wheel { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 45; pointer-events: none; }
+.hbn-wheel__panel {
+  pointer-events: auto; min-width: 180px; padding: 8px; display: flex; flex-direction: column; gap: 3px;
+  background: rgba(16,20,27,0.95); border: 1px solid rgba(130,160,210,0.24); border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0,0,0,0.5);
+}
+.hbn-wheel__head { padding: 4px 8px 6px; font: 9px ui-monospace, Menlo; letter-spacing: 0.14em; text-transform: uppercase; color: #5e6f92; }
+.hbn-wheel__verb {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 8px 10px;
+  font: 12px ui-sans-serif, system-ui; text-align: left; color: #dbe4f5;
+  background: rgba(120,150,210,0.1); border: 1px solid rgba(130,160,210,0.18); border-radius: 7px; cursor: pointer;
+  transition: background 0.12s ease;
+}
+.hbn-wheel__verb:hover:not(:disabled) { background: rgba(120,150,210,0.24); }
+.hbn-wheel__verb.is-disabled { opacity: 0.5; cursor: not-allowed; }
+.hbn-wheel__verb-reason { font: 9px ui-monospace, Menlo; color: #c08a8a; }
+.hbn-wheel__hint { margin: 4px 0 0; text-align: center; font: 9px ui-monospace, Menlo; color: #7e8da9; }

@@ -9,10 +9,11 @@ import { GameViewport, type EngineHandle } from '../ui/GameViewport';
 import { Hud } from '../ui/Hud';
 import { NoiseMeter } from '../ui/NoiseMeter';
 import { Controls } from '../ui/Controls';
-import { AccessibilityPanel } from '../ui/AccessibilityPanel';
+import { SettingsPanel } from '../ui/SettingsPanel';
 import { PauseMenu } from '../ui/PauseMenu';
 import { InventoryMenu } from '../ui/InventoryMenu';
 import { CharacterPanel } from '../ui/CharacterPanel';
+import { InteractionWheel } from '../ui/InteractionWheel';
 import { LoadingScreen } from '../ui/LoadingScreen';
 import { DevToolsPanel } from '../ui/debug';
 import '../ui/styles.css';
@@ -32,10 +33,11 @@ export function App() {
           <Hud />
           <NoiseMeter />
           <Controls handle={handle} />
-          <AccessibilityPanel />
+          <SettingsPanel />
           <PauseMenu />
           <InventoryMenu />
           <CharacterPanel />
+          <InteractionWheel handle={handle} />
           {import.meta.env.DEV && <DevToolsPanel />}
           {error && (
             <div className="hbn-error" role="alert">
