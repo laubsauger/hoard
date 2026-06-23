@@ -29,7 +29,6 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
-  PlaneGeometry,
   CapsuleGeometry,
   Quaternion,
   Scene,
@@ -70,6 +69,8 @@ import {
 } from '../world/visibility';
 import { SceneResources } from './builders/sceneResources';
 import type { FadeSurface } from './builders/handles';
+import type { BuildContext } from './builders/buildContext';
+import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -92,7 +93,6 @@ import {
   windowPlacements,
   houseStyleForBuilding,
   featureBuildingIndexOf,
-  type GroundKind,
   type BuildingFootprint,
   type HouseStyle,
   type CellRect,
@@ -272,8 +272,8 @@ export class BlockScene {
     this.scene.add(this.flashlight, this.flashlight.target);
 
     this.featureBuildingIndex = this.computeFeatureBuildingIndex();
-    this.buildGround();
-    this.buildGroundRects();
+    buildGround(this.buildCtx(), { floorThicknessMeters: this.world.floorThicknessMeters });
+    buildGroundRects(this.buildCtx());
     this.buildWallsAndRoof();
     this.buildDoorsAndWindows();
     this.buildProps();
@@ -314,71 +314,15 @@ export class BlockScene {
     return this.res.mergeBoxes(label, boxes);
   }
 
-  private worldExtent(): { width: number; depth: number } {
-    return {
-      width: this.runtime.scene.navGrid.width * this.navCellSize,
-      depth: this.runtime.scene.navGrid.height * this.navCellSize,
-    };
+  /** Narrow build handle handed to the extracted builders (Phase 1 of the decomposition). */
+  private buildCtx(): BuildContext {
+    return { root: this.scene, res: this.res, town: this.runtime.scene, navCellSize: this.navCellSize };
   }
 
   /** Which building (if any) holds the destructible §G section cells — kept readable (less decay). Delegates
    *  to the shared scene-layer helper (T108) so the sim WindowSystem picks the same feature house (V26). */
   private computeFeatureBuildingIndex(): number {
     return featureBuildingIndexOf(this.runtime.scene);
-  }
-
-  private buildGround(): void {
-    const { width, depth } = this.worldExtent();
-    const margin = this.navCellSize * 4;
-    // Base ground = grass/dirt verge under the whole district; the suburban paint (asphalt street, concrete
-    // sidewalk, grass yards) is layered on top by buildGroundRects.
-    const ground = new Mesh(
-      this.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
-      this.mat('ground', { color: 0x57564a, roughness: 0.98 }),
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.set(width / 2, 0, depth / 2);
-    ground.receiveShadow = true;
-    this.scene.add(ground);
-
-    // Per-building interior floor slab — slightly raised + lighter so each house's rooms read (multi-building).
-    const floorMat = this.mat('floor', { color: 0x6b6e64, roughness: 0.9 });
-    buildingsOf(this.runtime.scene).forEach((bld, i) => {
-      const b = bld.bounds;
-      const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
-      const fd = (b.maxCy - b.minCy + 1) * this.navCellSize;
-      const floor = new Mesh(this.geo(`floor.geo.${i}`, new PlaneGeometry(fw, fd)), floorMat);
-      floor.rotation.x = -Math.PI / 2;
-      floor.position.set(((b.minCx + b.maxCx + 1) / 2) * this.navCellSize, this.world.floorThicknessMeters, ((b.minCy + b.maxCy + 1) / 2) * this.navCellSize);
-      floor.receiveShadow = true;
-      this.scene.add(floor);
-    });
-  }
-
-  /** Suburban ground paint (T87): asphalt street, concrete sidewalk, grass yards as flat coloured quads
-   *  layered by a small per-kind Y offset (highest kind wins on overlap). Pure dressing; no nav effect. */
-  private buildGroundRects(): void {
-    const rects = this.runtime.scene.groundRects;
-    if (!rects || rects.length === 0) return;
-    const cs = this.navCellSize;
-    const color: Record<GroundKind, number> = { asphalt: 0x26282c, sidewalk: 0x6a6c6e, grass: 0x3b4a2c };
-    const yOf: Record<GroundKind, number> = { asphalt: 0.012, sidewalk: 0.02, grass: 0.028 };
-    const mats: Record<GroundKind, MeshStandardMaterial> = {
-      asphalt: this.mat('ground.asphalt', { color: color.asphalt, roughness: 0.96 }),
-      sidewalk: this.mat('ground.sidewalk', { color: color.sidewalk, roughness: 0.9 }),
-      grass: this.mat('ground.grass', { color: color.grass, roughness: 1 }),
-    };
-    const group = new Group();
-    rects.forEach((r, i) => {
-      const w = (r.rect.maxCx - r.rect.minCx + 1) * cs;
-      const d = (r.rect.maxCy - r.rect.minCy + 1) * cs;
-      const m = new Mesh(this.geo(`groundRect.${i}`, new PlaneGeometry(w, d)), mats[r.kind]);
-      m.rotation.x = -Math.PI / 2;
-      m.position.set(((r.rect.minCx + r.rect.maxCx + 1) / 2) * cs, yOf[r.kind], ((r.rect.minCy + r.rect.maxCy + 1) / 2) * cs);
-      m.receiveShadow = true;
-      group.add(m);
-    });
-    this.scene.add(group);
   }
 
   /** A deterministic, replay-stable HouseStyle for a building (V26): seeded off the building's STABLE footprint
