@@ -39,7 +39,8 @@ import { inventoryViewStore } from '../stores/inventoryView';
 import { uiStore } from '../stores/ui';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
-import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
+import { createGameRuntime } from './viewport/gameRuntime';
+import { rayDistanceToWall } from '../game/scene';
 import type { InteractionPrompt, InteractionTargetWorld } from '../game/interaction';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
 import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
@@ -160,8 +161,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       adapter = adp;
 
       // M2: a representative district (multiple streaming sectors with abstract populations, V13).
-      const district = buildCityDistrict(tier);
-      runtime = new GameRuntime({ tier, adapter: adp, scene: district.block, sectors: district.sectors });
+      runtime = createGameRuntime(tier, adp);
       runtime.spawnHorde(combat.gateZeroZombieCount, combat.gateZeroSpawnRadiusMeters);
 
       host = createRendererHost(canvas, tier);
@@ -399,8 +399,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       onReady?.({
         save: () => runtime.save(),
         load: async () => {
-          const reloaded = buildCityDistrict(tier);
-          const fresh = new GameRuntime({ tier, adapter: adp, scene: reloaded.block, sectors: reloaded.sectors });
+          const fresh = createGameRuntime(tier, adp);
           await fresh.loadFrom();
           runtime = fresh;
           scene?.rebindRuntime(fresh);
@@ -521,7 +520,9 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         });
         bloodView.update(dt);
         gibView.update(dt);
-        impactView.update(dt); // T80/T81 — advance spark burst + age bullet-hole/wound decals (V57)
+        // T108 — glass-shard bursts: drain glassShatter events (window smash via verb / shot / zombie) into shards.
+        impactView.consume(drained.visual, { goreIntensity: access.goreIntensity, reduceFlashes: access.feedback.reduceFlashes });
+        impactView.update(dt); // T80/T81 — advance spark burst + age bullet-hole/wound decals (V57); + shards (T108)
         weatherView.update(dt, runtime.weather, p.x, p.z); // precipitation: ramp + recycle, box follows the player
         // FIRE: map any new `fireIgnited` world facts (structural cell → nav cell → world centre, the same
         // mapping blockScene uses) into flame ignitions, then mirror the live burning set. `isRouteBurning`
