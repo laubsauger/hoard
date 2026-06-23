@@ -8,6 +8,9 @@ import type { StructureOp } from '@/game/core/contracts';
 /** The kind of thing the player is facing. */
 export type TargetKind = 'door' | 'window' | 'container' | 'corpse' | 'structure';
 
+/** A window's glass state (T108). `open` = authored glassless; `smashed` = a once-intact pane broken. */
+export type WindowGlass = 'intact' | 'open' | 'smashed';
+
 /** Live state of the target relevant to which verbs apply. */
 export interface InteractionTarget {
   readonly kind: TargetKind;
@@ -17,6 +20,10 @@ export interface InteractionTarget {
   readonly breached?: boolean;
   /** Container/corpse already emptied. */
   readonly looted?: boolean;
+  /** Window glass state (T108) — drives the state-sensitive window verbs. */
+  readonly glass?: WindowGlass;
+  /** Window board count (T108) — boarded windows offer "remove boards" first. */
+  readonly boards?: number;
 }
 
 /** What the player has on hand / knows — gates tool/material/skill-dependent verbs. */
@@ -65,11 +72,21 @@ export function resolveInteractions(target: InteractionTarget, ctx: InteractionC
       break;
     }
     case 'window': {
-      if (target.access === 'open') verbs.push({ id: 'close', label: 'Close', enabled: true, op: 'close' });
-      else verbs.push({ id: 'open', label: 'Open', enabled: true, op: 'open' });
-      verbs.push({ id: 'climb', label: 'Climb through', enabled: true, action: 'window.climb' });
-      if (!target.boarded) verbs.push(gated('board', 'Board', !!(ctx.hasHammer && ctx.hasPlanks), 'need hammer + planks', 'board'));
-      verbs.push({ id: 'smash', label: 'Smash', enabled: true, op: 'breach' });
+      // State-driven (T108): a boarded window must be pried open first; an intact pane can be smashed; an
+      // open/smashed window can be climbed through OR boarded up (gated on a hammer + planks).
+      const boards = target.boards ?? 0;
+      if (boards > 0) {
+        verbs.push({ id: 'removeBoard', label: 'Remove boards', enabled: true, action: 'window.removeBoard' });
+      } else if (target.glass === 'intact') {
+        verbs.push({ id: 'smash', label: 'Smash glass', enabled: true, action: 'window.smash' });
+      } else {
+        verbs.push({ id: 'climb', label: 'Climb through', enabled: true, action: 'window.climb' });
+        verbs.push(
+          ctx.hasHammer && ctx.hasPlanks
+            ? { id: 'board', label: 'Board up', enabled: true, action: 'window.board' }
+            : { id: 'board', label: 'Board up', enabled: false, reason: 'need hammer + planks' },
+        );
+      }
       break;
     }
     case 'container': {

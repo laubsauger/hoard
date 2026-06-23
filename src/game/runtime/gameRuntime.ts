@@ -67,11 +67,15 @@ import {
   isWalkableRadius,
   lootableContainerCells,
   DoorSystem,
+  WindowSystem,
+  windowPlacements,
+  resolveHouseVariation,
   REGION_ROOM_A,
   REGION_ROOM_B,
   type TestBlock,
   type Vec3,
   type DoorView,
+  type WindowView,
 } from '@/game/scene';
 import {
   nearestInteractable,
@@ -83,6 +87,7 @@ import {
   type HighlightDims,
 } from '@/game/interaction';
 import { structuresConfig } from '@/config/domains/structures';
+import { worldConfig } from '@/config/domains/world';
 import {
   type PopulationEntry,
 } from './saveRecord';
@@ -105,7 +110,12 @@ const REFERENCE_TIER: QualityTier = 'desktop-high';
 const WORLD_CONTAINER_ENTITY = 0x7fff_0001;
 const HORDE_NAV_GROUP = 0;
 const ZOMBIE_AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Sight);
+/** Movement-layer mask for the window-attrition proximity query (T108) — "is a body up against this window". */
+const MOVEMENT_LAYER = layerMask(CollisionLayer.Movement);
 const MAX_SPAWN_RESAMPLES = 32;
+/** Scheduler cadence (ticks) for the T108 window-attrition step — the interval count is fed to the system
+ *  tick so the break-board / smash-glass thresholds are counted in real ticks (matches perception cadence). */
+const WINDOW_ATTRITION_TICKS = 4;
 /** Scheduler cadence (ticks) for the district streaming + objective maintenance step. Structural, like
  *  the interval buckets the horde systems use (every 4 ticks) — not tunable content, so inlined. */
 const DISTRICT_STEP_TICKS = 15;
@@ -224,6 +234,9 @@ export class GameRuntime {
 
   /** T46 — authoritative door state for the scene's front-door openings (open/closed clears/blocks nav). */
   private readonly doorSystem: DoorSystem;
+  /** T108 — authoritative window state (glass/boards). An opening clears its nav cell; boards/intact glass
+   *  block it. Seeded from the SAME placements the renderer dresses, so sim + render agree (V26). */
+  private readonly windowSystem: WindowSystem;
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
 
@@ -245,6 +258,24 @@ export class GameRuntime {
     // T46: doors are the scene's front-door OPENINGS. Initial open/closed is read from the authored nav grid
     // (a blocked door cell starts closed, an open gap starts open) so sim state matches the geometry.
     this.doorSystem = new DoorSystem(this.scene.navGrid, this.scene.exitCells);
+    // T108: windows on a deterministic subset of facade cells. Seeded from the SAME placements the renderer
+    // dresses (windowPlacements) with the initial glass/board state derived from the house seed — so a window
+    // that renders boarded/smashed also simulates that way (V26). Windows govern projectile occlusion + render
+    // + interaction; they do NOT alter nav passability (§G — a perimeter window must not unseal room A).
+    {
+      const w = resolveDomain(worldConfig, this.tier);
+      const placements = windowPlacements(this.scene, {
+        houseVar: resolveHouseVariation(this.tier),
+        stride: w.houseWindowStride,
+        boardedFraction: w.houseWindowBoardedFraction,
+      });
+      this.windowSystem = new WindowSystem(this.scene.navGrid, placements, {
+        maxBoards: this.structuresCfg.maxBoardsPerWindow,
+        glassShotsToSmash: this.structuresCfg.windowGlassShotsToSmash,
+        ticksToBreakBoard: this.structuresCfg.windowZombieTicksPerBoard,
+        ticksToSmashGlass: this.structuresCfg.windowZombieTicksToSmashGlass,
+      });
+    }
 
     const time = resolveDomain(timeConfig, this.tier);
     this.clock = new FixedClock({
@@ -389,7 +420,9 @@ export class GameRuntime {
     const playerRef: ContainerRef = { entity: this.playerEntity, container: 'player' };
     this.inventory.addContainer(playerRef, { type: 'backpack' });
     this.namedContainers.set('player', playerRef);
-    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1]] as const) {
+    // T108: equip the player with a hammer + a stack of planks by default so window board-up works out of the
+    // box (temporary starter loadout — adjust later). The hammer also doubles as a breaching tool (V43 gating).
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
@@ -450,6 +483,28 @@ export class GameRuntime {
 
   player(): Readonly<Vec3> {
     return this.playerPos;
+  }
+
+  /** Count alive zombies within `radius` m of the player (XZ). Drives the proximity-scaled horde audio bed —
+   *  the drone answers "how many are near ME", not the global embodied count (which is always high). */
+  nearbyHordeCount(radius: number): number {
+    return this.zombies.nearbyCount(this.playerPos.x, this.playerPos.z, radius);
+  }
+
+  /**
+   * True if the player's body (bodyRadius, V42) overlaps nav cell (cx,cy). Used to REFUSE closing a door onto
+   * the player: blocking the cell the player occupies traps them — every wall-slide candidate then fails the
+   * radius-aware walkable test (movePlayer). Closest-point-on-cell-AABB vs player centre = exactly the trap
+   * condition, so refusing close whenever this is true is the precise guard.
+   */
+  private playerOverlapsCell(cx: number, cy: number): boolean {
+    const s = this.scene.navGrid.settings.navCellSize;
+    const px = Math.min(Math.max(this.playerPos.x, cx * s), (cx + 1) * s);
+    const pz = Math.min(Math.max(this.playerPos.z, cy * s), (cy + 1) * s);
+    const dx = this.playerPos.x - px;
+    const dz = this.playerPos.z - pz;
+    const r = this.playerCfg.bodyRadiusMeters;
+    return dx * dx + dz * dz < r * r;
   }
 
   /** True once the player's health has reached 0 (lethal game-over). Player control is halted while dead. */
@@ -600,7 +655,12 @@ export class GameRuntime {
   /** Open/close the door at a nav cell (authoritative). Clearing the cell opens nav + sight + sound through
    *  it; blocking restores it (V5 local edit). Returns the resulting access, or undefined if no door/locked. */
   setDoor(navCell: number, open: boolean): 'open' | 'closed' | 'locked' | undefined {
-    return open ? (this.doorSystem.open(navCell) ? 'open' : this.doorSystem.accessOf(navCell)) : (this.doorSystem.close(navCell) ? 'closed' : this.doorSystem.accessOf(navCell));
+    if (open) return this.doorSystem.open(navCell) ? 'open' : this.doorSystem.accessOf(navCell);
+    // Closing: refuse if the player's body overlaps the door cell — blocking it would trap them. No-op return
+    // of the current (still-open) access so the UI shows the close simply did not take (V42 trap guard).
+    const { cx, cy } = this.scene.navGrid.coordOf(navCell);
+    if (this.playerOverlapsCell(cx, cy)) return this.doorSystem.accessOf(navCell);
+    return this.doorSystem.close(navCell) ? 'closed' : this.doorSystem.accessOf(navCell);
   }
 
   /** Toggle the door NEAREST the player within interaction reach (the wheel / prompt action). Returns the new
@@ -608,7 +668,69 @@ export class GameRuntime {
   toggleNearestDoor(): 'open' | 'closed' | 'locked' | null {
     const near = this.doorSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
     if (!near) return null;
+    // Closing onto the player traps them (V42) — refuse the close half of the toggle when the player's body
+    // overlaps the door cell; opening is always safe. Return the unchanged access so the prompt stays honest.
+    if (near.door.access === 'open' && this.playerOverlapsCell(near.door.cx, near.door.cy)) {
+      return near.door.access;
+    }
     return this.doorSystem.toggle(near.navCell) ?? null;
+  }
+
+  // ---- T108 windows: authoritative glass/board state (commands resolved here, never render-driven) ----
+
+  /** Live window views for the renderer (mesh swap) + interaction resolution. */
+  windowViews(): readonly WindowView[] {
+    return this.windowSystem.list();
+  }
+
+  /** The window NEAREST the player within interaction reach, or null. */
+  private nearestWindowInReach(): { navCell: number } | null {
+    const near = this.windowSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    return near ? { navCell: near.navCell } : null;
+  }
+
+  /** True iff the player's pack holds at least one of `item`. */
+  private playerHas(item: number): boolean {
+    const ref = this.namedContainers.get('player');
+    return ref ? this.inventory.count(ref, item as ItemId) > 0 : false;
+  }
+
+  /** Smash the intact pane of the NEAREST window in reach (the "smash glass" verb). Returns true on a change. */
+  smashNearestWindow(): boolean {
+    const near = this.nearestWindowInReach();
+    return near ? this.windowSystem.smashGlass(near.navCell) : false;
+  }
+
+  /**
+   * Board up the NEAREST window in reach (the "board up" verb). Authoritative gating (V1/V43): needs a hammer
+   * AND enough planks; on success the planks are consumed and one board is added (blocks the opening again).
+   * Returns true only when a board was actually added.
+   */
+  boardNearestWindow(): boolean {
+    const near = this.nearestWindowInReach();
+    const ref = this.namedContainers.get('player');
+    if (!near || !ref) return false;
+    if (!this.playerHas(ITEM.Hammer)) return false; // tool required to nail boards
+    const cost = this.structuresCfg.windowPlankCostPerBoard;
+    if (this.inventory.count(ref, ITEM.WoodPlank as ItemId) < cost) return false;
+    if (!this.windowSystem.addBoard(near.navCell)) return false; // already at max — do not spend planks
+    this.inventory.take(ref, ITEM.WoodPlank as ItemId, cost);
+    return true;
+  }
+
+  /** Pry one board off the NEAREST window in reach (the "remove boards" verb) — returns the planks. */
+  unboardNearestWindow(): boolean {
+    const near = this.nearestWindowInReach();
+    const ref = this.namedContainers.get('player');
+    if (!near || !ref) return false;
+    if (!this.windowSystem.removeBoard(near.navCell)) return false;
+    // Return the planks the board was made of (best-effort: the pack may be over capacity — then they drop).
+    try {
+      this.inventory.seed(ref, ITEM.WoodPlank as ItemId, this.structuresCfg.windowPlankCostPerBoard);
+    } catch {
+      // pack full — the planks are lost rather than crashing the command (acceptable; they were already used).
+    }
+    return true;
   }
 
   /**
@@ -620,6 +742,11 @@ export class GameRuntime {
     const out: InteractionTargetWorld[] = [];
     for (const d of this.doorSystem.list()) {
       out.push({ kind: 'door', access: d.access, x: d.x, z: d.z, label: 'Door' });
+    }
+    // T108: every window, carrying its live glass + board state so the wheel/prompt offer the state-driven
+    // verbs (boarded → remove boards, intact → smash glass, opening → climb / board up).
+    for (const w of this.windowSystem.list()) {
+      out.push({ kind: 'window', glass: w.glass, boards: w.boards, x: w.x, z: w.z, label: 'Window' });
     }
     // The destructible §G wall section — anchored at its mid nav cell.
     const wallNav = this.scene.navCellForStructuralCell(this.defaultBreachCell());
@@ -896,7 +1023,25 @@ export class GameRuntime {
     const steps = Math.max(1, Math.ceil(range / step));
     for (let i = 1; i <= steps; i++) {
       const d = Math.min(i * step, range);
-      if (!this.scene.isWalkableWorld(origin.x + dirX * d, origin.z + dirZ * d)) return d;
+      const wx = origin.x + dirX * d;
+      const wz = origin.z + dirZ * d;
+      if (!this.scene.isWalkableWorld(wx, wz)) {
+        // T108: a window cell is always a blocked WALL cell in the nav grid (§G — windows are not walk-through
+        // openings), so the occlusion query resolves window pass-through HERE. An OPENING (glassless/smashed,
+        // unboarded) lets the round pass; an intact pane SHATTERS when the round crosses it (then passes, or
+        // stops at the glass if the pane still has HP); boards + real walls block.
+        const { cx, cy } = this.scene.navGrid.worldToCell(wx, wz);
+        const navCell = this.windowSystem.cellOf(cx, cy);
+        if (navCell >= 0) {
+          if (this.windowSystem.isOpening(navCell)) continue; // smashed/glassless hole — shot flies through
+          if (this.windowSystem.glassOf(navCell) === 'intact' && (this.windowSystem.boardsOf(navCell) ?? 0) === 0) {
+            if (this.windowSystem.applyGlassHit(navCell)) continue; // shattered → shot continues past the opening
+            return d; // pane absorbed the hit but did not break (HP > 1) — round stops at the glass
+          }
+          // a boarded window blocks the round (falls through to the wall return below)
+        }
+        return d;
+      }
       if (d >= range) break;
     }
     return null;
@@ -1033,6 +1178,29 @@ export class GameRuntime {
     // interval (coarse): clean up corpses past their configured lifetime (B9/T54). Phase 1 so it never
     // shares a tick with the district step; lifetime is long, so coarse pruning is ample.
     this.scheduler.register('corpses', { bucket: 'interval', everyTicks: DISTRICT_STEP_TICKS }, () => this.corpses.prune(this.absTick()), 1);
+    // interval: T108 window attrition — a zombie pressed against a window tears its boards off / smashes the
+    // pane over time, eventually opening an entry. Phase 2 so it never shares a tick with perception (0)/tier (1).
+    this.scheduler.register('windows', { bucket: 'interval', everyTicks: WINDOW_ATTRITION_TICKS }, () => this.stepWindowAttrition(WINDOW_ATTRITION_TICKS), 2);
+  }
+
+  /**
+   * T108 zombie window attrition: a window with at least one zombie within `windowZombieReachMeters` accrues
+   * `ticks` of attack progress; the WindowSystem tears a board off / smashes an intact pane at its threshold,
+   * eventually opening an entry. Authoritative + deterministic (the under-attack set is read from the spatial
+   * hash, the same structure the horde steering consults). No-op once a window is already a clear opening.
+   */
+  private stepWindowAttrition(ticks: number): void {
+    const windows = this.windowSystem.list();
+    if (windows.length === 0) return;
+    const reach = this.structuresCfg.windowZombieReachMeters;
+    const underAttack: number[] = [];
+    for (const w of windows) {
+      if (w.glass !== 'intact' && w.boards === 0) continue; // already an opening — nothing left to attrite
+      if (this.spatial.query(w.x, w.z, reach, MOVEMENT_LAYER).length > 0) {
+        underAttack.push(this.windowSystem.cellOf(w.cx, w.cy));
+      }
+    }
+    this.windowSystem.tick(underAttack, ticks);
   }
 
   /**

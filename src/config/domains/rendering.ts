@@ -530,6 +530,22 @@ export const renderingConfig = registerDomain('rendering', {
     min: 0,
     max: 20,
   }),
+  cutawayMinOpacity: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'SLIVER floor (V65): a cutaway-faded roof/upper/interior wall fades to THIS opacity, NOT to 0 — a low-opacity hint of the wall stays so the player keeps spatial orientation (sees the room outline they are inside). 0 = fully vanish (old behaviour); ~0.12 leaves a readable sliver. The fade TARGET for any occluding surface becomes this value instead of 0.',
+    default: 0.12,
+    min: 0,
+    max: 1,
+  }),
+  cutawayOccluderLateralSpanMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'GENERIC player↔camera occlusion (V66): a tagged wall (interior included) fades only when the player→camera segment crosses its plane within this lateral distance of the wall centre — so a wall whose INFINITE plane the segment happens to cross far off to the side never fades. Bounds the generic "between player and camera" test to walls actually on the sightline. ~half a building span.',
+    default: 10,
+    min: 0.5,
+    max: 60,
+  }),
 
   // ---- Pooled BLOOD system (T75 / V51): directional droplets that arc under gravity+drag and LAND as
   // drying directional floor decals; bloody footsteps while the player is freshly blood-soaked. Supersedes

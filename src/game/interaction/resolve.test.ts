@@ -32,4 +32,15 @@ describe('interaction resolution (T59/V43)', () => {
     expect(v.find((x) => x.id === 'breach')?.enabled).toBe(false);
     expect(resolveInteractions({ kind: 'structure' }, { hasTool: true }).find((x) => x.id === 'breach')?.enabled).toBe(true);
   });
+
+  it('window verbs are state-driven (T108): boarded → remove; intact → smash; open → climb + gated board', () => {
+    expect(resolveInteractions({ kind: 'window', boards: 2, glass: 'open' }).map((v) => v.id)).toEqual(['removeBoard']);
+    expect(resolveInteractions({ kind: 'window', boards: 0, glass: 'intact' }).map((v) => v.id)).toEqual(['smash']);
+    const open = resolveInteractions({ kind: 'window', boards: 0, glass: 'open' }, {});
+    expect(open.find((v) => v.id === 'climb')?.enabled).toBe(true);
+    expect(open.find((v) => v.id === 'board')?.enabled).toBe(false); // no hammer/planks
+    const equipped = resolveInteractions({ kind: 'window', boards: 0, glass: 'smashed' }, { hasHammer: true, hasPlanks: true });
+    expect(equipped.find((v) => v.id === 'board')?.enabled).toBe(true);
+    expect(equipped.find((v) => v.id === 'board')?.action).toBe('window.board');
+  });
 });

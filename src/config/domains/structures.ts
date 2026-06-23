@@ -134,4 +134,65 @@ export const structuresConfig = registerDomain('structures', {
     min: 0.2,
     max: 10,
   }),
+
+  // ---- T108 destructible/interactive WINDOWS (V4 — no magic counts/timings) ----
+  /** Max boards a single window can hold (a full board-up). */
+  maxBoardsPerWindow: num({
+    owner: 'structures',
+    unit: 'count',
+    doc: 'Maximum boards a window can hold when fully boarded up (T108).',
+    default: 3,
+    min: 1,
+    max: 8,
+    integer: true,
+  }),
+  /** Projectile hits a window pane absorbs before it smashes (≈1 — one bullet shatters glass). */
+  windowGlassShotsToSmash: num({
+    owner: 'structures',
+    unit: 'count',
+    doc: 'Shots a window pane absorbs before it smashes open (T108 — usually 1).',
+    default: 1,
+    min: 1,
+    max: 10,
+    integer: true,
+  }),
+  /** Zombie attack ticks to tear ONE board off a boarded window (attrition toward an entry). */
+  windowZombieTicksPerBoard: num({
+    owner: 'structures',
+    unit: 'ticks',
+    doc: 'Zombie attack ticks to tear one board off a boarded window (T108 attrition).',
+    default: 240,
+    min: 1,
+    max: 100_000,
+    integer: true,
+  }),
+  /** Zombie attack ticks to smash an intact pane once the boards are gone. */
+  windowZombieTicksToSmashGlass: num({
+    owner: 'structures',
+    unit: 'ticks',
+    doc: 'Zombie attack ticks to smash an intact window pane once unboarded (T108 attrition).',
+    default: 120,
+    min: 1,
+    max: 100_000,
+    integer: true,
+  }),
+  /** Planks consumed to add one board to a window (returned when the board is pried off). */
+  windowPlankCostPerBoard: num({
+    owner: 'structures',
+    unit: 'count',
+    doc: 'Planks consumed per board when boarding up a window (returned on removal) (T108).',
+    default: 1,
+    min: 1,
+    max: 10,
+    integer: true,
+  }),
+  /** Reach (m) within which an adjacent zombie attrites a window (smashes glass / breaks boards). */
+  windowZombieReachMeters: num({
+    owner: 'structures',
+    unit: 'meters',
+    doc: 'Distance within which a zombie attacks a window to break in (T108 attrition reach).',
+    default: 1.5,
+    min: 0.3,
+    max: 5,
+  }),
 });

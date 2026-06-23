@@ -35,6 +35,17 @@ export {
   type ContainerPlacement,
 } from './containers';
 export {
+  WindowSystem,
+  windowPlacements,
+  featureBuildingIndexOf,
+  houseStyleForBuilding,
+  type WindowGlass,
+  type WindowView,
+  type WindowPlacement,
+  type WindowPlacementOptions,
+  type WindowSystemConfig,
+} from './windows';
+export {
   authorHouseStyle,
   resolveHouseVariation,
   windowState,

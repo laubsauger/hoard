@@ -39,4 +39,11 @@ describe('nearest interactable + prompt (T60)', () => {
     expect(resolveInteractions(container).some((v) => v.action === 'container.loot')).toBe(true);
     expect(resolveInteractions(windowT).some((v) => v.id === 'climb')).toBe(true);
   });
+
+  it('the window headline verb is STATE-DRIVEN (T108): boarded → remove, intact → smash, open → climb', () => {
+    expect(interactionActionLabel({ kind: 'window', boards: 2, glass: 'open' })).toBe('remove boards');
+    expect(interactionActionLabel({ kind: 'window', boards: 0, glass: 'intact' })).toBe('smash glass');
+    expect(interactionActionLabel({ kind: 'window', boards: 0, glass: 'smashed' })).toBe('climb through');
+    expect(interactionActionLabel({ kind: 'window', boards: 0, glass: 'open' })).toBe('climb through');
+  });
 });

@@ -8,6 +8,8 @@ import {
   resolveCutawayDepthOffset,
   wallFacesCamera,
   exteriorWallOccludesPlayer,
+  wallBetweenPlayerAndCamera,
+  clampConeRangeToWall,
   classifyThreat,
   threatMarkerStyle,
   type OcclusionContext,
@@ -32,22 +34,24 @@ describe('resolveSurfaceVisibility (T28/V20)', () => {
     expect(v.targetOpacity).toBe(1);
   });
 
-  it('fades the roof when it encloses the room AND occludes the player view', () => {
+  it('fades the roof to the SLIVER min-opacity (NOT 0) when it encloses + occludes the player view (V65)', () => {
     const v = resolveSurfaceVisibility('roof', ctx({ roomEnclosed: true, occludesPlayerView: true }), settings);
-    expect(v.visible).toBe(false);
-    expect(v.targetOpacity).toBe(0);
+    // V65: a faded surface keeps rendering a faint hint — it never fully vanishes (target is the sliver floor, not 0).
+    expect(v.targetOpacity).toBe(settings.minOpacity);
+    expect(settings.minOpacity).toBeGreaterThan(0);
+    expect(settings.minOpacity).toBeLessThan(1);
   });
 
-  it('keeps the roof when it does not occlude the player view', () => {
+  it('keeps the roof fully opaque when it does not occlude the player view', () => {
     const v = resolveSurfaceVisibility('roof', ctx({ roomEnclosed: true, occludesPlayerView: false }), settings);
-    expect(v.visible).toBe(true);
+    expect(v.targetOpacity).toBe(1);
   });
 
-  it('fades upper wall sections above the fade-start height when occluding, keeps base-band sections', () => {
+  it('fades upper wall sections above the fade-start height to the sliver, keeps base-band sections opaque (V65)', () => {
     const high = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: true }), settings);
-    expect(high.visible).toBe(false);
+    expect(high.targetOpacity).toBe(settings.minOpacity);
     const low = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: settings.baseHeightMeters - 0.1, occludesPlayerView: true }), settings);
-    expect(low.visible).toBe(true);
+    expect(low.targetOpacity).toBe(1);
   });
 
   it('does NOT reveal an interior just because the camera is above (V20)', () => {
@@ -109,12 +113,63 @@ describe('directional cutaway — wallFacesCamera (T82/V58)', () => {
     expect(wallFacesCamera({ outwardNormal: { x: 0, z: 0 }, towardCamera: { x: 1, z: 0 }, facingDotThreshold: threshold })).toBe(false);
   });
 
-  it('feeds the upperWall decision: a camera-facing wall fades, the far wall is kept', () => {
+  it('feeds the upperWall decision: a camera-facing wall fades to the sliver, the far wall stays opaque', () => {
     const toCam: VecXZ = { x: 1, z: 0 };
     const near = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: faces(EAST, toCam) }), settings);
     const far = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: faces(WEST, toCam) }), settings);
-    expect(near.visible).toBe(false);
-    expect(far.visible).toBe(true);
+    expect(near.targetOpacity).toBe(settings.minOpacity);
+    expect(far.targetOpacity).toBe(1);
+  });
+});
+
+describe('generic player↔camera occlusion — wallBetweenPlayerAndCamera (V66)', () => {
+  const span = settings.occluderLateralSpanMeters;
+  // An interior dividing wall on the plane x = 0 (outward normal along +X). Player on the −X side.
+  const NORMAL: VecXZ = { x: 1, z: 0 };
+  const wallCenter: VecXZ = { x: 0, z: 0 };
+  const occ = (player: VecXZ, camera: VecXZ, lateralSpanMeters = span): boolean =>
+    wallBetweenPlayerAndCamera({ outwardNormal: NORMAL, wallCenter, player, camera, lateralSpanMeters });
+
+  it('resolves a positive lateral span from config', () => {
+    expect(span).toBeGreaterThan(0);
+  });
+
+  it('fades an INTERIOR wall whose plane lies between the player and the camera (opposite sides)', () => {
+    // player at x=-3, camera at x=+3 → the x=0 plane separates them, crossing at the wall centre.
+    expect(occ({ x: -3, z: 0 }, { x: 3, z: 0 })).toBe(true);
+  });
+
+  it('does NOT fade when player + camera are on the SAME side (the FAR wall stays to read enclosure)', () => {
+    expect(occ({ x: -3, z: 0 }, { x: -1, z: 0 })).toBe(false);
+    expect(occ({ x: 3, z: 0 }, { x: 1, z: 0 })).toBe(false);
+  });
+
+  it('does NOT fade when the crossing point is beyond the lateral span of the wall centre', () => {
+    // The plane is crossed, but far down the wall (large |z|) → off this wall section, kept.
+    expect(occ({ x: -3, z: span + 5 }, { x: 3, z: span + 5 })).toBe(false);
+  });
+
+  it('a degenerate (zero-length) normal never occludes', () => {
+    expect(wallBetweenPlayerAndCamera({ outwardNormal: { x: 0, z: 0 }, wallCenter, player: { x: -3, z: 0 }, camera: { x: 3, z: 0 }, lateralSpanMeters: span })).toBe(false);
+  });
+
+  it('does not depend on the sign of the normal (plane orientation is symmetric)', () => {
+    const flipped = wallBetweenPlayerAndCamera({ outwardNormal: { x: -1, z: 0 }, wallCenter, player: { x: -3, z: 0 }, camera: { x: 3, z: 0 }, lateralSpanMeters: span });
+    expect(flipped).toBe(true);
+  });
+});
+
+describe('raycast-clamped flashlight reach — clampConeRangeToWall (V67)', () => {
+  it('clips the reach to the wall distance plus the lit-face margin', () => {
+    expect(clampConeRangeToWall(20, 6, 0.6)).toBeCloseTo(6.6);
+  });
+
+  it('a clear aim (wall at max range) keeps the full reach, never overshooting it', () => {
+    expect(clampConeRangeToWall(20, 20, 0.6)).toBe(20);
+  });
+
+  it('never returns negative', () => {
+    expect(clampConeRangeToWall(20, -5, 0)).toBe(0);
   });
 });
 

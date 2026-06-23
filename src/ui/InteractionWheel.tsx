@@ -64,7 +64,7 @@ export function InteractionWheel({ handle }: { handle: EngineHandle | null }) {
       const t = handle.nearestInteractable();
       setTarget((prev) => {
         if (t === null) return prev === null ? prev : null;
-        if (prev && prev.kind === t.kind && prev.access === t.access && prev.label === t.label && prev.looted === t.looted && prev.boarded === t.boarded && prev.breached === t.breached) {
+        if (prev && prev.kind === t.kind && prev.access === t.access && prev.label === t.label && prev.looted === t.looted && prev.boarded === t.boarded && prev.breached === t.breached && prev.glass === t.glass && prev.boards === t.boards) {
           return prev; // unchanged — keep the same ref so React skips the re-render
         }
         return t;
@@ -105,7 +105,11 @@ export function InteractionWheel({ handle }: { handle: EngineHandle | null }) {
         else if (verb.op === 'board' || verb.op === 'reinforce') handle.board();
         break;
       case 'window':
-        if (verb.op === 'breach') handle.breach();
+        // T108 — state-driven window verbs (see resolveInteractions): smash glass / board up / pry boards / climb.
+        if (verb.action === 'window.smash') handle.smashWindow();
+        else if (verb.action === 'window.board') handle.boardWindow();
+        else if (verb.action === 'window.removeBoard') handle.removeWindowBoard();
+        else if (verb.action === 'window.climb') handle.climbWindow();
         break;
     }
     setOpen(false);

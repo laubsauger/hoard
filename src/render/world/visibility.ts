@@ -27,6 +27,17 @@ export interface VisibilitySettings {
    * for that wall to fade when it lies between the camera and the player. See `exteriorWallOccludesPlayer`.
    */
   readonly exteriorCutawayAdjacencyMeters: number;
+  /**
+   * SLIVER floor (V65): a cutaway-faded surface fades to THIS opacity instead of 0 — a faint hint of the wall
+   * stays so the player keeps spatial orientation. 0 = fully vanish; ~0.12 leaves a readable sliver.
+   */
+  readonly minOpacity: number;
+  /**
+   * GENERIC player↔camera occlusion (V66): lateral band (m) around a wall centre within which the player→camera
+   * segment must cross the wall plane for that wall (interior included) to count as occluding. See
+   * `wallBetweenPlayerAndCamera`.
+   */
+  readonly occluderLateralSpanMeters: number;
 }
 
 export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings {
@@ -35,6 +46,8 @@ export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings
     upperFadeStartMeters: resolve(renderingConfig.upperWallFadeStartHeightMeters, tier),
     cameraFacingDotThreshold: resolve(renderingConfig.cutawayCameraFacingDotThreshold, tier),
     exteriorCutawayAdjacencyMeters: resolve(renderingConfig.exteriorCutawayAdjacencyMeters, tier),
+    minOpacity: resolve(renderingConfig.cutawayMinOpacity, tier),
+    occluderLateralSpanMeters: resolve(renderingConfig.cutawayOccluderLateralSpanMeters, tier),
   };
 }
 
@@ -105,6 +118,62 @@ export function exteriorWallOccludesPlayer(input: ExteriorWallCutawayInput): boo
   return cameraSide < 0; // wall plane sits between the (inward) camera and the (outward) player
 }
 
+export interface PlayerCameraOcclusionInput {
+  /** The wall's outward-facing horizontal normal (its plane orientation). Either sign works — we test crossing. */
+  readonly outwardNormal: VecXZ;
+  /** A point ON the wall's plane (its world-XZ centre — the wall shell is thin). */
+  readonly wallCenter: VecXZ;
+  /** Player world-XZ. */
+  readonly player: VecXZ;
+  /** Camera world-XZ. */
+  readonly camera: VecXZ;
+  /** Lateral band (m): the player→camera crossing point must lie within this distance of the wall centre. */
+  readonly lateralSpanMeters: number;
+}
+
+/**
+ * GENERIC player↔camera occlusion (V66): a wall — INTERIOR walls included — occludes the player from the camera
+ * when its plane lies BETWEEN them (player and camera project to OPPOSITE signed sides of the plane) AND the
+ * player→camera segment crosses that plane WITHIN `lateralSpanMeters` of the wall centre (so a wall whose infinite
+ * plane the segment happens to cross far off to the side never counts). This subsumes the directional/exterior
+ * tests for the OCCUPIED building: the near wall (opposite sides) fades, the FAR wall (player + camera on the same
+ * inward side) stays opaque to read enclosure. Purely a VIEW aid — never touches the structural/nav grid, so
+ * crowd reveal + LOS are unchanged (V63). Pure + GPU-free; a degenerate (zero-length) normal never occludes.
+ */
+export function wallBetweenPlayerAndCamera(input: PlayerCameraOcclusionInput): boolean {
+  const n = input.outwardNormal;
+  const nl = Math.hypot(n.x, n.z);
+  if (nl === 0) return false;
+  const nx = n.x / nl;
+  const nz = n.z / nl;
+  const playerSide = (input.player.x - input.wallCenter.x) * nx + (input.player.z - input.wallCenter.z) * nz;
+  const cameraSide = (input.camera.x - input.wallCenter.x) * nx + (input.camera.z - input.wallCenter.z) * nz;
+  // Plane must separate them (opposite signed sides). Equal signs (incl. either exactly on the plane) → not between.
+  if (playerSide === 0 || cameraSide === 0) return false;
+  if (playerSide > 0 === cameraSide > 0) return false;
+  // Crossing point along the segment where the signed side hits 0, then its lateral distance from the wall centre.
+  const t = playerSide / (playerSide - cameraSide); // in (0,1) given opposite signs
+  const cx = input.player.x + (input.camera.x - input.player.x) * t;
+  const cz = input.player.z + (input.camera.z - input.player.z) * t;
+  // Tangent along the wall (perpendicular to the normal in XZ): distance of the crossing point from the centre.
+  const tx = -nz;
+  const tz = nx;
+  const lateral = Math.abs((cx - input.wallCenter.x) * tx + (cz - input.wallCenter.z) * tz);
+  return lateral <= input.lateralSpanMeters;
+}
+
+/**
+ * RAYCAST-CLAMPED flashlight reach (V67): clamp a cone's max reach to the distance of the first structural wall
+ * along the aim, plus a small margin so the struck wall face itself stays lit (instead of going black at the
+ * clamp). `wallDistanceMeters` is `rayDistanceToWall` on the SAME nav grid the shots + perception LOS use; it
+ * already returns `maxRangeMeters` when the ray stays clear, so a clear aim is never shortened below the margin
+ * cap. Pure logic, GPU-free — the caller feeds the result to the SpotLight distance.
+ */
+export function clampConeRangeToWall(maxRangeMeters: number, wallDistanceMeters: number, marginMeters: number): number {
+  const clamped = Math.min(wallDistanceMeters + marginMeters, maxRangeMeters);
+  return clamped < 0 ? 0 : clamped;
+}
+
 export interface OcclusionContext {
   /** Is the player currently inside this room/module? */
   readonly playerInside: boolean;
@@ -133,8 +202,9 @@ export interface SurfaceVisibility {
 /**
  * Decide a surface's visibility. Rules (V20):
  *  - baseWall: ALWAYS opaque — needed to read enclosure + breach state.
- *  - roof / upperWall: fade out ONLY when enclosed AND they occlude the player's view; otherwise opaque.
- *  - interior: hidden UNLESS the player is inside OR a portal/LOS reveals it. Camera-above never reveals.
+ *  - roof / upperWall: fade DOWN TO the sliver minOpacity (NOT 0, V65) ONLY when enclosed AND they occlude the
+ *    player's view — a faint hint of the surface stays so the player keeps spatial orientation; otherwise opaque.
+ *  - interior: hidden (opacity 0) UNLESS the player is inside OR a portal/LOS reveals it. Camera-above never reveals.
  */
 export function resolveSurfaceVisibility(
   surface: SurfaceKind,
@@ -147,7 +217,8 @@ export function resolveSurfaceVisibility(
 
     case 'roof': {
       if (ctx.roomEnclosed && ctx.occludesPlayerView) {
-        return { visible: false, targetOpacity: 0, reason: 'roof occludes player view of enclosed room — faded (V20)' };
+        // V65: fade to the SLIVER floor, not 0 — keep rendering a faint hint of the roof for orientation.
+        return { visible: true, targetOpacity: settings.minOpacity, reason: 'roof occludes player view of enclosed room — faded to sliver (V20/V65)' };
       }
       return { visible: true, targetOpacity: 1, reason: 'roof not occluding player view — kept' };
     }
@@ -158,7 +229,8 @@ export function resolveSurfaceVisibility(
         return { visible: true, targetOpacity: 1, reason: 'within preserved base height — kept (V20)' };
       }
       if (ctx.surfaceHeightMeters >= settings.upperFadeStartMeters && ctx.roomEnclosed && ctx.occludesPlayerView) {
-        return { visible: false, targetOpacity: 0, reason: 'upper wall occludes player view — faded (V20)' };
+        // V65: fade to the SLIVER floor, not 0 — a faint wall hint keeps spatial orientation inside the room.
+        return { visible: true, targetOpacity: settings.minOpacity, reason: 'upper wall occludes player view — faded to sliver (V20/V65)' };
       }
       return { visible: true, targetOpacity: 1, reason: 'upper wall not occluding — kept' };
     }

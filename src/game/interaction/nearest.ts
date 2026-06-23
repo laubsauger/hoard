@@ -120,6 +120,9 @@ export function interactionActionLabel(target: InteractionTarget): string {
       if (target.access === 'locked') return 'unlock door';
       return target.access === 'open' ? 'close door' : 'open door';
     case 'window':
+      // State-driven (T108): boarded → pry it open; intact pane → smash it; an opening → climb through.
+      if ((target.boards ?? 0) > 0) return 'remove boards';
+      if (target.glass === 'intact') return 'smash glass';
       return 'climb through';
     case 'container':
       return target.looted ? 'search again' : 'search';

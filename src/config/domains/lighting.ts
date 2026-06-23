@@ -232,6 +232,14 @@ export const lightingConfig = registerDomain('lighting', {
     min: 0.1,
     max: 4,
   }),
+  flashlightWallClampMarginMeters: num({
+    owner: 'lighting',
+    unit: 'meters',
+    doc: 'RAYCAST-CLAMPED flashlight cone (V67): the SpotLight reach is clamped to the distance to the first STRUCTURAL wall along the aim (via rayDistanceToWall on the nav grid), PLUS this margin so the struck wall face itself stays lit instead of going black. Stops the beam shining THROUGH/past a wall the player faces (no light spilling outside the building). Reuses the SAME wall grid the shots + perception LOS use — not a second wall representation.',
+    default: 0.6,
+    min: 0,
+    max: 5,
+  }),
   flashlightColor: num({
     owner: 'lighting',
     unit: 'ratio',

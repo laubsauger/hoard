@@ -178,6 +178,21 @@ export class SimulationZombies {
     }
   }
 
+  /** Count alive zombies whose XZ position is within `radius` m of (x,z). Cheap O(capacity) scan, no alloc —
+   *  drives PROXIMITY-scaled horde audio (the bed must answer "how many are near ME", not the global count). */
+  nearbyCount(x: number, z: number, radius: number): number {
+    const r2 = radius * radius;
+    let n = 0;
+    for (let slot = 0; slot < this._capacity; slot++) {
+      if (this.fAlive[slot] !== 1) continue;
+      const b = slot * 3;
+      const dx = this.fPosition[b]! - x;
+      const dz = this.fPosition[b + 2]! - z;
+      if (dx * dx + dz * dz <= r2) n += 1;
+    }
+    return n;
+  }
+
   /** Lazy generator over alive slots. */
   *aliveSlots(): IterableIterator<ZombieSlot> {
     for (let slot = 0; slot < this._capacity; slot++) {

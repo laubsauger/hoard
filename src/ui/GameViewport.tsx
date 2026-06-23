@@ -22,6 +22,7 @@ import {
 import { resolve } from '../config/spec';
 import { renderingConfig } from '../config/domains/rendering';
 import { combatConfig } from '../config/domains/combat';
+import { audioConfig } from '../config/domains/audio';
 import { weaponsConfig } from '../config/domains/weapons';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
@@ -92,6 +93,11 @@ export interface EngineHandle {
   ignite(): void;
   /** T46/T60: toggle the door NEAREST the player (open↔closed). No-op when none is in reach. */
   toggleNearestDoor(): void;
+  /** T108: window verbs for the NEAREST window in reach (smash glass / board up / pry boards off / climb). */
+  smashWindow(): void;
+  boardWindow(): void;
+  removeWindowBoard(): void;
+  climbWindow(): void;
   /** T60: the "{key} to {action}" prompt for the nearest interactable in reach, or null (HUD polls this). */
   nearestInteraction(): InteractionPrompt | null;
   /** T60: the nearest interactable target (full state) — the wheel resolves its context verbs. */
@@ -170,6 +176,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       const tier: QualityTier = requested ? applyTierOverride(detected, requested) : detected;
 
       const combat = resolveDomain(combatConfig, tier);
+      const audioCfg = resolveDomain(audioConfig, tier);
       const adp = makeAdapter();
       adapter = adp;
 
@@ -272,7 +279,6 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // closures read the live binding, so looting stays correct across a reload.
       const publishInventory = (): void => inventoryViewStore.getState().setContainers(runtime.inventorySnapshot());
       publishInventory();
-      inventoryViewStore.getState().setOpenContainer('Kitchen Cupboard');
       inventoryViewStore.setState({
         transfer: (from, to, item) => {
           runtime.transferItem(from, to, item);
@@ -448,13 +454,22 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         },
         ignite: () => runtime.igniteRoute(runtime.defaultBreachCell()),
         toggleNearestDoor: () => { runtime.toggleNearestDoor(); },
+        // T108 window verbs. Board-up consumes planks + a tool; pry returns the planks — re-publish the
+        // inventory so the HUD plank count updates immediately (V1). Climb is flavour (the opening is already
+        // passable — its nav cell is cleared), so it is a no-op that simply closes the wheel.
+        smashWindow: () => { runtime.smashNearestWindow(); },
+        boardWindow: () => { if (runtime.boardNearestWindow()) publishInventory(); },
+        removeWindowBoard: () => { if (runtime.unboardNearestWindow()) publishInventory(); },
+        climbWindow: () => { /* opening already passable — flavour verb */ },
         nearestInteraction: () => runtime.nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
         nearestInteractable: () => runtime.nearestInteractableTarget(),
         loot: () => {
           // Open the dual-pane inventory ON the looted container (was only setting the container, never the
           // panel, so nothing showed — the InventoryMenu is gated on uiStore.activePanel === 'inventory').
+          // No fallback: if no container is in reach there is nothing to loot — do nothing.
           const t = runtime.nearestInteractableTarget();
-          inventoryViewStore.getState().setOpenContainer(t?.kind === 'container' ? t.label : 'Kitchen Cupboard');
+          if (t?.kind !== 'container') return;
+          inventoryViewStore.getState().setOpenContainer(t.label);
           uiStore.getState().openPanel('inventory');
         },
         rotate: (dir) => camera.rotate(dir),
@@ -600,7 +615,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         noiseGate.push({ ambient01: Math.min(1, ambient), self01: selfNoise });
         // Feed the drained audible set + live nearby horde count to the procedural audio output (silent
         // until a gesture resumes its context). Group bed + occasional groans scale with the count (V28).
-        gameAudio.frame({ playerX: p.x, audible, hordeCount: runtime.zombies.count, dtSeconds: dt });
+        gameAudio.frame({ playerX: p.x, audible, hordeCount: runtime.nearbyHordeCount(audioCfg.outHordeProximityRadiusMeters), dtSeconds: dt });
         if (scene) {
           // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
           host?.setToneMapping(scene.toneMappingMode, scene.currentExposure);

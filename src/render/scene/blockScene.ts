@@ -63,6 +63,8 @@ import {
   resolveCutawayDepthOffset,
   wallFacesCamera,
   exteriorWallOccludesPlayer,
+  wallBetweenPlayerAndCamera,
+  clampConeRangeToWall,
   type OcclusionContext,
   type CutawayDepthSettings,
   type VecXZ,
@@ -80,17 +82,20 @@ import type { GameRuntime } from '../../game/runtime';
 import {
   buildingsOf,
   lootableContainerCells,
-  authorHouseStyle,
   resolveHouseVariation,
-  windowState,
   roofHoles,
   hash01,
   doorAxis,
   hasLineOfSight,
+  rayDistanceToWall,
+  windowPlacements,
+  houseStyleForBuilding,
+  featureBuildingIndexOf,
   type GroundKind,
   type BuildingFootprint,
   type HouseStyle,
   type CellRect,
+  type WindowGlass,
 } from '../../game/scene';
 import { makeRoofGeometry } from './houseGeometry';
 import type { NavGrid } from '../../game/navigation';
@@ -196,6 +201,9 @@ export class BlockScene {
   /** T46 door leaves: each leaf hangs off a hinge PIVOT group; syncDoors rotates the pivot toward the door's
    *  authoritative open/closed target (the render only REFLECTS sim state, V12). Keyed by nav cell index. */
   private readonly doorLeaves: { navCell: number; pivot: Object3D; openTarget: number; current: number }[] = [];
+  /** T108 windows: each window's child meshes (glass pane / dark void / boards), keyed by nav cell. syncWindows
+   *  toggles their visibility to match the authoritative glass/board state (the render only REFLECTS it, V12). */
+  private readonly windowMeshes: { navCell: number; pane: Mesh; voidMesh: Mesh; boards: Mesh[] }[] = [];
   /** The building that owns the destructible §G section — kept lightly weathered + readable (set at build). */
   private featureBuildingIndex = -1;
 
@@ -334,18 +342,10 @@ export class BlockScene {
     };
   }
 
-  /** Which building (if any) holds the destructible §G section cells — kept readable (less decay). */
+  /** Which building (if any) holds the destructible §G section cells — kept readable (less decay). Delegates
+   *  to the shared scene-layer helper (T108) so the sim WindowSystem picks the same feature house (V26). */
   private computeFeatureBuildingIndex(): number {
-    const ts = this.runtime.scene;
-    const buildings = buildingsOf(ts);
-    for (let z = 0; z < ts.wall.sizeZ; z++) {
-      const cell = ts.navCellForStructuralCell(ts.wall.packCell(0, 0, z));
-      for (let i = 0; i < buildings.length; i++) {
-        const b = buildings[i]!.bounds;
-        if (cell.cx >= b.minCx && cell.cx <= b.maxCx && cell.cy >= b.minCy && cell.cy <= b.maxCy) return i;
-      }
-    }
-    return -1;
+    return featureBuildingIndexOf(this.runtime.scene);
   }
 
   private buildGround(): void {
@@ -406,16 +406,9 @@ export class BlockScene {
    *  so the same lot always authors the same house without widening the frozen scene contract. The §G feature
    *  building is kept lightly weathered + un-collapsed so its interior stays readable + navigable. */
   private styleFor(bld: BuildingFootprint, bi: number): HouseStyle {
-    const b = bld.bounds;
-    const seed = (Math.imul(b.minCx + 1, 73856093) ^ Math.imul(b.minCy + 1, 19349663) ^ Math.imul(bi + 1, 83492791)) | 0;
-    const base = authorHouseStyle(seed, this.houseVar);
-    const storeys = Math.max(1, bld.storeys ?? base.storeys);
-    if (bi === this.featureBuildingIndex) {
-      // keep the §G house legible: clean tint, light damage, no roof collapse.
-      const damage = Math.min(base.damage, this.houseVar.roofHoleDamageThreshold * 0.6);
-      return { ...base, storeys, wallColor: base.wallColorClean, damage, ivy: 0, collapsed: false };
-    }
-    return { ...base, storeys };
+    // Delegates to the shared scene-layer authoring (T108) so the renderer + the sim WindowSystem derive the
+    // SAME seed/damage — and therefore the SAME window decay — from one source of truth (V26).
+    return houseStyleForBuilding(bld.bounds, bld.storeys, bi, this.houseVar, this.featureBuildingIndex);
   }
 
   private buildWallsAndRoof(): void {
@@ -1207,66 +1200,53 @@ export class BlockScene {
       this.doorLeaves.push({ navCell, pivot, openTarget: this.structures.doorOpenSwingRadians, current: 0 });
     }
 
-    // ---- WINDOWS: a framed opening on a deterministic subset of facade cells, per building, with a decay
-    // state (intact glass / smashed-open void / boarded over) derived from the house seed (T87/V26). ----
-    const doorAdjacent = (cx: number, cy: number): boolean =>
-      ts.exitCells.some((e) => Math.abs(e.cx - cx) + Math.abs(e.cy - cy) <= 1);
-    /** Place a framed window of the given decay state at (wx, sillY, wz), rotated for a N/S wall. */
-    const placeWindow = (wx: number, sillY: number, wz: number, ns: boolean, state: ReturnType<typeof windowState>): void => {
+    // ---- WINDOWS (T108): a framed opening on a deterministic subset of facade cells. Both the placement AND
+    // the initial decay state come from the shared windowPlacements() — the SAME source the sim WindowSystem
+    // seeds from, so render + sim always agree (V26). Every window builds ALL its child meshes (glass pane /
+    // dark void / boards) up front; the live glass/board state is REFLECTED each frame by syncWindows toggling
+    // their visibility (mirrors the door-leaf pattern — the render never decides state, only reflects it, V12). ----
+    const maxBoards = this.structures.maxBoardsPerWindow;
+    /** Build one window unit (frame + pane + void + the full board set) at a sill, tracked for syncWindows. */
+    const buildWindowUnit = (navCell: number, wx: number, sillY: number, wz: number, ns: boolean): void => {
       const rotY = ns ? Math.PI / 2 : 0;
       const yc = sillY + winH / 2;
-      const place = (geo: BufferGeometry, mat: MeshStandardMaterial, dx: number, dy: number, rz = 0): void => {
+      const make = (geo: BufferGeometry, mat: MeshStandardMaterial, dx: number, dy: number, rz = 0): Mesh => {
         const m = new Mesh(geo, mat);
         m.position.set(wx + (ns ? 0 : dx), yc + dy, wz + (ns ? dx : 0));
         m.rotation.y = rotY;
         m.rotation.z = rz;
         m.castShadow = true;
         group.add(m);
+        return m;
       };
-      place(frameGeo, winFrameMat, -0.01, 0); // painted frame trim (recessed backing)
-      if (state === 'intact') {
-        place(paneGeo, glassMat, 0.02, 0);
-      } else if (state === 'broken') {
-        place(voidGeo, voidMat, 0.0, 0); // dark smashed-open opening
-      } else {
-        // boarded: two crossing weathered planks over the opening.
-        place(boardGeo, boardMat, 0.03, winH * 0.18, 0.18);
-        place(boardGeo, boardMat, 0.03, -winH * 0.16, -0.14);
+      make(frameGeo, winFrameMat, -0.01, 0); // painted frame trim — always present
+      const pane = make(paneGeo, glassMat, 0.02, 0);
+      const voidMesh = make(voidGeo, voidMat, 0.0, 0); // dark opening behind the glass / boards
+      // up to maxBoards crossing weathered planks; syncWindows shows them by the live board count.
+      const boards: Mesh[] = [];
+      for (let bI = 0; bI < maxBoards; bI++) {
+        const sign = bI % 2 === 0 ? 1 : -1;
+        boards.push(make(boardGeo, boardMat, 0.03, sign * winH * (0.18 - bI * 0.03), sign * (0.18 - bI * 0.04)));
       }
+      this.windowMeshes.push({ navCell, pane, voidMesh, boards });
     };
 
-    buildingsOf(ts).forEach((bld, bi) => {
-      const b = bld.bounds;
-      const style = this.styleFor(bld, bi);
-      const bWallH = wallH * Math.max(1, style.storeys);
+    const placements = windowPlacements(ts, {
+      houseVar: this.houseVar,
+      stride: this.world.houseWindowStride,
+      boardedFraction: this.windowBoardedFraction,
+    });
+    for (const p of placements) {
+      const bWallH = wallH * Math.max(1, p.storeys);
       const sillH = this.world.buildingWallHeightMeters * 0.45; // ground-floor sill height (consistent)
       const sills = bWallH > this.world.buildingWallHeightMeters * 1.1 ? [sillH, sillH + this.world.buildingWallHeightMeters] : [sillH];
-      // `wi` counts only ELIGIBLE facade cells (not corners/door-adjacent), incremented ONCE per cell so the
-      // stride is consistent. A window goes on every Nth eligible cell (houseWindowStride) → sparse, believable
-      // walls instead of the old every-other band that read as a greenhouse.
-      const stride = this.world.houseWindowStride;
-      let wi = 0;
-      for (let cy = b.minCy; cy <= b.maxCy; cy++) {
-        for (let cx = b.minCx; cx <= b.maxCx; cx++) {
-          const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
-          if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
-          const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
-          if (corner || doorAdjacent(cx, cy)) continue; // not a window slot — don't count it toward the stride
-          const place = wi % stride === 0;
-          const slot = wi;
-          wi += 1;
-          if (!place) continue;
-          const ns = cy === b.minCy || cy === b.maxCy;
-          const wx = (cx + 0.5) * cs;
-          const wz = (cy + 0.5) * cs;
-          for (const sy of sills) {
-            placeWindow(wx, sy, wz, ns, windowState(style, slot, this.windowBoardedFraction));
-          }
-        }
-      }
-    });
+      const navCell = grid.index(p.cx, p.cy);
+      for (const sy of sills) buildWindowUnit(navCell, p.x, sy, p.z, p.ns);
+    }
 
     this.scene.add(group);
+    // Prime the visibility from the initial sim state so a window that starts boarded/smashed renders that way.
+    this.syncWindows();
   }
 
   private buildPlayer(): Object3D {
@@ -1353,6 +1333,7 @@ export class BlockScene {
 
     this.syncBreach();
     this.syncDoors(dtSeconds);
+    this.syncWindows();
     this.syncLighting(dtSeconds);
     this.syncCutaway(dtSeconds, camera);
 
@@ -1464,7 +1445,14 @@ export class BlockScene {
     }
     const p = this.runtime.player();
     const aim = this.runtime.playerAim();
-    const range = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
+    const maxRange = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
+    // V67: RAYCAST-CLAMPED cone — clip the beam reach to the first STRUCTURAL wall along the aim so it never shines
+    // THROUGH/past a wall the player faces (no light spilling outside the building). Reuses the SAME nav-grid wall
+    // raycast the shots (rayDistanceToWall) + perception LOS use — not a second wall representation. A small margin
+    // keeps the struck wall face itself lit; a clear aim returns maxRange so the cone is never shortened needlessly.
+    const wallDist = rayDistanceToWall(this.runtime.scene, p.x, p.z, aim, maxRange);
+    const range = clampConeRangeToWall(maxRange, wallDist, this.lighting.flashlightWallClampMarginMeters);
+    f.distance = range;
     f.position.set(p.x, this.lighting.flashlightHeightMeters, p.z);
     // Aim the target forward along the ground (cos/sin aim = the same forward the avatar nose + fire dir use)
     // so the cone rakes from torso height down across the revealed wedge.
@@ -1498,6 +1486,28 @@ export class BlockScene {
       const target = access.get(leaf.navCell) === 'open' ? leaf.openTarget : 0;
       leaf.current = dtSeconds > 0 ? approach(leaf.current, target, speed, dtSeconds) : target;
       leaf.pivot.rotation.y = leaf.current;
+    }
+  }
+
+  /**
+   * T108 — reflect the authoritative window state onto the rendered meshes (the render only READS sim state,
+   * V12): an INTACT pane shows the glass; an OPEN/SMASHED window shows the dark void (a real see-through hole,
+   * matching the cleared nav cell); a BOARDED window shows the void plus `boards` crossing planks. Keyed by
+   * nav cell so each window unit (and both sills of a two-storey cell) tracks the same live state.
+   */
+  private syncWindows(): void {
+    if (this.windowMeshes.length === 0) return;
+    const glassBy = new Map<number, { glass: WindowGlass; boards: number }>();
+    for (const w of this.runtime.windowViews()) {
+      glassBy.set(this.runtime.scene.navGrid.index(w.cx, w.cy), { glass: w.glass, boards: w.boards });
+    }
+    for (const u of this.windowMeshes) {
+      const state = glassBy.get(u.navCell);
+      if (!state) continue; // a window with no sim record keeps its built (primed) visibility
+      const intact = state.glass === 'intact';
+      u.pane.visible = intact;
+      u.voidMesh.visible = !intact; // the opening reads as a dark void once the glass is gone
+      for (let i = 0; i < u.boards.length; i++) u.boards[i]!.visible = i < state.boards;
     }
   }
 
@@ -1577,13 +1587,24 @@ export class BlockScene {
       if (towardCamera === null || camera === undefined) {
         occludesPlayerView = false; // no camera (construction prime) → stay opaque
       } else if (playerInside) {
-        // Occupied building (V58/V59): roof always occludes from above; a wall fades when it turns toward camera.
+        // Occupied building (V58/V59): roof always occludes from above. A wall fades when it turns toward the
+        // camera (V58 directional test) OR — GENERIC player↔camera occlusion (V66) — when its plane actually lies
+        // between the player and the camera. The second term catches INTERIOR walls (whose guessed outward normal
+        // need not point at the camera) that hide the player on the sightline; the directional term preserves the
+        // existing whole-near-side exterior fade. Either making it true fades the wall to the sliver (V65).
         occludesPlayerView = s.kind === 'roof' || s.outwardNormal === null
           ? true
           : wallFacesCamera({
               outwardNormal: s.outwardNormal,
               towardCamera,
               facingDotThreshold: this.visibility.cameraFacingDotThreshold,
+            }) ||
+            wallBetweenPlayerAndCamera({
+              outwardNormal: s.outwardNormal,
+              wallCenter: { x: s.centerX, z: s.centerZ },
+              player: { x: player.x, z: player.z },
+              camera: { x: camera.position.x, z: camera.position.z },
+              lateralSpanMeters: this.visibility.occluderLateralSpanMeters,
             });
       } else if (s.kind === 'upperWall' && s.outwardNormal !== null) {
         // OUTSIDE-WALL cutaway (V62): the player is OUTSIDE this building — fade an exterior wall only when the

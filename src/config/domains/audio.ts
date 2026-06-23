@@ -108,6 +108,7 @@ export const audioConfig = registerDomain('audio', {
   // ---- zombie GROUP BED drone (one drone whose level scales with nearby horde count, V28) ----
   outHordeBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the horde drone bed at full horde size, before master scaling.', default: 0.32, min: 0, max: 1 }),
   outHordeBedFullCount: num({ owner: 'audio', unit: 'count', doc: 'Nearby horde size at which the group bed reaches full gain (linear ramp below).', default: 40, min: 1, max: 100000, integer: true }),
+  outHordeProximityRadiusMeters: num({ owner: 'audio', unit: 'meters', doc: 'Radius around the player within which zombies count toward the horde drone bed + music tension (the bed scales with NEARBY threat, not the global embodied count).', default: 30, min: 1, max: 500 }),
   outHordeBedBaseFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the low horde drone.', default: 55, min: 20, max: 400 }),
   outHordeBedLfoHz: num({ owner: 'audio', unit: 'hz', doc: 'Slow amplitude-modulation rate of the horde drone.', default: 0.2, min: 0.01, max: 8 }),
   outHordeBedGlideSeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Time constant for the bed gain to glide toward its target level (no pops).', default: 0.6, min: 0.01, max: 10 }),
