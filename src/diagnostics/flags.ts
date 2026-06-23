@@ -24,6 +24,8 @@ export interface DebugFlags {
   readonly showZombieState: boolean;
   /** Visualize the shared stimulus/sound field (heard-event sources + intensity falloff). */
   readonly showSoundField: boolean;
+  /** Draw the player's forward vision cone (Project-Zomboid-style awareness wedge). */
+  readonly showPlayerVision: boolean;
   /**
    * Force every renderable crowd member to a fixed LOD level for fidelity inspection.
    * null = automatic LOD selection (no override). A non-negative integer pins that LOD.
@@ -41,6 +43,7 @@ export const DEFAULT_DEBUG_FLAGS: DebugFlags = {
   showAttackRadius: false,
   showZombieState: false,
   showSoundField: false,
+  showPlayerVision: false,
   forceLodLevel: null,
 };
 
@@ -59,6 +62,7 @@ const BOOLEAN_FLAG_KEYS: readonly BooleanDebugFlag[] = [
   'showAttackRadius',
   'showZombieState',
   'showSoundField',
+  'showPlayerVision',
 ];
 
 /** Mutable typed holder for the debug control flags. Node-testable; no DOM/3D dependency. */

@@ -17,13 +17,23 @@ import {
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
-import { isWalkableRadius, type TestBlock, type Vec3 } from '@/game/scene';
+import { isWalkableRadius, hasLineOfSight, type TestBlock, type Vec3 } from '@/game/scene';
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
 
 /** Strips readonly so pooled penetration-resolution agents can be re-filled in place across ticks. */
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/**
+ * True when a target at offset (dx,dz) lies within a vision cone of half-angle `fovHalf` centred on
+ * `heading` (V14 — zombies see a forward cone, not 360°). `fovHalf >= π` = omnidirectional.
+ */
+export function withinCone(dx: number, dz: number, heading: number, fovHalf: number): boolean {
+  if (fovHalf >= Math.PI) return true;
+  const diff = Math.atan2(dz, dx) - heading;
+  return Math.abs(Math.atan2(Math.sin(diff), Math.cos(diff))) <= fovHalf;
+}
 
 /** Planar (XZ) distance from a zombie slot to the player — shared by the horde steps and snapshots. */
 export function planarDistanceToPlayer(
@@ -222,8 +232,12 @@ export class HordeSimulation {
     let bestIntensity = 0;
     for (const h of hits) {
       if (h.stimulus.kind !== 'sound') continue;
-      if (h.intensity > bestIntensity) {
-        bestIntensity = h.intensity;
+      // V28: structure muffles sound. A sound whose path to the horde is blocked by a wall reaches it at a
+      // reduced intensity — a breach/open door restores the loud path (V5/V47).
+      const occluded = !hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, here.x, here.z);
+      const intensity = occluded ? h.intensity * perception.soundWallOcclusion : h.intensity;
+      if (intensity > bestIntensity) {
+        bestIntensity = intensity;
         bestX = h.stimulus.x;
         bestZ = h.stimulus.z;
       }
@@ -251,12 +265,22 @@ export class HordeSimulation {
 
   /** interval: stimulus-driven perception (V14) — a zombie senses the player only within sight range. */
   stepPerception(): void {
-    const { zombies, perception, playerEntityId, getPlayerPos } = this.d;
+    const { zombies, perception, playerEntityId, getPlayerPos, scene } = this.d;
     const p = getPlayerPos();
     const sight = perception.sightRange;
+    // V14: a zombie SEES the player only within its forward vision cone, not 360°. fovHalf = full angle/2.
+    const fovHalf = (perception.fieldOfViewDegrees * Math.PI) / 360;
+    const coned = fovHalf < Math.PI;
+    const pos: [number, number, number] = [0, 0, 0];
     let seen = false;
     zombies.forEachAlive((slot) => {
-      const inSight = planarDistanceToPlayer(zombies, slot, p.x, p.z) <= sight;
+      zombies.getPosition(slot, pos);
+      const dx = p.x - pos[0];
+      const dz = p.z - pos[2];
+      let inSight = Math.hypot(dx, dz) <= sight;
+      if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
+      // V47: walls / closed doors block sight — no seeing the player through solid structure.
+      if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
       zombies.setStimulus(slot, inSight ? playerEntityId : -1);
       if (inSight) seen = true;
     });

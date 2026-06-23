@@ -47,6 +47,14 @@ export {
   type MapViewStore,
 } from './mapView';
 export {
+  noiseViewStore,
+  createNoiseViewStore,
+  createNoiseSnapshotGate,
+  type NoiseViewState,
+  type NoiseViewSnapshot,
+  type NoiseViewStore,
+} from './noiseView';
+export {
   inputStore,
   createInputStore,
   type InputState,

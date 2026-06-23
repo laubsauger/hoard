@@ -14,6 +14,44 @@ export const perceptionConfig = registerDomain('perception', {
     min: 1,
     max: 200,
   }),
+  /** Zombie field-of-view (full cone angle, degrees). A zombie only SEES the player within this cone of its
+   *  facing — not 360° (V14). 360 = omnidirectional. */
+  fieldOfViewDegrees: num({
+    owner: 'perception',
+    unit: 'degrees',
+    doc: 'Full vision-cone angle a zombie can see within (centred on its heading). Not 360° by default.',
+    default: 120,
+    min: 10,
+    max: 360,
+  }),
+  /** Player vision cone (full angle, degrees) — the Project-Zomboid-style forward awareness wedge used by
+   *  the dev overlay (and, later, fog-of-war reveal). */
+  playerFieldOfViewDegrees: num({
+    owner: 'perception',
+    unit: 'degrees',
+    doc: 'Full angle of the player forward vision cone (overlay + future fog-of-war reveal).',
+    default: 100,
+    min: 10,
+    max: 360,
+  }),
+  /** Player vision range (m) for the forward cone overlay. */
+  playerVisionRange: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'Range of the player forward vision cone (overlay + future reveal).',
+    default: 18,
+    min: 1,
+    max: 200,
+  }),
+  /** Sound reaching the horde through a wall is multiplied by this (V28 occlusion). 1 = no muffle. */
+  soundWallOcclusion: num({
+    owner: 'perception',
+    unit: 'ratio',
+    doc: 'Intensity multiplier for a sound whose path to the horde is blocked by structure (V28).',
+    default: 0.3,
+    min: 0,
+    max: 1,
+  }),
   /** Base hearing range for a default-intensity stimulus. */
   hearingRange: num({
     owner: 'perception',

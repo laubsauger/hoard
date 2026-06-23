@@ -99,6 +99,53 @@ export function isWalkableRadius(
   );
 }
 
+/** Sample step (m) for the LOS walk — ~half a nav cell so a wall between two points is never skipped. */
+const LOS_STEP_METERS = 1;
+
+/**
+ * Line-of-sight (T68/V47): true when NO blocked cell lies on the segment between (x0,z0) and (x1,z1) — a
+ * zombie cannot see the player through a wall/closed door. Endpoints are excluded so the observer's and
+ * target's own cells never block. Walks the segment sampling the scene's `isWalkableWorld`.
+ */
+export function hasLineOfSight(
+  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+): boolean {
+  const dx = x1 - x0;
+  const dz = z1 - z0;
+  const dist = Math.hypot(dx, dz);
+  const steps = Math.max(1, Math.ceil(dist / LOS_STEP_METERS));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (!scene.isWalkableWorld(x0 + dx * t, z0 + dz * t)) return false;
+  }
+  return true;
+}
+
+/**
+ * Distance (m) from (x,z) along `heading` until the first blocked cell, capped at `maxDist`. Used by the
+ * debug overlay to crop a vision cone at walls. Returns `maxDist` if the ray stays clear.
+ */
+export function rayDistanceToWall(
+  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  x: number,
+  z: number,
+  heading: number,
+  maxDist: number,
+): number {
+  const dx = Math.cos(heading);
+  const dz = Math.sin(heading);
+  const steps = Math.max(1, Math.ceil(maxDist / LOS_STEP_METERS));
+  for (let i = 1; i <= steps; i++) {
+    const d = (i / steps) * maxDist;
+    if (!scene.isWalkableWorld(x + dx * d, z + dz * d)) return d;
+  }
+  return maxDist;
+}
+
 /**
  * Build a fresh BASE world (immutable authored geometry). Reload reconstructs this and re-applies the
  * compact delta on top (V9) — the base is never persisted, only re-built here.

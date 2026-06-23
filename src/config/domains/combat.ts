@@ -142,6 +142,16 @@ export const combatConfig = registerDomain('combat', {
     doc: 'Promote a struck target to hero fidelity when detailed anatomy/anim is required (V13/V16).',
     default: true,
   }),
+  /** Fraction of the nav cell size used as the march step when testing structure occlusion of a
+   *  firearm ray (V53/B20). Must be <= 1 so a one-cell-thick wall is never stepped over. */
+  projectileOcclusionStepRatio: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Fraction of nav cell size used as the march step when testing structure occlusion of a firearm ray (<=1 so no cell is skipped). V53/B20.',
+    default: 0.5,
+    min: 0.05,
+    max: 1,
+  }),
   /** Damage multiplier applied when the target posture is downed/crawling (exposed/limited, V16). */
   postureDownDamageMultiplier: num({
     owner: 'combat',

@@ -28,6 +28,7 @@ const GROUPS: readonly ToggleGroup[] = [
       { key: 'showAttackRadius', label: 'Attack radius', hint: 'melee reach' },
       { key: 'showZombieState', label: 'State markers', hint: 'idle / pursue / attack …' },
       { key: 'showSoundField', label: 'Sound field', hint: 'heard sources @ player' },
+      { key: 'showPlayerVision', label: 'Player vision', hint: 'forward cone' },
     ],
   },
   {

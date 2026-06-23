@@ -25,11 +25,14 @@ import { combatConfig } from '../config/domains/combat';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
+import { BloodView, resolveBloodSettings } from '../render/effects/bloodView';
+import { GibView, resolveGibSettings } from '../render/effects/gibView';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
+import { createNoiseSnapshotGate, noiseViewStore } from '../stores/noiseView';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
-import { buildCityDistrict } from '../game/scene';
+import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
 import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
 import type { WeatherProfile } from '../config/domains/weather';
@@ -123,6 +126,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
     const groundPlane = new Plane(new Vector3(0, 1, 0), 0);
     const aimPoint = new Vector3();
     let cmdSeq = 1;
+    let selfNoise = 0; // 0..1 player-produced noise, bumped on fire, decays each frame (HUD noise meter).
     const cleanups: (() => void)[] = [];
 
     const stats = createDevStats();
@@ -169,19 +173,36 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         return;
       }
 
+      // Accessibility (V29) resolved once + live-applied; shared by the scene and the gore views below.
+      let access = accessibilityFromSettings(settingsStore.getState());
       scene = new BlockScene({
         runtime,
         tier,
         registry: host.resources,
-        accessibility: accessibilityFromSettings(settingsStore.getState()),
+        accessibility: access,
       });
+
+      // T75/T76 (V51/V52): pooled BLOOD (arcing droplets -> drying directional floor decals + bloody
+      // footsteps) + GIB (flung faceted meat chunks) systems. Event-driven (V2), pooled + capped (V24),
+      // r184 binding-safe (V33). They SUPERSEDE the basic combat-feedback blood spray (now retired there).
+      // Resources are tracked in the host registry so host.dispose() frees them on unmount (V24).
+      const bloodView = new BloodView(resolveBloodSettings(tier), host.resources);
+      const gibView = new GibView(resolveGibSettings(tier), host.resources);
+      bloodView.attachTo(scene.scene);
+      gibView.attachTo(scene.scene);
+
       // Live-apply accessibility changes from the settings panel into the running scene (V29 end-to-end).
-      const unsubAccessibility = settingsStore.subscribe((s) => scene?.setAccessibility(accessibilityFromSettings(s)));
+      const unsubAccessibility = settingsStore.subscribe((s) => {
+        access = accessibilityFromSettings(s);
+        scene?.setAccessibility(access);
+      });
       cleanups.push(unsubAccessibility);
 
       // Dev-tools scene gizmos (perception/attack radii, FSM-state markers, sound field). Toggled via the
       // debug-flag store; the layer self-hides when no flag is set, so it is free in normal play.
       const gizmos = new SceneGizmos(tier);
+      const noiseGate = createNoiseSnapshotGate(noiseViewStore, tier);
+      cleanups.push(() => noiseViewStore.getState().clear());
       scene.scene.add(gizmos.group);
       cleanups.push(() => {
         scene?.scene.remove(gizmos.group);
@@ -206,6 +227,13 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         keys.add(e.code);
         if (e.code === 'KeyQ') camera.rotate(-1);
         if (e.code === 'KeyE') camera.rotate(1);
+        if (e.code === 'Escape') {
+          // T49: ESC toggles an authoritative pause — the sim stops advancing (V12-safe), the pause menu
+          // shows. The session phase is the single source of truth (the menu's Resume reads/writes it too).
+          const phase = sessionStore.getState().phase;
+          if (phase === 'playing') sessionStore.getState().setPhase('paused');
+          else if (phase === 'paused') sessionStore.getState().setPhase('playing');
+        }
       };
       const onKeyUp = (e: KeyboardEvent): void => {
         keys.delete(e.code);
@@ -225,6 +253,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const dz = hit ? hit.z - p.z : Math.sin(runtime.playerAim());
         runtime.aim(dx, dz);
         runtime.fire(dx, dz, 'torsoUpper');
+        selfNoise = 1; // a gunshot is the loudest thing the player produces (HUD noise meter).
         scene?.fireFeedback(dx, dz); // B7: muzzle flash + tracer + report on fire
       };
       const onWheel = (e: WheelEvent): void => {
@@ -300,15 +329,17 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const dt = Math.min(0.1, (nowMs - last) / 1000);
         last = nowMs;
 
-        const mv = moveSpeedKeys();
-        if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, dt);
-        const hit = aimWorldPoint();
-        if (hit) {
-          const p = runtime.player();
-          runtime.aim(hit.x - p.x, hit.z - p.z);
+        const paused = sessionStore.getState().phase === 'paused';
+        if (!paused) {
+          const mv = moveSpeedKeys();
+          if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, dt);
+          const hit = aimWorldPoint();
+          if (hit) {
+            const pp = runtime.player();
+            runtime.aim(hit.x - pp.x, hit.z - pp.z);
+          }
+          runtime.update(dt);
         }
-
-        runtime.update(dt);
 
         const p = runtime.player();
         camera.setTarget(p.x, 0, p.z);
@@ -317,13 +348,49 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         // nowhere). World events are not consumed by the viewport.
         const drained = runtime.pollEvents();
         scene?.ingestCombatEvents(drained.visual, camera.camera.position);
+        // T75/T76: feed the SAME drained visual stream into the pooled blood + gib systems, then advance
+        // their pure sims + mirror to the GPU (V2 event-driven; never feeds the sim). gore-intensity 0
+        // fully suppresses + reduce-flashes thins (V29); distance simplifies (V8).
+        const camPos = camera.camera.position;
+        bloodView.consume(drained.visual, {
+          cameraX: camPos.x,
+          cameraY: camPos.y,
+          cameraZ: camPos.z,
+          goreIntensity: access.goreIntensity,
+          reduceFlashes: access.feedback.reduceFlashes,
+          playerX: p.x,
+          playerZ: p.z,
+        });
+        gibView.consume(drained.visual, {
+          cameraX: camPos.x,
+          cameraY: camPos.y,
+          cameraZ: camPos.z,
+          goreIntensity: access.goreIntensity,
+          reduceFlashes: access.feedback.reduceFlashes,
+        });
+        bloodView.update(dt);
+        gibView.update(dt);
         scene?.syncFrame(dt, camera.camera);
-        gizmos.update(runtime.zombies, debugViewStore.getState().flags, p, (qx, qz) =>
-          runtime.stimulus
-            .query(qx, qz, runtime.tick)
-            .filter((h) => h.stimulus.kind === 'sound')
-            .map((h) => ({ x: h.stimulus.x, z: h.stimulus.z, intensity: h.intensity })),
+        gizmos.update(
+          runtime.zombies,
+          debugViewStore.getState().flags,
+          { x: p.x, z: p.z, heading: runtime.playerAim() },
+          (qx, qz) =>
+            runtime.stimulus
+              .query(qx, qz, runtime.tick)
+              .filter((h) => h.stimulus.kind === 'sound')
+              .map((h) => ({ x: h.stimulus.x, z: h.stimulus.z, intensity: h.intensity, radius: h.stimulus.radius })),
+          (qx, qz, heading, maxR) => rayDistanceToWall(runtime.scene, qx, qz, heading, maxR),
         );
+
+        // HUD noise meter: ambient = total sound loudness reaching the player; self = player's own output,
+        // decaying over ~1.5s. Throttled publish (V11) — the meter reads a narrow snapshot, not the field.
+        selfNoise = Math.max(0, selfNoise - dt / 1.5);
+        let ambient = 0;
+        for (const h of runtime.stimulus.query(p.x, p.z, runtime.tick)) {
+          if (h.stimulus.kind === 'sound') ambient += h.intensity;
+        }
+        noiseGate.push({ ambient01: Math.min(1, ambient), self01: selfNoise });
         if (scene) {
           // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
           host?.setToneMapping(scene.toneMappingMode, scene.currentExposure);

@@ -37,6 +37,7 @@ function harness() {
       spatial.remove(s);
       zombies.free(s);
     },
+    firstProjectileBlockerDistance: () => null, // clear line of fire for the weapon-system cases
   };
   const combat = new CombatSystem(deps);
   const weaponSys = new WeaponSystem({

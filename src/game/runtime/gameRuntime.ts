@@ -248,6 +248,9 @@ export class GameRuntime {
       visualEvents: this.visualEvents,
       onDamaged: (slot) => this.lastDamageTick.set(slot, this.clock.tick),
       onEntityDied: (slot) => this.despawn(slot),
+      // V53/B20: a shot stops at the first projectile-blocking structure cell — never passes through walls.
+      firstProjectileBlockerDistance: (origin, dirX, dirZ, range) =>
+        this.firstProjectileBlockerDistance(origin, dirX, dirZ, range),
     });
 
     this.structuralHooks = {
@@ -555,6 +558,31 @@ export class GameRuntime {
     const result = this.combat.fire(this.playerPos, dirX, dirZ, region);
     this.emitGunfire();
     return result;
+  }
+
+  /**
+   * V53/B20 structure-occlusion query for the combat lane: march the firearm ray in steps <= one nav
+   * cell and return the distance (m) to the FIRST projectile-blocking structure cell, or null if the
+   * line of fire stays clear to `range`. A cell blocks when it is NOT walkable in the authoritative nav
+   * grid — i.e. an intact wall, the un-breached destructible section, a closed/locked door or a boarded
+   * panel. A breach or open door clears its nav cell (V5 — openBreachedNav), so it does NOT block. This
+   * is the single source of truth shared with line-of-sight (the renderer never decides occlusion).
+   */
+  private firstProjectileBlockerDistance(
+    origin: Readonly<Vec3>,
+    dirX: number,
+    dirZ: number,
+    range: number,
+  ): number | null {
+    const cellSize = this.scene.navGrid.settings.navCellSize;
+    const step = cellSize * this.combatCfg.projectileOcclusionStepRatio; // <= cell size, config-driven (V4)
+    const steps = Math.max(1, Math.ceil(range / step));
+    for (let i = 1; i <= steps; i++) {
+      const d = Math.min(i * step, range);
+      if (!this.scene.isWalkableWorld(origin.x + dirX * d, origin.z + dirZ * d)) return d;
+      if (d >= range) break;
+    }
+    return null;
   }
 
   /** Emit a gunshot sound stimulus at the player's current muzzle position into the shared field. */

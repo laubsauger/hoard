@@ -36,6 +36,11 @@ export interface ShotResult {
   readonly promoted?: boolean;
   /** Candidate slots gathered from swept cells before the precise line filter (diagnostics, V16). */
   readonly candidateCount: number;
+  /**
+   * Distance (m) at which the shot stops: the first body struck, the first projectile-blocking
+   * structure cell, or the weapon range — whichever is nearest (V53/B20). Drives the tracer (V49).
+   */
+  readonly stopDistanceMeters?: number;
 }
 
 export interface CombatDeps {
@@ -54,6 +59,19 @@ export interface CombatDeps {
   readonly onEntityDied: (slot: ZombieSlot) => void;
   /** Optional: promote a struck target to hero fidelity when detailed anatomy is required (V16). */
   readonly promote?: (slot: ZombieSlot) => void;
+  /**
+   * Structure-occlusion query (V53/B20): distance (m) to the FIRST projectile-blocking structure cell
+   * along the ray (an intact, un-breached wall / closed-or-locked door / boarded panel / obstruction),
+   * or null when the line of fire is clear to `range`. A breach or open door restores the line locally
+   * (V5). Bodies at/beyond this distance take no damage and the shot stops here. Injected by the runtime,
+   * which owns the StructuralModule + cell<->world mapping.
+   */
+  readonly firstProjectileBlockerDistance: (
+    origin: ShotOrigin,
+    dirX: number,
+    dirZ: number,
+    range: number,
+  ) => number | null;
 }
 
 const PROJECTILE_MASK = layerMask(CollisionLayer.Projectile);
@@ -106,7 +124,12 @@ export class CombatSystem {
     ndz: number,
     range: number,
     hitRadius: number,
-  ): { candidateCount: number; hits: RayHit[] } {
+  ): { candidateCount: number; hits: RayHit[]; stopDistance: number } {
+    // First projectile-blocking structure along the ray (V53/B20). Bodies at/beyond it are occluded:
+    // the shot stops at the wall/closed door/board — no candidates pass through. null = clear to range.
+    const blocker = this.deps.firstProjectileBlockerDistance(origin, ndx, ndz, range);
+    const blockerDistance = blocker ?? Number.POSITIVE_INFINITY;
+
     const step = this.deps.spatial.cellSize; // derived from collision config, not a literal
     const gatherRadius = hitRadius + step; // ensure no cell adjacent to the line is missed
     const candidates = new Set<ZombieSlot>();
@@ -127,6 +150,7 @@ export class CombatSystem {
       const vz = pos[2] - origin.z;
       const travel = vx * ndx + vz * ndz;
       if (travel < 0 || travel > range) continue;
+      if (travel >= blockerDistance) continue; // occluded: the wall stops the shot before this body
       const perpX = vx - travel * ndx;
       const perpZ = vz - travel * ndz;
       const perp = Math.hypot(perpX, perpZ);
@@ -135,7 +159,10 @@ export class CombatSystem {
       hits.push({ slot, travel });
     }
     hits.sort((a, b) => a.travel - b.travel);
-    return { candidateCount: candidates.size, hits };
+    // Stop distance = nearest of {first body struck, the blocker, the weapon range} (V49 tracer).
+    const firstHitTravel = hits.length > 0 ? hits[0]!.travel : Number.POSITIVE_INFINITY;
+    const stopDistance = Math.min(firstHitTravel, blockerDistance, range);
+    return { candidateCount: candidates.size, hits, stopDistance };
   }
 
   /**
@@ -147,17 +174,20 @@ export class CombatSystem {
     const { ndx, ndz } = normalizeXZ(dirX, dirZ, 'firearm');
     const range = this.deps.weapons.firearmRangeMeters;
     const hitRadius = this.deps.weapons.firearmHitRadiusMeters;
-    const { candidateCount, hits } = this.gatherAlongRay(origin, ndx, ndz, range, hitRadius);
-    if (hits.length === 0) return { hit: false, candidateCount };
+    const { candidateCount, hits, stopDistance } = this.gatherAlongRay(origin, ndx, ndz, range, hitRadius);
+    if (hits.length === 0) return { hit: false, candidateCount, stopDistanceMeters: stopDistance };
     const first = hits[0]!;
-    return this.resolveHit(first.slot, region, ndx, ndz, first.travel, {
-      baseDamage: this.deps.weapons.firearmDamage,
-      armorPenetration: this.deps.weapons.firearmArmorPenetration,
-      tier: SimTier.Hero,
-      severScale: 1,
-      candidateCount,
-      damageScale: 1,
-    });
+    return {
+      ...this.resolveHit(first.slot, region, ndx, ndz, first.travel, {
+        baseDamage: this.deps.weapons.firearmDamage,
+        armorPenetration: this.deps.weapons.firearmArmorPenetration,
+        tier: SimTier.Hero,
+        severScale: 1,
+        candidateCount,
+        damageScale: 1,
+      }),
+      stopDistanceMeters: stopDistance,
+    };
   }
 
   /**
@@ -175,7 +205,7 @@ export class CombatSystem {
     const { ndx, ndz } = normalizeXZ(dirX, dirZ, 'firearm');
     const range = this.deps.weapons.firearmRangeMeters;
     const hitRadius = this.deps.weapons.firearmHitRadiusMeters;
-    const { candidateCount, hits } = this.gatherAlongRay(origin, ndx, ndz, range, hitRadius);
+    const { candidateCount, hits, stopDistance } = this.gatherAlongRay(origin, ndx, ndz, range, hitRadius);
 
     const maxBodies = this.deps.weapons.firearmMaxPenetrations;
     const falloff = this.deps.weapons.firearmPenetrationDamageFalloff;
@@ -184,8 +214,8 @@ export class CombatSystem {
     for (const h of hits) {
       if (results.length >= maxBodies) break;
       const tier = opts.tierOverride ?? (this.deps.zombies.getSimTier(h.slot) as SimTier);
-      results.push(
-        this.resolveHit(h.slot, region, ndx, ndz, h.travel, {
+      results.push({
+        ...this.resolveHit(h.slot, region, ndx, ndz, h.travel, {
           baseDamage: this.deps.weapons.firearmDamage,
           armorPenetration: this.deps.weapons.firearmArmorPenetration,
           tier,
@@ -193,7 +223,8 @@ export class CombatSystem {
           candidateCount,
           damageScale,
         }),
-      );
+        stopDistanceMeters: stopDistance,
+      });
       damageScale *= falloff;
     }
     return results;

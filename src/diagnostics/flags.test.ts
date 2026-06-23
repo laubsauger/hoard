@@ -54,6 +54,7 @@ describe('DebugFlagState', () => {
       'showAttackRadius',
       'showZombieState',
       'showSoundField',
+      'showPlayerVision',
     ]);
   });
 });

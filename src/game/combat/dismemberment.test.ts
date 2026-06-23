@@ -42,6 +42,7 @@ function harness() {
       spatial.remove(s);
       zombies.free(s);
     },
+    firstProjectileBlockerDistance: () => null, // clear line of fire for these dismemberment cases
   };
   const sys = new CombatSystem(deps);
   const slot = zombies.spawn({ archetype: 0, position: [5, 0, 0], health: 100, simTier: SimTier.Hero });

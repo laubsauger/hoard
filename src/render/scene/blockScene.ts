@@ -170,6 +170,7 @@ export class BlockScene {
 
     this.buildGround();
     this.buildWallsAndRoof();
+    this.buildDoorsAndWindows();
     this.playerMesh = this.buildPlayer();
     this.scene.add(this.playerMesh);
 
@@ -284,7 +285,6 @@ export class BlockScene {
       return out;
     };
 
-    const half = this.navCellSize / 2;
     for (let cy = 0; cy < grid.height; cy++) {
       for (let cx = 0; cx < grid.width; cx++) {
         const idx = grid.index(cx, cy);
@@ -296,16 +296,22 @@ export class BlockScene {
         // A fully-enclosed wall cell would have no exposed edge — emit a single thin core panel so it still
         // reads (and, for a section cell, still has a hideable mesh for breach). Walls border open space.
         const faces = exposed.length > 0 ? exposed : [{ dx: 0, dz: 1, along: 'x' as const }];
+        // T70/B12: a 1-cell-thick wall is open on BOTH sides — emitting a panel per exposed face produced
+        // TWO parallel walls a whole cell apart (the "doubled wall + gap"). Emit ONE panel per RUN
+        // orientation, CENTRED on the cell: an X-run panel when a north/south face is exposed, a Z-run panel
+        // when an east/west face is exposed (a corner cell gets both → an L). No doubling, no gap.
+        const orientations: ('x' | 'z')[] = [];
+        if (faces.some((f) => f.along === 'x')) orientations.push('x');
+        if (faces.some((f) => f.along === 'z')) orientations.push('z');
+        if (orientations.length === 0) orientations.push('x');
         const sectionObjs: Object3D[] = [];
 
-        for (const e of faces) {
-          const px = wx + e.dx * half;
-          const pz = wz + e.dz * half;
-          const baseGeo = e.along === 'x' ? baseGeoX : baseGeoZ;
-          const upperGeo = e.along === 'x' ? upperGeoX : upperGeoZ;
+        for (const along of orientations) {
+          const baseGeo = along === 'x' ? baseGeoX : baseGeoZ;
+          const upperGeo = along === 'x' ? upperGeoX : upperGeoZ;
 
           const base = new Mesh(baseGeo, sc !== undefined ? sectionMat : baseMat);
-          base.position.set(px, baseH / 2, pz);
+          base.position.set(wx, baseH / 2, wz); // centred on the cell — one wall line, not two opposite faces
           base.castShadow = true;
           base.receiveShadow = true;
           wallsGroup.add(base);
@@ -313,7 +319,7 @@ export class BlockScene {
 
           if (upperGeo) {
             const upper = new Mesh(upperGeo, sc !== undefined ? sectionMat : upperMat);
-            upper.position.set(px, upperBottomY + upperH / 2, pz);
+            upper.position.set(wx, upperBottomY + upperH / 2, wz);
             upper.castShadow = true;
             if (sc !== undefined) {
               // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
@@ -348,6 +354,86 @@ export class BlockScene {
     roof.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, wallH, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
     this.scene.add(roof);
     this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', heightMeters: wallH, opacity: 1 });
+  }
+
+  /**
+   * T70 — doors + windows so the shell reads as a house. Additive render pass (does not alter the wall
+   * grid): a framed door leaf at each exit gap, and glass window panes on a deterministic subset of facade
+   * (perimeter) wall cells. Pure content from the authored grid — no magic placement.
+   */
+  private buildDoorsAndWindows(): void {
+    const ts = this.runtime.scene;
+    const grid = ts.navGrid;
+    const b = ts.buildingBounds;
+    const cs = this.navCellSize;
+    const wallH = this.world.buildingWallHeightMeters;
+    const group = new Group();
+
+    const frameMat = this.mat('opening.frame', { color: 0x2e2118, roughness: 0.8 });
+    const leafMat = this.mat('door.leaf', { color: 0x5a3d24, roughness: 0.65 });
+    const glassMat = this.mat('window.glass', {
+      color: 0x9fc6e0,
+      roughness: 0.08,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.34,
+      emissive: 0x10212e,
+    });
+
+    // ---- DOORS: a frame (posts + lintel) + an ajar leaf at each exit gap (exit gaps run along Z). ----
+    const postGeo = this.geo('door.post.geo', new BoxGeometry(0.14, wallH, 0.14));
+    const lintelGeo = this.geo('door.lintel.geo', new BoxGeometry(0.2, 0.2, cs));
+    const leafGeo = this.geo('door.leaf.geo', new BoxGeometry(0.06, wallH * 0.82, cs * 0.8));
+    for (const cell of ts.exitCells) {
+      const wx = (cell.cx + 0.5) * cs;
+      const wz = (cell.cy + 0.5) * cs;
+      const post1 = new Mesh(postGeo, frameMat);
+      post1.position.set(wx, wallH / 2, wz - cs / 2);
+      post1.castShadow = true;
+      const post2 = new Mesh(postGeo, frameMat);
+      post2.position.set(wx, wallH / 2, wz + cs / 2);
+      post2.castShadow = true;
+      const lintel = new Mesh(lintelGeo, frameMat);
+      lintel.position.set(wx, wallH - 0.1, wz);
+      lintel.castShadow = true;
+      const leaf = new Mesh(leafGeo, leafMat);
+      leaf.position.set(wx, wallH * 0.41, wz - cs * 0.3);
+      leaf.rotation.y = 0.5; // hinged ajar
+      leaf.castShadow = true;
+      group.add(post1, post2, lintel, leaf);
+    }
+
+    // ---- WINDOWS: glass panes on a deterministic subset of facade (perimeter) wall cells. ----
+    const sillH = wallH * 0.45;
+    const winH = wallH * 0.32;
+    const paneGeo = this.geo('window.pane.geo', new BoxGeometry(0.08, winH, cs * 0.62));
+    const doorAdjacent = (cx: number, cy: number): boolean =>
+      ts.exitCells.some((e) => Math.abs(e.cx - cx) + Math.abs(e.cy - cy) <= 1);
+    let wi = 0;
+    for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+      for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+        const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
+        if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
+        const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
+        if (corner || doorAdjacent(cx, cy)) {
+          wi += 1;
+          continue;
+        }
+        if (wi++ % 2 !== 0) continue; // every other facade cell gets a window (deterministic)
+        let nx = 0;
+        let nz = 0;
+        if (cx === b.minCx) nx = -1;
+        else if (cx === b.maxCx) nx = 1;
+        else if (cy === b.minCy) nz = -1;
+        else nz = 1;
+        const pane = new Mesh(paneGeo, glassMat);
+        pane.position.set((cx + 0.5) * cs + nx * 0.02, sillH + winH / 2, (cy + 0.5) * cs + nz * 0.02);
+        if (nz !== 0) pane.rotation.y = Math.PI / 2; // pane spans X on a north/south wall
+        group.add(pane);
+      }
+    }
+
+    this.scene.add(group);
   }
 
   private buildPlayer(): Object3D {

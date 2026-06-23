@@ -10,7 +10,7 @@ import type { EntityId, EventId, VisualEvent, WorldEvent } from '@/game/core/con
 
 const AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Attack);
 
-function harness(opts: { withPromote?: boolean } = {}) {
+function harness(opts: { withPromote?: boolean; blockerDistance?: number | null } = {}) {
   const zombies = new SimulationZombies(64);
   const spatial = new SpatialHash({ cellSize: 2 });
   const weapons = resolveDomain(weaponsConfig, 'desktop-high');
@@ -36,6 +36,8 @@ function harness(opts: { withPromote?: boolean } = {}) {
       spatial.remove(s);
       zombies.free(s);
     },
+    // Default: line of fire is clear (null). Tests override with a finite blocker distance.
+    firstProjectileBlockerDistance: () => opts.blockerDistance ?? null,
     ...(opts.withPromote ? { promote: (s: ZombieSlot) => promoted.push(s) } : {}),
   };
   const sys = new CombatSystem(deps);
@@ -131,5 +133,58 @@ describe('V16 posture term in resolution', () => {
     const cShot = crawling.sys.firePenetrating(ORIGIN, 1, 0, 'torsoUpper')[0]!;
 
     expect(cShot.effectiveDamage!).toBeGreaterThan(sShot.effectiveDamage!);
+  });
+});
+
+describe('V53/B20 structure occlusion — shots do not pass through walls', () => {
+  it('a blocking wall between shooter and target → no hit, stop distance = wall distance', () => {
+    const h = harness({ blockerDistance: 4 }); // wall at 4 m
+    spawn(h, 5, 0); // target beyond the wall
+    const res = h.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
+    expect(res.hit).toBe(false);
+    expect(res.stopDistanceMeters).toBe(4);
+  });
+
+  it('breaching that cell (query clear) → the target IS hit', () => {
+    const h = harness({ blockerDistance: null }); // breach restores the line locally (V5)
+    const slot = spawn(h, 5, 0);
+    const res = h.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
+    expect(res.hit).toBe(true);
+    expect(res.targetSlot).toBe(slot);
+    expect(h.zombies.getHealth(slot)).toBeLessThan(100);
+  });
+
+  it('a closed door blocks; an open/broken door does not', () => {
+    const closed = harness({ blockerDistance: 3 }); // closed/locked door at 3 m
+    spawn(closed, 5, 0);
+    expect(closed.sys.fire(ORIGIN, 1, 0, 'torsoUpper').hit).toBe(false);
+
+    const open = harness({ blockerDistance: null }); // open/broken door = passable
+    spawn(open, 5, 0);
+    expect(open.sys.fire(ORIGIN, 1, 0, 'torsoUpper').hit).toBe(true);
+  });
+
+  it('penetration still works among bodies BEFORE the wall, but stops at it', () => {
+    const h = harness({ blockerDistance: 7 }); // wall at 7 m
+    const a = spawn(h, 3, 0, { health: 10_000 });
+    const b = spawn(h, 6, 0, { health: 10_000 });
+    spawn(h, 9, 0, { health: 10_000 }); // beyond the wall — must NOT be touched
+    const shots = h.sys.firePenetrating(ORIGIN, 1, 0, 'torsoUpper');
+    expect(shots.map((s) => s.targetSlot)).toEqual([a, b]);
+    expect(shots.every((s) => s.stopDistanceMeters === 3)).toBe(true); // first body struck
+  });
+
+  it('a wall before the bodies stops penetration entirely', () => {
+    const h = harness({ blockerDistance: 5 }); // wall at 5 m, both bodies behind it
+    spawn(h, 6, 0, { health: 10_000 });
+    spawn(h, 8, 0, { health: 10_000 });
+    expect(h.sys.firePenetrating(ORIGIN, 1, 0, 'torsoUpper')).toHaveLength(0);
+  });
+
+  it('clean miss (no body, clear line) → stop distance = weapon range', () => {
+    const h = harness({ blockerDistance: null });
+    const res = h.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
+    expect(res.hit).toBe(false);
+    expect(res.stopDistanceMeters).toBe(h.weapons.firearmRangeMeters);
   });
 });

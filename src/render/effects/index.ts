@@ -16,6 +16,25 @@ export {
   type IngestContext,
 } from './combatFeedback';
 export {
+  BloodSim,
+  BloodView,
+  resolveBloodSettings,
+  goreColor,
+  type BloodSettings,
+  type BloodIngestContext,
+  type GoreType,
+  type SurfaceHit,
+  type SurfaceProjector,
+} from './bloodView';
+export { RaycastSurfaceProjector } from './surfaceProjector';
+export {
+  GibSim,
+  GibView,
+  resolveGibSettings,
+  type GibSettings,
+  type GibIngestContext,
+} from './gibView';
+export {
   SCALING_STAGES,
   INITIAL_SCALING_STATE,
   isScalingLever,
