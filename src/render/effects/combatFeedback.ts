@@ -2,7 +2,18 @@
 // never consumed runtime.pollEvents(), so firing produced NO muzzle flash, tracer, blood, sever or hit
 // feedback. This module closes that gap: a PURE CombatFeedbackSystem ingests the drained VisualEvent
 // stream (feeding the pooled, capped GoreSystem) + the player's fire action, and a thin GPU
-// CombatFeedbackView reflects that state into ONE instanced blood/spark batch + a muzzle light + a tracer.
+// CombatFeedbackView reflects that state into instanced blood/spark batches + a muzzle light + a tracer.
+//
+// B14/T71 (V48): hit gore is no longer one giant axis-aligned quad. `energy` is clamped to its contract
+// range [0,1] at ingest (a raw-damage value silently scaled the quad to meters). Each hit emits MULTIPLE
+// small billboarded blood droplets from the struck region's WORLD HEIGHT, launched along the impact vector
+// with lateral spread + an upward arc and settled by gravity over their lifetime, plus a persistent
+// flattened ground splat at the projected impact point. Energy now only modulates count/spread/size.
+//
+// B15/T74 (V49): the tracer terminates at the shot's actual stop distance — the struck body's travel
+// (or max range on a clean miss) — never drawn through bodies to max range, with an impact spark at the
+// stop point.
+//
 // Everything is pooled + capped (no per-shot allocation) and gore-intensity / reduce-flashes accessibility
 // is respected (V29). The system is GPU-free so the ingest/aging logic is unit-tested without a device.
 
@@ -15,9 +26,10 @@ import {
   Object3D,
   PlaneGeometry,
   PointLight,
+  Quaternion,
   Vector3,
 } from 'three';
-import type { VisualEvent } from '../../game/core/contracts/events';
+import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -25,8 +37,93 @@ import type { ResourceRegistry } from '../engine/resources';
 import { GoreSystem, resolveGoreSettings, type GoreParticle, type GoreSettings } from './gore';
 
 const BLOOD_COLOR = 0x7a0c0c;
+const STAIN_COLOR = 0x4a0808;
 const MUZZLE_COLOR = 0xffd9a0;
 const TRACER_COLOR = 0xfff2c4;
+const SPARK_COLOR = 0xffe6b0;
+/** Sever silhouette markers read larger than a single blood droplet. */
+const SEVER_SIZE_MULTIPLIER = 12;
+/** Ground splats never shrink below this fraction so they stay readable until they pop out (V48). */
+const STAIN_MIN_SCALE = 0.35;
+/** Droplets never shrink below this fraction over their (short) lifetime. */
+const SPARK_MIN_SCALE = 0.1;
+/** Ground splat lies flat on the XZ plane: rotate the XY quad -90° about X. */
+const FLAT_QUAT = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2);
+
+/** Clamp an out-of-contract value into [0,1] (defensive contract enforcement per V48 — NOT a fallback). */
+export function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Spawn-height map for the three anatomical bands (V48). Heights are above the struck body's base. */
+export interface RegionHeights {
+  readonly head: number;
+  readonly torso: number;
+  readonly leg: number;
+}
+
+/** Map a struck region to its blood-emission world height (V48). No magic numbers — bands come from config. */
+export function regionImpactHeight(region: AnatomyRegion, h: RegionHeights): number {
+  switch (region) {
+    case 'head':
+    case 'neck':
+      return h.head;
+    case 'torsoUpper':
+    case 'torsoLower':
+    case 'armLeft':
+    case 'armRight':
+      return h.torso;
+    case 'legLeft':
+    case 'legRight':
+      return h.leg;
+  }
+}
+
+export interface SprayBallistics {
+  readonly velocityMps: number;
+  readonly upwardMps: number;
+  readonly spreadMps: number;
+  readonly gravityMps2: number;
+}
+
+/** Deterministic [0,1) hash so per-droplet spread is stable frame-to-frame (no per-frame allocation/random). */
+function hash01(n: number): number {
+  let x = (n ^ 0x9e3779b9) >>> 0;
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b) >>> 0;
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b) >>> 0;
+  x = (x ^ (x >>> 16)) >>> 0;
+  return x / 4294967296;
+}
+
+/**
+ * Ballistic offset (relative to the spawn point) of one blood droplet at `ageSeconds` (V48). The droplet
+ * is launched ALONG the normalized impact vector (dirX,dirZ) with a deterministic per-droplet forward
+ * scale, a lateral spread perpendicular to the impact, and an upward arc; gravity settles it over time.
+ */
+export function sprayParticleOffset(
+  seq: number,
+  index: number,
+  ageSeconds: number,
+  dirX: number,
+  dirZ: number,
+  b: SprayBallistics,
+): { x: number; y: number; z: number } {
+  const hLat = hash01(seq * 131 + index * 17) * 2 - 1; // [-1,1] lateral
+  const hFwd = hash01(seq * 977 + index * 53); // [0,1]
+  const hUp = hash01(seq * 769 + index * 29); // [0,1]
+  const fwd = b.velocityMps * (0.5 + 0.5 * hFwd);
+  const lat = b.spreadMps * hLat;
+  const up = b.upwardMps * (0.6 + 0.4 * hUp);
+  // perpendicular to (dirX,dirZ) in the XZ plane is (-dirZ, dirX).
+  const vx = dirX * fwd + -dirZ * lat;
+  const vz = dirZ * fwd + dirX * lat;
+  return {
+    x: vx * ageSeconds,
+    y: up * ageSeconds - 0.5 * b.gravityMps2 * ageSeconds * ageSeconds,
+    z: vz * ageSeconds,
+  };
+}
 
 export interface CombatFeedbackSettings {
   readonly gore: GoreSettings;
@@ -35,6 +132,12 @@ export interface CombatFeedbackSettings {
   readonly tracerSeconds: number;
   readonly muzzleFlashIntensity: number;
   readonly tracerRangeMeters: number;
+  // B14/T71 gore overhaul (V48)
+  readonly sprayParticleSizeMeters: number;
+  readonly sprayBallistics: SprayBallistics;
+  readonly stainSizeMeters: number;
+  readonly stainLifetimeSeconds: number;
+  readonly regionHeights: RegionHeights;
 }
 
 export function resolveCombatFeedbackSettings(tier: QualityTier): CombatFeedbackSettings {
@@ -45,6 +148,20 @@ export function resolveCombatFeedbackSettings(tier: QualityTier): CombatFeedback
     tracerSeconds: resolve(renderingConfig.combatTracerSeconds, tier),
     muzzleFlashIntensity: resolve(renderingConfig.combatMuzzleFlashIntensity, tier),
     tracerRangeMeters: resolve(renderingConfig.combatTracerRangeMeters, tier),
+    sprayParticleSizeMeters: resolve(renderingConfig.combatGoreSprayParticleSizeMeters, tier),
+    sprayBallistics: {
+      velocityMps: resolve(renderingConfig.combatGoreSprayVelocityMps, tier),
+      upwardMps: resolve(renderingConfig.combatGoreSprayUpwardMps, tier),
+      spreadMps: resolve(renderingConfig.combatGoreSpraySpreadMps, tier),
+      gravityMps2: resolve(renderingConfig.combatGoreSprayGravityMps2, tier),
+    },
+    stainSizeMeters: resolve(renderingConfig.combatGoreStainSizeMeters, tier),
+    stainLifetimeSeconds: resolve(renderingConfig.combatGoreStainLifetimeSeconds, tier),
+    regionHeights: {
+      head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
+      torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
+      leg: resolve(renderingConfig.combatGoreHeightLegMeters, tier),
+    },
   };
 }
 
@@ -57,6 +174,10 @@ interface Pulse {
   dirZ: number;
   age: number;
   ttl: number;
+  /** Tracer-only: distance from the muzzle at which the beam terminates (V49). */
+  stopDistance: number;
+  /** True when stopDistance came from an explicit fire() argument (wins over impact-derived). */
+  stopExplicit: boolean;
 }
 
 export interface IngestContext {
@@ -72,16 +193,16 @@ export interface IngestContext {
  * Pure combat-feedback state. Owns the pooled GoreSystem and the timed muzzle/tracer pulses. No Three.js.
  *
  * Hit feedback comes from the sim's paired (hitReaction -> bloodSpray) emission: hitReaction carries the
- * impact energy + direction but no position, bloodSpray carries the world position. We pair them in
- * emission order so a single positioned, energy-weighted blood spray is spawned per hit (the visible hit
- * flinch + blood). partDetached adds a sever marker at the last impact. soundEmitted is not gore.
+ * impact energy + direction + struck REGION but no position, bloodSpray carries the world position. We pair
+ * them in emission order so a positioned, energy-weighted directional spray + a ground splat are spawned per
+ * hit. partDetached adds a sever marker at the last impact. soundEmitted is not gore.
  */
 export class CombatFeedbackSystem {
   readonly gore: GoreSystem;
   private readonly settings: CombatFeedbackSettings;
   private muzzle: Pulse | null = null;
   private tracer: Pulse | null = null;
-  private pending: { energy: number; dirX: number; dirZ: number } | null = null;
+  private pending: { energy: number; dirX: number; dirZ: number; region: AnatomyRegion } | null = null;
   private lastImpact: { x: number; y: number; z: number } | null = null;
 
   constructor(settings: CombatFeedbackSettings) {
@@ -89,13 +210,20 @@ export class CombatFeedbackSystem {
     this.gore = new GoreSystem(settings.gore);
   }
 
-  /** Player fired — flash the muzzle + draw a tracer from the muzzle along the aim direction (B7). */
-  fire(x: number, y: number, z: number, dirX: number, dirZ: number): void {
+  /**
+   * Player fired — flash the muzzle + draw a tracer from the muzzle along the aim direction (B7). The tracer
+   * terminates at `stopDistanceMeters` (the struck body's travel, V49) when supplied; otherwise it defaults
+   * to the clean-miss max range and may still be refined by an impact-coincident bloodSpray during ingest.
+   */
+  fire(x: number, y: number, z: number, dirX: number, dirZ: number, stopDistanceMeters?: number): void {
     const len = Math.hypot(dirX, dirZ) || 1;
     const nx = dirX / len;
     const nz = dirZ / len;
-    this.muzzle = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.muzzleFlashSeconds };
-    this.tracer = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.tracerSeconds };
+    const range = this.settings.tracerRangeMeters;
+    const explicit = stopDistanceMeters !== undefined && Number.isFinite(stopDistanceMeters) && stopDistanceMeters > 0;
+    const stop = explicit ? Math.min(stopDistanceMeters, range) : range;
+    this.muzzle = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.muzzleFlashSeconds, stopDistance: stop, stopExplicit: explicit };
+    this.tracer = { x, y, z, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.tracerSeconds, stopDistance: stop, stopExplicit: explicit };
   }
 
   /** Consume one frame's drained VisualEvents, feeding the pooled GoreSystem (B7). */
@@ -103,17 +231,24 @@ export class CombatFeedbackSystem {
     for (const e of events) {
       switch (e.kind) {
         case 'hitReaction':
-          // Position-less: remember the impact energy/direction for the paired bloodSpray.
-          this.pending = { energy: e.energy, dirX: e.dirX, dirZ: e.dirZ };
+          // Position-less: remember the clamped impact energy/direction/region for the paired bloodSpray.
+          // V48/B14: energy is contract-normalized 0..1 — clamp defensively (a raw-damage value scales gore to meters).
+          this.pending = { energy: clamp01(e.energy), dirX: e.dirX, dirZ: e.dirZ, region: e.region };
           break;
         case 'bloodSpray': {
           const dist = Math.hypot(e.x - ctx.cameraX, e.y - ctx.cameraY, e.z - ctx.cameraZ);
           const rec = this.gore.ingest(e, dist, ctx.goreIntensity);
           this.lastImpact = { x: e.x, y: e.y, z: e.z };
+          const hitEnergy = this.pending ? this.pending.energy : 1;
           if (rec && this.pending) {
-            // Inherit the hit's energy so spray size reads the weapon impact (gore-intensity already applied).
+            // Inherit the hit's clamped energy + struck region (gore-intensity already applied to energy).
             rec.energy = this.pending.energy * ctx.goreIntensity;
+            rec.region = this.pending.region;
           }
+          // Persistent flattened ground splat at the projected impact point (V48).
+          this.gore.spawnStain(e.x, e.z, hitEnergy, dist, ctx.goreIntensity);
+          // V49: terminate the live tracer at this impact when it is the shot's struck body.
+          this.applyTracerStopFromImpact(e.x, e.z);
           this.pending = null;
           break;
         }
@@ -134,6 +269,15 @@ export class CombatFeedbackSystem {
     }
   }
 
+  /** Terminate the active tracer at a struck-body impact (V49) unless an explicit stop was already supplied. */
+  private applyTracerStopFromImpact(x: number, z: number): void {
+    const t = this.tracer;
+    if (!t || t.stopExplicit) return;
+    const proj = (x - t.x) * t.dirX + (z - t.z) * t.dirZ; // distance along the aim toward the impact
+    if (proj <= 0) return; // behind the muzzle — not this shot.
+    t.stopDistance = Math.min(proj, this.settings.tracerRangeMeters);
+  }
+
   /** Advance timed pulses + age the gore pools, recycling expired records (B7). */
   update(dtSeconds: number): void {
     if (dtSeconds < 0) throw new Error(`dtSeconds must be non-negative, got ${dtSeconds}`);
@@ -145,7 +289,7 @@ export class CombatFeedbackSystem {
       this.tracer.age += dtSeconds;
       if (this.tracer.age >= this.tracer.ttl) this.tracer = null;
     }
-    this.gore.update(dtSeconds, this.settings.sparkLifetimeSeconds);
+    this.gore.update(dtSeconds, this.settings.sparkLifetimeSeconds, this.settings.stainLifetimeSeconds);
   }
 
   /** Muzzle-flash brightness 0..1 (linear fade over its ttl), or 0 if inactive. */
@@ -158,6 +302,11 @@ export class CombatFeedbackSystem {
     return this.tracer ? Math.max(0, 1 - this.tracer.age / this.tracer.ttl) : 0;
   }
 
+  /** Distance from the muzzle at which the active tracer terminates (V49), or 0 if inactive. */
+  tracerStopDistance(): number {
+    return this.tracer ? this.tracer.stopDistance : 0;
+  }
+
   get muzzlePulse(): Readonly<Pulse> | null {
     return this.muzzle;
   }
@@ -165,53 +314,105 @@ export class CombatFeedbackSystem {
     return this.tracer;
   }
 
-  /** Active blood/impact spray records (renderer lays these into the instanced batch). */
+  /** Active blood/impact spray records (renderer expands each into billboarded droplets). */
   get sprayRecords(): readonly GoreParticle[] {
     return this.gore.activeRecords('spray');
+  }
+  /** Active persistent ground splats. */
+  get stainRecords(): readonly GoreParticle[] {
+    return this.gore.activeRecords('stain');
   }
   /** Active sever markers. */
   get severRecords(): readonly GoreParticle[] {
     return this.gore.activeRecords('sever');
   }
 
-  /** Normalized age fade 0..1 for a record (1 fresh, 0 expired) — drives the spark shrink in the view. */
+  get config(): CombatFeedbackSettings {
+    return this.settings;
+  }
+
+  /** Normalized age fade 0..1 for a spray/sever record (1 fresh, 0 expired). */
   recordFade(rec: GoreParticle): number {
     return Math.max(0, 1 - rec.age / this.settings.sparkLifetimeSeconds);
+  }
+
+  /** Normalized age fade 0..1 for a persistent ground splat (longer lifetime than sparks). */
+  stainFade(rec: GoreParticle): number {
+    return Math.max(0, 1 - rec.age / this.settings.stainLifetimeSeconds);
   }
 }
 
 /**
- * GPU side of combat feedback (V24-tracked). ONE instanced quad batch carries every blood/impact/sever
- * spark; the muzzle is a single short-lived point light + emissive bead; the tracer is one thin reused
- * box. Nothing is allocated per shot. sync() mirrors the pure system's state onto these objects each frame.
+ * GPU side of combat feedback (V24-tracked). TWO instanced quad batches: airborne droplets/sever sparks
+ * (camera-billboarded each frame in onBeforeRender) and flat ground splats; the muzzle is a short-lived
+ * point light + emissive bead; the tracer is one reused box terminating at the shot's stop distance with an
+ * impact-spark bead. Nothing is allocated per shot. sync() mirrors the pure system's state each frame.
  */
 export class CombatFeedbackView {
-  private readonly sparkMesh: InstancedMesh;
+  private readonly airborneMesh: InstancedMesh;
+  private readonly stainMesh: InstancedMesh;
   private readonly tracerMesh: Mesh;
   private readonly muzzleLight: PointLight;
   private readonly muzzleBead: Mesh;
+  private readonly impactSpark: Mesh;
   private readonly settings: CombatFeedbackSettings;
   private readonly scratch = new Matrix4();
   private readonly scratchPos = new Vector3();
   private readonly scratchScale = new Vector3();
-  private readonly identityQuat = new Object3D().quaternion;
-  private readonly sparkCapacity: number;
+  private readonly airborneCapacity: number;
+  private readonly stainCapacity: number;
+  /** Packed [x,y,z,scale] per active airborne droplet; recomposed camera-facing in onBeforeRender. */
+  private readonly airborneData: Float32Array;
+  private airborneActive = 0;
 
   constructor(settings: CombatFeedbackSettings, registry: ResourceRegistry) {
     this.settings = settings;
-    this.sparkCapacity = Math.max(1, settings.gore.sprayPoolSize + settings.gore.severPoolSize);
-
-    const sparkGeo = registry.track(new PlaneGeometry(0.35, 0.35), 'geometry', 'combat.sparkGeo');
-    const sparkMat = registry.track(
-      new MeshBasicMaterial({ name: 'combat.spark', color: BLOOD_COLOR, transparent: true, opacity: 0.9, depthWrite: false }),
-      'material',
-      'combat.sparkMat',
+    // Each spray emitter expands to up to sprayParticlesPerEvent droplets; sever markers share the batch.
+    this.airborneCapacity = Math.max(
+      1,
+      settings.gore.sprayPoolSize * settings.gore.sprayParticlesPerEvent + settings.gore.severPoolSize,
     );
-    this.sparkMesh = registry.track(new InstancedMesh(sparkGeo, sparkMat, this.sparkCapacity), 'buffer', 'combat.sparkMesh');
-    this.sparkMesh.count = 0;
-    this.sparkMesh.frustumCulled = false;
-    this.sparkMesh.renderOrder = 2;
+    this.stainCapacity = Math.max(1, settings.gore.stainPoolSize);
+    this.airborneData = new Float32Array(this.airborneCapacity * 4);
 
+    // ---- airborne droplets + sever sparks (billboarded) ----
+    const airGeo = registry.track(new PlaneGeometry(1, 1), 'geometry', 'combat.airborneGeo');
+    const airMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.airborne', color: BLOOD_COLOR, transparent: true, opacity: 0.95, depthWrite: false }),
+      'material',
+      'combat.airborneMat',
+    );
+    this.airborneMesh = registry.track(new InstancedMesh(airGeo, airMat, this.airborneCapacity), 'buffer', 'combat.airborneMesh');
+    this.airborneMesh.count = 0;
+    this.airborneMesh.frustumCulled = false;
+    this.airborneMesh.renderOrder = 3;
+    // Billboard every active droplet toward the active camera at render time (screen-aligned).
+    this.airborneMesh.onBeforeRender = (_renderer, _scene, camera): void => {
+      const q = (camera as { quaternion: Quaternion }).quaternion;
+      for (let k = 0; k < this.airborneActive; k += 1) {
+        const b = k * 4;
+        this.scratchPos.set(this.airborneData[b]!, this.airborneData[b + 1]!, this.airborneData[b + 2]!);
+        const s = this.airborneData[b + 3]!;
+        this.scratchScale.set(s, s, s);
+        this.scratch.compose(this.scratchPos, q, this.scratchScale);
+        this.airborneMesh.setMatrixAt(k, this.scratch);
+      }
+      this.airborneMesh.instanceMatrix.needsUpdate = true;
+    };
+
+    // ---- flat ground splats ----
+    const stainGeo = registry.track(new PlaneGeometry(1, 1), 'geometry', 'combat.stainGeo');
+    const stainMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.stain', color: STAIN_COLOR, transparent: true, opacity: 0.8, depthWrite: false }),
+      'material',
+      'combat.stainMat',
+    );
+    this.stainMesh = registry.track(new InstancedMesh(stainGeo, stainMat, this.stainCapacity), 'buffer', 'combat.stainMesh');
+    this.stainMesh.count = 0;
+    this.stainMesh.frustumCulled = false;
+    this.stainMesh.renderOrder = 1;
+
+    // ---- tracer ----
     const tracerGeo = registry.track(new BoxGeometry(1, 0.03, 0.03), 'geometry', 'combat.tracerGeo');
     const tracerMat = registry.track(
       new MeshBasicMaterial({ name: 'combat.tracer', color: TRACER_COLOR, transparent: true, opacity: 0, depthWrite: false }),
@@ -222,6 +423,7 @@ export class CombatFeedbackView {
     this.tracerMesh.visible = false;
     this.tracerMesh.renderOrder = 2;
 
+    // ---- muzzle flash ----
     this.muzzleLight = new PointLight(MUZZLE_COLOR, 0, settings.tracerRangeMeters * 0.5);
     this.muzzleLight.visible = false;
 
@@ -234,32 +436,76 @@ export class CombatFeedbackView {
     this.muzzleBead = new Mesh(beadGeo, beadMat);
     this.muzzleBead.visible = false;
     this.muzzleBead.renderOrder = 2;
+
+    // ---- impact spark at the tracer stop point (V49) ----
+    const sparkGeo = registry.track(new PlaneGeometry(0.35, 0.35), 'geometry', 'combat.impactSparkGeo');
+    const sparkMat = registry.track(
+      new MeshBasicMaterial({ name: 'combat.impactSpark', color: SPARK_COLOR, transparent: true, opacity: 0, depthWrite: false }),
+      'material',
+      'combat.impactSparkMat',
+    );
+    this.impactSpark = new Mesh(sparkGeo, sparkMat);
+    this.impactSpark.visible = false;
+    this.impactSpark.renderOrder = 3;
   }
 
   /** Add the feedback objects to the scene graph (parent owns scene-graph membership, registry owns disposal). */
   attachTo(parent: Object3D): void {
-    parent.add(this.sparkMesh, this.tracerMesh, this.muzzleLight, this.muzzleBead);
+    parent.add(this.airborneMesh, this.stainMesh, this.tracerMesh, this.muzzleLight, this.muzzleBead, this.impactSpark);
   }
 
   /** Mirror the pure system's current state onto the GPU objects (B7). `reduceFlashes` suppresses the
    *  bright muzzle flash for the photosensitivity accessibility setting (V29) while keeping the tracer. */
   sync(system: CombatFeedbackSystem, reduceFlashes: boolean): void {
-    // ---- blood / impact / sever sparks: one instanced batch, faded by age via scale ----
-    let i = 0;
-    const writeRecord = (rec: GoreParticle, baseSize: number): void => {
-      if (i >= this.sparkCapacity) return;
+    // ---- airborne blood droplets (multi-particle, billboarded) + sever sparks ----
+    const heights = this.settings.regionHeights;
+    const ballistics = this.settings.sprayBallistics;
+    const baseSize = this.settings.sprayParticleSizeMeters;
+    let k = 0;
+    for (const rec of system.sprayRecords) {
       const fade = system.recordFade(rec);
-      const s = baseSize * (0.5 + 0.5 * rec.energy) * Math.max(0.001, fade);
-      this.scratchPos.set(rec.x, Math.max(rec.y, 0.05), rec.z);
+      const spawnY = rec.y + regionImpactHeight(rec.region, heights);
+      // Energy modulates droplet size within sane bounds — never a meters-scale quad (V48/B14).
+      const size = baseSize * (0.6 + 0.4 * rec.energy) * Math.max(SPARK_MIN_SCALE, fade);
+      for (let p = 0; p < rec.particles && k < this.airborneCapacity; p += 1) {
+        const off = sprayParticleOffset(rec.seq, p, rec.age, rec.dirX, rec.dirZ, ballistics);
+        const b = k * 4;
+        this.airborneData[b] = rec.x + off.x;
+        this.airborneData[b + 1] = Math.max(0.02, spawnY + off.y);
+        this.airborneData[b + 2] = rec.z + off.z;
+        this.airborneData[b + 3] = size;
+        k += 1;
+      }
+    }
+    for (const rec of system.severRecords) {
+      if (k >= this.airborneCapacity) break;
+      const fade = system.recordFade(rec);
+      const b = k * 4;
+      this.airborneData[b] = rec.x;
+      this.airborneData[b + 1] = Math.max(0.05, rec.y);
+      this.airborneData[b + 2] = rec.z;
+      this.airborneData[b + 3] = baseSize * SEVER_SIZE_MULTIPLIER * Math.max(SPARK_MIN_SCALE, fade);
+      k += 1;
+    }
+    this.airborneActive = k;
+    this.airborneMesh.count = k;
+    // Matrices themselves are composed camera-facing in onBeforeRender; mark dirty so they upload.
+    this.airborneMesh.instanceMatrix.needsUpdate = true;
+
+    // ---- flat persistent ground splats ----
+    let j = 0;
+    for (const rec of system.stainRecords) {
+      if (j >= this.stainCapacity) break;
+      const fade = system.stainFade(rec);
+      const s = this.settings.stainSizeMeters * (0.6 + 0.4 * rec.energy) * Math.max(STAIN_MIN_SCALE, fade);
+      this.scratchPos.set(rec.x, 0.02, rec.z);
       this.scratchScale.set(s, s, s);
-      this.scratch.compose(this.scratchPos, this.identityQuat, this.scratchScale);
-      this.sparkMesh.setMatrixAt(i, this.scratch);
-      i += 1;
-    };
-    for (const rec of system.sprayRecords) writeRecord(rec, 1);
-    for (const rec of system.severRecords) writeRecord(rec, 1.6);
-    this.sparkMesh.count = i;
-    this.sparkMesh.instanceMatrix.needsUpdate = true;
+      this.scratch.compose(this.scratchPos, FLAT_QUAT, this.scratchScale);
+      this.stainMesh.setMatrixAt(j, this.scratch);
+      j += 1;
+    }
+    this.stainMesh.count = j;
+    this.stainMesh.instanceMatrix.needsUpdate = true;
 
     // ---- muzzle flash ----
     const flash = reduceFlashes ? 0 : system.muzzleIntensity01();
@@ -276,18 +522,23 @@ export class CombatFeedbackView {
       this.muzzleBead.visible = false;
     }
 
-    // ---- tracer: stretch the reused box from the muzzle along the aim direction ----
+    // ---- tracer: stretch the reused box from the muzzle to the shot's stop distance only (V49) ----
     const t = system.tracerPulse;
     const alpha = system.tracerAlpha01();
     if (t && alpha > 0) {
-      const range = this.settings.tracerRangeMeters;
-      this.tracerMesh.position.set(t.x + t.dirX * range * 0.5, t.y, t.z + t.dirZ * range * 0.5);
-      this.tracerMesh.scale.set(range, 1, 1);
+      const stop = system.tracerStopDistance();
+      this.tracerMesh.position.set(t.x + t.dirX * stop * 0.5, t.y, t.z + t.dirZ * stop * 0.5);
+      this.tracerMesh.scale.set(Math.max(0.001, stop), 1, 1);
       this.tracerMesh.rotation.set(0, Math.atan2(-t.dirZ, t.dirX), 0);
       (this.tracerMesh.material as MeshBasicMaterial).opacity = alpha;
       this.tracerMesh.visible = true;
+      // impact spark marks where the shot actually stopped.
+      this.impactSpark.position.set(t.x + t.dirX * stop, t.y, t.z + t.dirZ * stop);
+      (this.impactSpark.material as MeshBasicMaterial).opacity = alpha;
+      this.impactSpark.visible = true;
     } else {
       this.tracerMesh.visible = false;
+      this.impactSpark.visible = false;
     }
   }
 }

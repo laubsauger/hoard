@@ -2,6 +2,7 @@
 
 export {
   buildTestBlock,
+  isWalkableRadius,
   TEST_BLOCK_WORLD_VERSION,
   REGION_ROOM_A,
   REGION_ROOM_B,

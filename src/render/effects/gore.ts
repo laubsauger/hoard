@@ -5,7 +5,7 @@
 // 0 fully suppresses, 1 is full. Pure logic (no GPU); the InstancedMesh owner is GoreRenderer (V24).
 
 import { InstancedMesh, PlaneGeometry, MeshBasicMaterial } from 'three';
-import type { VisualEvent } from '../../game/core/contracts/events';
+import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -23,6 +23,8 @@ export interface GoreParticle {
   /** Normalized impact direction (spray/mist travel + sever fling). */
   dirX: number;
   dirZ: number;
+  /** Struck anatomical region — drives the spawn world height of the spray (head/torso/leg, V48). */
+  region: AnatomyRegion;
   /** Spawn energy 0..1 (weapon energy / impact strength), already gore-intensity scaled. */
   energy: number;
   /** Particle count to render for this record (sprays), distance + intensity scaled. */
@@ -57,7 +59,7 @@ class GorePoolRing {
   constructor(capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 0) throw new Error(`gore pool capacity must be a non-negative integer, got ${capacity}`);
     this.records = Array.from({ length: capacity }, () => ({
-      active: false, kind: 'spray' as GoreKind, x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, energy: 0, particles: 0, seq: 0, age: 0,
+      active: false, kind: 'spray' as GoreKind, x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, region: 'torsoUpper' as AnatomyRegion, energy: 0, particles: 0, seq: 0, age: 0,
     }));
   }
 
@@ -115,21 +117,32 @@ export class GoreSystem {
 
     switch (event.kind) {
       case 'hitReaction':
-        // Directional spray driven by impact direction + weapon energy.
-        return this.spawn('spray', { x: 0, y: 0, z: 0, dirX: event.dirX, dirZ: event.dirZ, energy: event.energy }, distanceMeters, goreIntensity);
+        // Directional spray driven by impact direction + weapon energy, at the struck region's height.
+        return this.spawn('spray', { x: 0, y: 0, z: 0, dirX: event.dirX, dirZ: event.dirZ, region: event.region, energy: event.energy }, distanceMeters, goreIntensity);
       case 'bloodSpray':
-        return this.spawn('spray', { x: event.x, y: event.y, z: event.z, dirX: event.dirX, dirZ: event.dirZ, energy: 1 }, distanceMeters, goreIntensity);
+        return this.spawn('spray', { x: event.x, y: event.y, z: event.z, dirX: event.dirX, dirZ: event.dirZ, region: 'torsoUpper', energy: 1 }, distanceMeters, goreIntensity);
       case 'partDetached':
         // Sever silhouette marker (the detached part itself is a pooled prop owned by sim/anatomy).
-        return this.spawn('sever', { x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, energy: 1 }, distanceMeters, goreIntensity);
+        return this.spawn('sever', { x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, region: event.region, energy: 1 }, distanceMeters, goreIntensity);
       default:
         return null; // soundEmitted etc. are not gore.
     }
   }
 
+  /**
+   * Spawn a persistent flattened ground splat at the projected impact point (V48/B14). Distinct from the
+   * airborne spray: it is a single horizontal decal that fades slowly. gore-intensity gated like ingest().
+   */
+  spawnStain(x: number, z: number, energy: number, distanceMeters: number, goreIntensity: number): GoreParticle | null {
+    if (goreIntensity < 0 || goreIntensity > 1) throw new Error(`goreIntensity must be in [0,1], got ${goreIntensity}`);
+    if (!Number.isFinite(distanceMeters) || distanceMeters < 0) throw new Error(`distanceMeters must be a non-negative finite number, got ${distanceMeters}`);
+    if (goreIntensity === 0) return null; // V29 — fully suppressed.
+    return this.spawn('stain', { x, y: 0, z, dirX: 0, dirZ: 0, region: 'torsoLower', energy }, distanceMeters, goreIntensity);
+  }
+
   private spawn(
     kind: GoreKind,
-    p: { x: number; y: number; z: number; dirX: number; dirZ: number; energy: number },
+    p: { x: number; y: number; z: number; dirX: number; dirZ: number; region: AnatomyRegion; energy: number },
     distanceMeters: number,
     goreIntensity: number,
   ): GoreParticle | null {
@@ -149,6 +162,7 @@ export class GoreSystem {
     rec.z = p.z;
     rec.dirX = p.dirX;
     rec.dirZ = p.dirZ;
+    rec.region = p.region;
     rec.energy = p.energy * goreIntensity;
     rec.particles = particles;
     rec.seq = ++this.seq;
@@ -165,15 +179,18 @@ export class GoreSystem {
    * Age every active record and recycle any that have outlived `lifetimeSeconds` (B7). Pure book-keeping
    * over the fixed pools — no allocation. Returns the number still active after the sweep.
    */
-  update(dtSeconds: number, lifetimeSeconds: number): number {
+  update(dtSeconds: number, lifetimeSeconds: number, stainLifetimeSeconds = lifetimeSeconds): number {
     if (dtSeconds < 0) throw new Error(`dtSeconds must be non-negative, got ${dtSeconds}`);
     if (lifetimeSeconds <= 0) throw new Error(`lifetimeSeconds must be positive, got ${lifetimeSeconds}`);
+    if (stainLifetimeSeconds <= 0) throw new Error(`stainLifetimeSeconds must be positive, got ${stainLifetimeSeconds}`);
     let active = 0;
     for (const kind of ['spray', 'stain', 'sever'] as const) {
+      // Ground splats persist far longer than airborne sparks (V48 readable stain).
+      const life = kind === 'stain' ? stainLifetimeSeconds : lifetimeSeconds;
       for (const r of this.poolFor(kind).records) {
         if (!r.active) continue;
         r.age += dtSeconds;
-        if (r.age >= lifetimeSeconds) r.active = false;
+        if (r.age >= life) r.active = false;
         else active += 1;
       }
     }

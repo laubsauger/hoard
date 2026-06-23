@@ -79,6 +79,27 @@ export interface TestBlock {
 }
 
 /**
+ * Radius-aware walkability (T58/V42): a body of radius `r` may occupy (x,z) only if its centre AND its
+ * four cardinal rim points are all walkable — so no part of the circle pokes into a wall/closed-door/
+ * boarded/obstructed cell. Cheap 5-sample approximation; the integrator rejects or slides on failure so
+ * bodies never clip half into a wall. Composes the scene's own `isWalkableWorld` (one source of truth).
+ */
+export function isWalkableRadius(
+  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  x: number,
+  z: number,
+  r: number,
+): boolean {
+  return (
+    scene.isWalkableWorld(x, z) &&
+    scene.isWalkableWorld(x + r, z) &&
+    scene.isWalkableWorld(x - r, z) &&
+    scene.isWalkableWorld(x, z + r) &&
+    scene.isWalkableWorld(x, z - r)
+  );
+}
+
+/**
  * Build a fresh BASE world (immutable authored geometry). Reload reconstructs this and re-applies the
  * compact delta on top (V9) — the base is never persisted, only re-built here.
  */

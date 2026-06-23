@@ -59,6 +59,7 @@ import type { QualityTier } from '@/config/types';
 import { CombatSystem, type ShotResult } from '@/game/combat';
 import {
   buildTestBlock,
+  isWalkableRadius,
   REGION_ROOM_A,
   REGION_ROOM_B,
   type TestBlock,
@@ -229,6 +230,7 @@ export class GameRuntime {
       clock: this.clock,
       combatCfg: this.combatCfg,
       perception: this.perception,
+      agentRadius: this.collision.defaultAgentRadius,
       playerEntityId: this.playerEntity as number,
       getPlayerPos: () => this.playerPos,
       getTargetSlot: () => this.targetSlot,
@@ -375,16 +377,18 @@ export class GameRuntime {
     const stepZ = (dirZ / len) * speed * dtSeconds;
     const nx = this.playerPos.x + stepX;
     const nz = this.playerPos.z + stepZ;
-    if (this.scene.isWalkableWorld(nx, nz)) {
+    // T58/V42: radius-aware so the player body never clips half into a wall.
+    const r = this.playerCfg.bodyRadiusMeters;
+    if (isWalkableRadius(this.scene, nx, nz, r)) {
       this.playerPos = { x: nx, y: this.playerPos.y, z: nz };
       return true;
     }
     // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
-    if (this.scene.isWalkableWorld(nx, this.playerPos.z)) {
+    if (isWalkableRadius(this.scene, nx, this.playerPos.z, r)) {
       this.playerPos = { x: nx, y: this.playerPos.y, z: this.playerPos.z };
       return true;
     }
-    if (this.scene.isWalkableWorld(this.playerPos.x, nz)) {
+    if (isWalkableRadius(this.scene, this.playerPos.x, nz, r)) {
       this.playerPos = { x: this.playerPos.x, y: this.playerPos.y, z: nz };
       return true;
     }
@@ -497,6 +501,11 @@ export class GameRuntime {
       }
       case 'board':
       case 'reinforce': {
+        // B17/V1: a breached (or empty) cell cannot be reinforced — `wall.reinforce` THROWS on it. Return a
+        // graceful command failure instead of letting the exception crash the UI ("Board wall" error).
+        if (cell.breached) {
+          return { ok: false, id: cmd.id, reason: `cannot board a breached cell ${cmd.cell}` };
+        }
         this.scene.wall.reinforce(cmd.cell, this.scene.wall.structures.defaultCellStrength);
         return { ok: true, id: cmd.id };
       }
@@ -827,7 +836,8 @@ export class GameRuntime {
     for (let attempt = 0; attempt < MAX_SPAWN_RESAMPLES; attempt++) {
       const x = cx + (this.rand() * 2 - 1) * radius;
       const z = cz + (this.rand() * 2 - 1) * radius;
-      if (this.scene.isWalkableWorld(x, z)) return { x, z };
+      // T58/V42: spawn clear of walls (radius-aware) so a body never starts half-embedded.
+      if (isWalkableRadius(this.scene, x, z, this.collision.defaultAgentRadius)) return { x, z };
     }
     // No silent fallback: a spawn area that cannot place a body is a content error (V4).
     throw new Error(`could not find a walkable spawn within ${radius}m of (${cx},${cz})`);

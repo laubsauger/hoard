@@ -17,7 +17,7 @@ import {
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
-import type { TestBlock, Vec3 } from '@/game/scene';
+import { isWalkableRadius, type TestBlock, type Vec3 } from '@/game/scene';
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
@@ -47,6 +47,8 @@ export interface HordeSimulationDeps {
   readonly clock: FixedClock;
   readonly combatCfg: ResolvedDomain<typeof combatConfig>;
   readonly perception: ResolvedDomain<typeof perceptionConfig>;
+  /** Agent circle-proxy radius for radius-aware static collision (T58/V42 — no clipping into walls). */
+  readonly agentRadius: number;
   /** Player entity id stamped into the SoA stimulus column when a zombie senses the player in range (V14). */
   readonly playerEntityId: number;
   /** Live player position (GameRuntime owns it; the horde only reads it — never the omniscient coord, V14). */
@@ -65,6 +67,9 @@ export class HordeSimulation {
   /** Sound-attraction lure: while active the WHOLE horde reroutes to the loudest perceived sound (V15). */
   private soundLureCell: number | null = null;
   private soundLureUntilTick = -1;
+  /** True when ANY zombie currently senses the player by sight (set by stepPerception). Sight overrides a
+   *  stale sound lure (V14/B16) — you can't walk past a horde that sees you while it chases an old gunshot. */
+  private playerVisibleToHorde = false;
 
   // Reused per-tick work buffers for the penetration-resolution pass — pooled so the everyTick step
   // allocates nothing in steady state (keeps the crowd-scale benchmark's p99 free of GC spikes).
@@ -76,7 +81,7 @@ export class HordeSimulation {
 
   /** everyTick: shared-flow steering + movement integrate (V12/V15/V19). */
   stepMovement(): void {
-    const { zombies, spatial, scene, flowCache, combatCfg, clock } = this.d;
+    const { zombies, spatial, scene, flowCache, combatCfg, clock, agentRadius } = this.d;
     const targetCell = this.flowTargetCell();
     const field = flowCache.get(scene.navGrid, targetCell, MOVEMENT_PROFILE);
     const dt = clock.tickSeconds;
@@ -100,11 +105,26 @@ export class HordeSimulation {
       }
       const nx = pos[0] + dirX * speed * dt;
       const nz = pos[2] + dirZ * speed * dt;
-      if (scene.isWalkableWorld(nx, nz)) {
-        zombies.setPosition(slot, nx, pos[1], nz);
+      // T58/V42: radius-aware static collision + wall-slide so a body never clips half into a wall.
+      let mx = pos[0];
+      let mz = pos[2];
+      let moved = false;
+      if (isWalkableRadius(scene, nx, nz, agentRadius)) {
+        mx = nx;
+        mz = nz;
+        moved = true;
+      } else if (isWalkableRadius(scene, nx, pos[2], agentRadius)) {
+        mx = nx;
+        moved = true;
+      } else if (isWalkableRadius(scene, pos[0], nz, agentRadius)) {
+        mz = nz;
+        moved = true;
+      }
+      if (moved) {
+        zombies.setPosition(slot, mx, pos[1], mz);
         zombies.setHeading(slot, Math.atan2(dirZ, dirX));
         zombies.setVelocity(slot, dirX * speed, 0, dirZ * speed);
-        spatial.update(slot, nx, nz);
+        spatial.update(slot, mx, mz);
       } else {
         zombies.setVelocity(slot, 0, 0, 0);
       }
@@ -218,7 +238,9 @@ export class HordeSimulation {
   /** The shared flow-field target this tick: the active sound lure if any, else the live player cell. */
   flowTargetCell(): number {
     const { scene, clock, getPlayerPos } = this.d;
-    if (this.soundLureCell !== null && clock.tick <= this.soundLureUntilTick) {
+    // B16/V14: sight beats a stale sound lure. The lure only steers the horde while NO zombie can see the
+    // player; the moment any does, the shared field retargets onto the player (drop the lure).
+    if (!this.playerVisibleToHorde && this.soundLureCell !== null && clock.tick <= this.soundLureUntilTick) {
       return this.soundLureCell;
     }
     this.soundLureCell = null;
@@ -232,10 +254,14 @@ export class HordeSimulation {
     const { zombies, perception, playerEntityId, getPlayerPos } = this.d;
     const p = getPlayerPos();
     const sight = perception.sightRange;
+    let seen = false;
     zombies.forEachAlive((slot) => {
-      const dist = planarDistanceToPlayer(zombies, slot, p.x, p.z);
-      zombies.setStimulus(slot, dist <= sight ? playerEntityId : -1);
+      const inSight = planarDistanceToPlayer(zombies, slot, p.x, p.z) <= sight;
+      zombies.setStimulus(slot, inSight ? playerEntityId : -1);
+      if (inSight) seen = true;
     });
+    // B16/V14: cache whether the horde sees the player so flowTargetCell can let sight override a stale lure.
+    this.playerVisibleToHorde = seen;
   }
 
   /** interval: tier assignment (V13), phase-offset so it never shares a tick with perception. */
