@@ -152,7 +152,9 @@ export class BlockScene {
     // key actually casts readable shadows (renderer.shadowMap is enabled in the WebGPU backend).
     {
       const ext = this.worldExtent();
-      const half = Math.max(ext.width, ext.depth) * 0.6;
+      // Cap the half-extent so the shadow map stays sharp; the frustum is re-centred on the player each
+      // frame (syncLighting) so it always covers the play area without a hard cut-off at world origin.
+      const half = Math.min(Math.max(ext.width, ext.depth) * 0.6, 55);
       const sc = this.sun.shadow.camera;
       sc.left = -half;
       sc.right = half;
@@ -172,6 +174,8 @@ export class BlockScene {
     this.scene.add(this.playerMesh);
 
     this.crowd = new Crowd(resolveCrowdSettings(this.tier), this.registry);
+    this.crowd.mesh.castShadow = true; // B13: the horde casts shadows too (was unset → zombies floated shadowless)
+    this.crowd.mesh.receiveShadow = true;
     this.scene.add(this.crowd.mesh);
 
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
@@ -460,8 +464,13 @@ export class BlockScene {
     const sky = computeSkyState(this.runtime.timeOfDay(), this.lighting, this.weatherCfg, severity);
 
     const dist = 60;
-    this.sun.position.set(-sky.direction.x * dist, -sky.direction.y * dist, -sky.direction.z * dist);
-    this.sun.target.position.set(0, 0, 0);
+    // B13: anchor the key + its shadow frustum to the player so cast shadows always cover the play area
+    // (the frustum is capped for sharpness; pinning it to world origin produced a hard shadow cut-off as
+    // the player walked away). Sun keeps its sky-driven direction, just translated onto the player.
+    const pl = this.runtime.player();
+    this.sun.position.set(pl.x - sky.direction.x * dist, -sky.direction.y * dist, pl.z - sky.direction.z * dist);
+    this.sun.target.position.set(pl.x, 0, pl.z);
+    this.sun.target.updateMatrixWorld();
     this.sun.intensity = sky.keyIntensity;
     this.sun.color.setHex(sky.isDay ? 0xfff2dc : 0xaebed8);
     // B6: floor the ambient/hemisphere fill so a low-key night spawn never crushes unlit faces to black.
