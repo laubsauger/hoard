@@ -347,11 +347,13 @@ export class Crowd {
       animPhase.element(instanceIndex).assign(phase);
       const bob = sin(phase.mul(TAU)).mul(bobMeters);
 
-      // Column-major TRS mat4: RotY(-heading) so the model forward (+X) FACES the movement direction
-      // heading=atan2(dirZ,dirX) — matches the limb rig (col0 → (c,0,+s)); the prior (c,0,-s) mirrored Z so
-      // the horde walked turned/sideways. Uniform scale, translate by position (+bob in y).
-      const c = cos(heading);
-      const s = sin(heading);
+      // Column-major TRS mat4. The rig's lateral axis is local +X (shoulders/hips) and its FORWARD is local
+      // +Z (depth); so to FACE the movement direction the yaw maps local +Z → heading, i.e. yaw = heading - 90°
+      // (was mapping local +X → heading, which pointed the shoulders along travel → the horde walked sideways).
+      // heading = atan2(dirZ,dirX). Must stay in lockstep with composeLimbMatrix's facing.
+      const facing = heading.sub(Math.PI / 2);
+      const c = cos(facing);
+      const s = sin(facing);
       cols[0]!.element(instanceIndex).assign(vec4(c.mul(scale), 0, s.mul(scale), 0));
       cols[1]!.element(instanceIndex).assign(vec4(0, scale, 0, 0));
       cols[2]!.element(instanceIndex).assign(vec4(s.mul(scale).negate(), 0, c.mul(scale), 0));

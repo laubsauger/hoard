@@ -132,26 +132,28 @@ describe('composeLimbMatrix — transform composition (V2)', () => {
     expect(m[13]).toBeCloseTo(1.2, 6); // py + offset.y
     expect(m[14]).toBeCloseTo(-7, 6);
     expect(m[15]).toBeCloseTo(1, 6);
-    // No rotation/swing: column 0 is the unscaled X axis.
-    expect(m[0]).toBeCloseTo(1, 6);
-    expect(m[2]).toBeCloseTo(0, 6);
+    // facing = heading - 90°: at heading 0 the figure faces +X, so its lateral local-X axis points along world
+    // -Z (shoulders PERPENDICULAR to travel — the fix for the sideways walk).
+    expect(m[0]).toBeCloseTo(0, 6);
+    expect(m[2]).toBeCloseTo(-1, 6);
   });
 
-  it('rotates the part offset by heading (yaw)', () => {
+  it('faces the travel direction with shoulders perpendicular (yaw)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
-    // heading = +90deg (moving +Z): the figure FACES +Z (forward +X → +Z), so a +X lateral offset swings to +Z.
+    // heading = +90deg (moving +Z): the figure FACES +Z. armRight is a +X LATERAL offset, so it stays at the
+    // figure's RIGHT SIDE (world +X) — NOT swung forward (that would be the sideways-walk bug).
     composeLimbMatrix(m, 0, [0, 0, 0], Math.PI / 2, 1, armRight, 0, 0, true);
-    expect(m[12]).toBeCloseTo(0, 5); // x offset rotated away
-    expect(m[14]).toBeCloseTo(0.34, 5); // now along +Z (faces the travel direction, not mirrored)
-    // Column 0 (forward +X) = [cos, 0, +sin] = [0, 0, 1] → points along +Z (the travel direction).
-    expect(m[0]).toBeCloseTo(0, 6);
-    expect(m[2]).toBeCloseTo(1, 6);
+    expect(m[12]).toBeCloseTo(0.34, 5); // lateral arm at +X (the side of a +Z-facing figure)
+    expect(m[14]).toBeCloseTo(0, 5); // NOT forward
+    // local X (lateral) maps to world +X when facing +Z.
+    expect(m[0]).toBeCloseTo(1, 6);
+    expect(m[2]).toBeCloseTo(0, 6);
   });
 
   it('applies uniform scale to the basis and offset', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
     composeLimbMatrix(m, 0, [0, 0, 0], 0, 2, torso, 0, 0, true);
-    expect(m[0]).toBeCloseTo(2, 6); // scaled X axis
+    expect(m[2]).toBeCloseTo(-2, 6); // scaled lateral axis (heading 0 → local X points along -Z), scaled ×2
     expect(m[13]).toBeCloseTo(2.4, 6); // offset.y * scale
   });
 

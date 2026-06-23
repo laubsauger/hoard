@@ -149,11 +149,13 @@ export function composeLimbMatrix(
     for (let i = 0; i < FLOATS_PER_MAT4; i++) out[base + i] = 0;
     return;
   }
-  const cy = Math.cos(heading);
-  // RotY(-heading): heading = atan2(dirZ,dirX) is the movement direction, and three's Y-rotation maps the
-  // model's forward (+X) to (cos a, -sin a) in XZ — so we need a = -heading for the figure to FACE where it
-  // walks (was +heading → mirrored in Z → figures looked rotated/sliding diagonally). Negate sin only.
-  const sy = -Math.sin(heading);
+  // The rig's lateral axis is local +X (shoulders/hips) and its FORWARD is local +Z (depth). Yaw maps local
+  // +Z → the movement heading, i.e. facing = heading - 90° (was mapping local +X → heading, pointing the
+  // shoulders along travel → figures walked sideways). The walk swing stays about local X (lateral), so it
+  // reads as forward-back stepping. Must stay in lockstep with the box crowd compute's `facing`.
+  const facing = heading - Math.PI / 2;
+  const cy = Math.cos(facing);
+  const sy = -Math.sin(facing);
   const sw = swing * placement.swingSign;
   const ca = Math.cos(sw);
   const sa = Math.sin(sw);
