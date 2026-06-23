@@ -35,9 +35,6 @@ import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
-import type { VisionCull } from '../crowd/visionCull';
-import { instantaneousReveal, PerceptionMemory, type RevealParams } from '../crowd/perceptionMemory';
-import { ZombieState } from '../../game/simulation';
 import type { DebugFlags } from '../../diagnostics/flags';
 import {
   resolveSurfaceVisibility,
@@ -65,6 +62,7 @@ import { buildingIndexAt } from './systems/playerLocation';
 import { BreachSystem } from './systems/breachSystem';
 import { DoorSystem } from './systems/doorSystem';
 import { WindowSystem } from './systems/windowSystem';
+import { VisionCullSystem } from './systems/visionCullSystem';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -75,7 +73,7 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
-import { resolveHouseVariation, hasLineOfSight, rayDistanceToWall } from '../../game/scene';
+import { resolveHouseVariation, rayDistanceToWall } from '../../game/scene';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -150,11 +148,6 @@ export class BlockScene {
   /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
   private aoContact: Mesh | null = null;
   private readonly fadeSurfaces: FadeSurface[] = [];
-  /** PLAYER PERCEPTION v2 (V62): RENDER-side recently-seen memory + a per-slot reveal scratch buffer. Both are
-   *  view state only (fed by frame dt) and NEVER read back into the deterministic sim (V26). Sized to the SoA
-   *  capacity so a reveal exists for every possible zombie slot with no per-frame allocation (V24). */
-  private readonly perceptionMemory: PerceptionMemory;
-  private readonly perceptionReveal: Float32Array;
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
   /** T46 door leaves: each leaf hangs off a hinge PIVOT group; syncDoors rotates the pivot toward the door's
@@ -170,6 +163,9 @@ export class BlockScene {
     swingSpeedRadiansPerSecond: this.structures.doorSwingSpeedRadiansPerSecond,
   });
   private readonly windows = new WindowSystem(this.windowMeshes);
+  /** PLAYER PERCEPTION v2 (V62): owns the RENDER-side recently-seen memory + per-slot reveal buffer (V26).
+   *  Assigned in the constructor (needs the live SoA capacity). */
+  private readonly visionCull: VisionCullSystem;
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -196,9 +192,16 @@ export class BlockScene {
     this.accessibility = opts.accessibility ?? DEFAULT_ACCESSIBILITY;
     this.basePlayerEmissive = PLAYER_BASE_EMISSIVE;
     this.navCellSize = this.runtime.scene.navGrid.settings.navCellSize;
-    const zombieCapacity = this.runtime.zombies.capacity;
-    this.perceptionMemory = new PerceptionMemory(zombieCapacity);
-    this.perceptionReveal = new Float32Array(zombieCapacity);
+    this.visionCull = new VisionCullSystem(this.runtime.zombies.capacity, {
+      playerFieldOfViewDegrees: this.perception.playerFieldOfViewDegrees,
+      playerVisionRange: this.perception.playerVisionRange,
+      playerVisionRangeFadeMeters: this.perception.playerVisionRangeFadeMeters,
+      playerVisionConeFadeDegrees: this.perception.playerVisionConeFadeDegrees,
+      playerNearAwarenessRadiusMeters: this.perception.playerNearAwarenessRadiusMeters,
+      hearingRange: this.perception.hearingRange,
+      soundWallOcclusion: this.perception.soundWallOcclusion,
+      playerSightMemorySeconds: this.perception.playerSightMemorySeconds,
+    });
 
     this.scene.background = new Color(0x0b0d0a);
     this.fog = new Fog(0x0b0d0a, 1, 400);
@@ -372,7 +375,7 @@ export class BlockScene {
     // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport). When the
     // vision-cone fog-of-war is on, only members inside the player's wedge (cone+range+LOS) are packed (T98).
     // The construction-time prime / rebind (no flags) packs the FULL crowd — the cull is a live-loop concern.
-    const visibility = flags && this.visionConeCullOn ? this.buildVisionCull(dtSeconds) : undefined;
+    const visibility = flags && this.visionConeCullOn ? this.visionCull.build(this.runtime, dtSeconds) : undefined;
     this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, visibility);
 
     const p = this.runtime.player();
@@ -425,67 +428,6 @@ export class BlockScene {
     return this.exposure;
   }
 
-  /**
-   * Build this frame's player vision wedge for the crowd fog-of-war cull (T98): the forward cone (player FOV)
-   * + reveal range + a wall line-of-sight test, all from typed config + the live player pose. Reuses the
-   * canonical V14 cone predicate (via visionCullFade) + the scene LOS walk so it matches the dev overlay cone.
-   */
-  private buildVisionCull(dtSeconds: number): VisionCull {
-    const p = this.runtime.player();
-    const scene = this.runtime.scene;
-    const los = (x0: number, z0: number, x1: number, z1: number): boolean => hasLineOfSight(scene, x0, z0, x1, z1);
-    // PLAYER PERCEPTION v2 (V62): the cone wedge PLUS the near/noise reveal params. The combined per-slot reveal
-    // is max(cone, near, memory, noise) — see perceptionMemory.ts. LOS routes through the STRUCTURAL hasLineOfSight
-    // (nav grid), never mesh opacity, so a faded cutaway wall can't reveal the zombies behind it (V63).
-    const params: RevealParams = {
-      px: p.x,
-      pz: p.z,
-      heading: this.runtime.playerAim(),
-      fovHalf: (this.perception.playerFieldOfViewDegrees * Math.PI) / 360,
-      range: this.perception.playerVisionRange,
-      edgeBandMeters: this.perception.playerVisionRangeFadeMeters,
-      edgeBandRadians: (this.perception.playerVisionConeFadeDegrees * Math.PI) / 180,
-      nearRadiusMeters: this.perception.playerNearAwarenessRadiusMeters,
-      hearingRange: this.perception.hearingRange,
-      soundWallOcclusion: this.perception.soundWallOcclusion,
-      lineOfSight: los,
-    };
-
-    // Precompute the per-slot reveal once per frame (read by BOTH packing paths so they always agree), folding in
-    // the stateful recently-seen memory. RENDER-side only — no sim state touched (V26). Matches packing's slot
-    // iteration (0..count) exactly so reveal[slot] aligns with the slot each packer reads.
-    const zombies = this.runtime.zombies;
-    const count = zombies.count;
-    const views = zombies.views;
-    const position = views.position as Float32Array;
-    const alive = views.alive as Uint8Array;
-    const state = views.state as Uint8Array;
-    const memSec = this.perception.playerSightMemorySeconds;
-    const reveal = this.perceptionReveal;
-    for (let slot = 0; slot < count; slot++) {
-      let inst = 0;
-      if (alive[slot] === 1) {
-        const x = position[slot * 3]!;
-        const z = position[slot * 3 + 2]!;
-        const st = state[slot]!;
-        const loud = st === ZombieState.Pursue || st === ZombieState.Attack;
-        inst = instantaneousReveal(x, z, loud, params);
-      }
-      reveal[slot] = this.perceptionMemory.step(slot, inst, dtSeconds, memSec);
-    }
-
-    return {
-      px: params.px,
-      pz: params.pz,
-      heading: params.heading,
-      fovHalf: params.fovHalf,
-      range: params.range,
-      edgeBandMeters: params.edgeBandMeters,
-      edgeBandRadians: params.edgeBandRadians,
-      lineOfSight: los,
-      reveal,
-    };
-  }
 
   /**
    * Drive the player flashlight (T98): anchor it at the player, aim it along playerAim() so its cone covers
