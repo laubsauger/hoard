@@ -259,6 +259,10 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
   stampShell(build, FEATURE_H_MIN_CX, FEATURE_H_MIN_CY, FEATURE_H_MAX_CX, FEATURE_H_MAX_CY, FEATURE_DOOR_CX, FEATURE_DOOR_CY);
   // the dividing wall column (interior rows) — starts fully intact (blocked); the section breaches open.
   for (let cy = FEATURE_H_MIN_CY + 1; cy <= FEATURE_H_MAX_CY - 1; cy++) navGrid.block(FEATURE_WALL_CX, cy);
+  // The player's house starts SHELTERED: close (block) its front door so the beelining horde can't path
+  // straight into the player's room — it mills at the walls instead, so the player can observe + test the
+  // idle->attack trigger rather than being swarmed at spawn. Breaching the dividing wall / a door opens it.
+  navGrid.block(FEATURE_DOOR_CX, FEATURE_DOOR_CY);
   build.buildings.push({
     bounds: { minCx: FEATURE_H_MIN_CX, maxCx: FEATURE_H_MAX_CX, minCy: FEATURE_H_MIN_CY, maxCy: FEATURE_H_MAX_CY },
     storeys: 2,
