@@ -40,12 +40,6 @@ export interface LimbPackOptions {
    * not redraw it) but writes no instance. Undefined = no cull.
    */
   readonly visibility?: VisionCull | undefined;
-  /**
-   * Optional per-figure OPACITY output (V65). When given, the reveal `fade` is written here per LIVE figure
-   * instead of being baked into the figure SCALE — so limbed figures blend in/out via ALPHA (matching the box
-   * crowd) rather than shrinking. Entries past liveCount are stale (mesh.count bounds the draw).
-   */
-  readonly outFade?: Float32Array | undefined;
 }
 
 export interface LimbPackResult {
@@ -68,7 +62,7 @@ export function packLimbInputs(
   outPhase: Float32Array,
   opts: LimbPackOptions,
 ): LimbPackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility, outFade } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility } = opts;
   if (count < 0) throw new Error(`count must be >= 0, got ${count}`);
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
   if (outPose.length < capacity * FLOATS_PER_LIMB_POSE) {
@@ -110,8 +104,10 @@ export function packLimbInputs(
     outPose[p + 1] = position[slot * 3 + 1]!;
     outPose[p + 2] = position[slot * 3 + 2]!;
     outPose[p + 3] = heading[slot]!;
-    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax); // V65: full scale; fade → alpha below
-    if (outFade) outFade[live] = fade;
+    // The limbed figure path keeps the SCALE fade (the per-instance alpha used by the box crowd would need a
+    // 9th vertex buffer here — over the WebGPU 8-buffer limit — since limbs use a real instanceMatrix+color).
+    // Limbed figures are few + usually at full reveal near the player, so the slight shrink is rarely seen.
+    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax) * fade;
     outAnatomy[live] = anatomyFlags[slot]!;
     outPhase[live] = animPhase[slot]!;
     live++;

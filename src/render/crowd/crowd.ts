@@ -12,7 +12,7 @@
 // We go further: the instance transform is no longer a CPU-built instanceMatrix at all. It is produced by a
 // compute shader into a storage buffer and consumed via material.positionNode (the canonical WebGPU/TSL path).
 
-import { BoxGeometry, Color, DynamicDrawUsage, InstancedBufferAttribute, InstancedMesh, Matrix4, type Object3D } from 'three';
+import { BoxGeometry, Color, InstancedMesh, Matrix4, type Object3D } from 'three';
 import {
   MeshStandardNodeMaterial,
   type ComputeNode,
@@ -21,7 +21,6 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
-  attribute,
   cos,
   float,
   fract,
@@ -136,10 +135,6 @@ export class CrowdLimbs {
   // Per-frame limbed inputs (compacted to the front) + scratch for instance-matrix composition.
   private readonly pose: Float32Array;
   private readonly scaleArr: Float32Array;
-  /** Per-figure reveal alpha (V65) — copied into every part's `instFade` attribute so figures blend, not shrink. */
-  private readonly fadeArr: Float32Array;
-  /** Per-part `instFade` InstancedBufferAttribute (one per body-part geometry); refilled from fadeArr each frame. */
-  private readonly fadeAttrs: InstancedBufferAttribute[] = [];
   private readonly anatomy: Uint32Array;
   private readonly phase: Float32Array;
   private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
@@ -179,20 +174,11 @@ export class CrowdLimbs {
       // Pre-create instanceColor (r184 binding-safe) so the color attribute exists before first draw.
       for (let i = 0; i < this.budget; i++) mesh.setColorAt(i, baseColor);
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      // V65: per-instance reveal alpha as an instanced attribute the shared material reads (opacityNode below).
-      const fadeAttr = new InstancedBufferAttribute(new Float32Array(this.budget).fill(1), 1);
-      fadeAttr.setUsage(DynamicDrawUsage);
-      geo.setAttribute('instFade', fadeAttr);
-      this.fadeAttrs.push(fadeAttr);
       registry.track(mesh, 'buffer', `crowd.limbMesh.${part.id}`);
       parent.add(mesh);
       meshes.push(mesh);
     }
     this.meshes = meshes;
-    // V65: limbed figures blend in/out via ALPHA (matching the box crowd) instead of shrinking. The shared
-    // material reads each part geometry's per-instance `instFade` attribute as opacity; transparent to composite.
-    this.material.transparent = true;
-    this.material.opacityNode = attribute('instFade', 'float');
     this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign }));
     this.severBits = CROWD_LIMB_PARTS.map((p) => {
       const region = LIMB_REGION[p.id];
@@ -201,7 +187,6 @@ export class CrowdLimbs {
 
     this.pose = new Float32Array(this.budget * FLOATS_PER_LIMB_POSE);
     this.scaleArr = new Float32Array(this.budget);
-    this.fadeArr = new Float32Array(this.budget).fill(1);
     this.anatomy = new Uint32Array(this.budget);
     this.phase = new Float32Array(this.budget);
   }
@@ -220,7 +205,6 @@ export class CrowdLimbs {
       scaleMax: this.scaleMax,
       maxSimTier: this.maxSimTier,
       visibility,
-      outFade: this.fadeArr,
     });
 
     for (let part = 0; part < this.meshes.length; part++) {
@@ -249,10 +233,6 @@ export class CrowdLimbs {
         this.mat4.fromArray(this.matScratch);
         mesh.setMatrixAt(i, this.mat4);
       }
-      // V65: copy this frame's per-figure reveal alpha into the part's instanced opacity attribute.
-      const fa = this.fadeAttrs[part]!;
-      (fa.array as Float32Array).set(this.fadeArr.subarray(0, liveCount));
-      fa.needsUpdate = true;
       mesh.count = liveCount;
       mesh.instanceMatrix.needsUpdate = true;
     }
@@ -286,10 +266,6 @@ export class Crowd {
   private readonly metaInput: Float32Array;
   private readonly poseBuffer: StorageBufferNode<'vec4'>;
   private readonly metaBuffer: StorageBufferNode<'vec4'>;
-  /** Per-instance reveal alpha (V65): the cone/near/memory/noise fade, applied as material opacity so members
-   *  blend in/out smoothly instead of shrinking. Re-uploaded each frame like pose/meta. */
-  private readonly fadeInput: Float32Array;
-  private readonly fadeBuffer: StorageBufferNode<'float'>;
   /** Per-frame real delta fed to the GPU phase advance. */
   private readonly dtUniform: UniformNode<'float', number>;
 
@@ -315,9 +291,6 @@ export class Crowd {
     this.metaInput = new Float32Array(cap * FLOATS_PER_META);
     this.poseBuffer = registry.track(instancedArray(this.poseInput, 'vec4'), 'buffer', 'crowd.poseBuffer');
     this.metaBuffer = registry.track(instancedArray(this.metaInput, 'vec4'), 'buffer', 'crowd.metaBuffer');
-    // V65: per-instance reveal alpha. Default 1 (fully visible) so an un-culled horde draws solid.
-    this.fadeInput = new Float32Array(cap).fill(1);
-    this.fadeBuffer = registry.track(instancedArray(this.fadeInput, 'float'), 'buffer', 'crowd.fadeBuffer');
 
     // animPhase: GPU-resident animation phase state (V2). Seeded with per-slot offsets so instances are not
     // in lockstep, then advanced on the GPU each frame. The compute output is the per-instance transform
@@ -383,7 +356,10 @@ export class Crowd {
     // smoothly instead of shrinking. transparent so alpha<1 composites; depthWrite kept so the solid bulk
     // (alpha 1) still occludes normally — the few fading members blend over what's behind them.
     this.material.transparent = true;
-    this.material.opacityNode = this.fadeBuffer.toAttribute();
+    // V65: reveal fade rides in meta.w (no extra vertex buffer — a separate fade attribute pushed the box over
+    // the WebGPU 8-vertex-buffer limit). Members blend in/out via alpha instead of shrinking; transparent so
+    // alpha<1 composites, depthWrite kept so the solid bulk still occludes normally.
+    this.material.opacityNode = this.metaBuffer.toAttribute().w;
   }
 
   /**
@@ -404,15 +380,14 @@ export class Crowd {
       limbedMaxSimTier: this.settings.limbedMaxSimTier,
       limbedBudget: this.settings.limbedBudget,
       visibility,
-      outFade: this.fadeInput,
     });
     this.limbs.update(views, count, visibility);
     this.mesh.count = liveCount;
     // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
-    // backend re-uploads the freshly compacted inputs this frame. The compute reads these next.
+    // backend re-uploads the freshly compacted inputs this frame. The compute reads these next. (meta carries
+    // the V65 reveal alpha in .w.)
     (this.poseBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
     (this.metaBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
-    (this.fadeBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
     this.dtUniform.value = dtSeconds;
     return liveCount;
   }

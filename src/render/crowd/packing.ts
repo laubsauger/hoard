@@ -10,7 +10,7 @@ import { visionCullFade, type VisionCull } from './visionCull';
 
 /** 4 floats of per-instance pose input: [posX, posY, posZ, headingRadians]. */
 export const FLOATS_PER_POSE = 4;
-/** 4 floats of per-instance meta input: [scale, variationSeed, archetype, animState]. */
+/** 4 floats of per-instance meta input: [scale, variationSeed, archetype, revealAlpha (V65, was animState)]. */
 export const FLOATS_PER_META = 4;
 
 function requireView<T>(views: FieldViews, name: string): T {
@@ -56,13 +56,6 @@ export interface PackOptions {
    * line-of-sight and fade those near the edges. Undefined = no cull (the whole horde draws).
    */
   readonly visibility?: VisionCull | undefined;
-  /**
-   * Optional per-instance OPACITY output (V65). When provided, the reveal `fade` (0..1 from cone/near/memory/
-   * noise) is written here PER LIVE INSTANCE instead of being baked into the instance SCALE — so the renderer
-   * fades members in/out via ALPHA (a smooth blend) rather than shrinking them (which read as jank). Compacted
-   * to the front like pose/meta; entries past liveCount are stale (mesh.count bounds the draw).
-   */
-  readonly outFade?: Float32Array | undefined;
 }
 
 export interface PackResult {
@@ -97,7 +90,6 @@ export function packCrowdInputs(
     limbedMaxSimTier = -1,
     limbedBudget = Infinity,
     visibility,
-    outFade,
   } = opts;
   if (count < 0 || count > capacity) throw new Error(`count ${count} exceeds capacity ${capacity}`);
   if (outPose.length < capacity * FLOATS_PER_POSE) {
@@ -112,7 +104,6 @@ export function packCrowdInputs(
   const position = requireView<Float32Array>(views, 'position');
   const heading = requireView<Float32Array>(views, 'heading');
   const archetype = requireView<Uint16Array>(views, 'archetype');
-  const animState = requireView<Uint8Array>(views, 'animState');
   const simTier = limbedMaxSimTier >= 0 ? requireView<Uint8Array>(views, 'simTier') : undefined;
 
   let live = 0;
@@ -156,8 +147,10 @@ export function packCrowdInputs(
     outMeta[m] = sc;
     outMeta[m + 1] = seed;
     outMeta[m + 2] = archetype[slot]!;
-    outMeta[m + 3] = animState[slot]!;
-    if (outFade) outFade[live] = fade;
+    // V65: per-instance reveal ALPHA rides in meta.w (formerly animState, which the GPU never reads) so the
+    // box crowd fades via opacity with NO extra vertex buffer — a separate fade attribute pushed the box to 9
+    // vertex buffers, over the WebGPU limit of 8. The material's opacityNode reads metaBuffer.toAttribute().w.
+    outMeta[m + 3] = fade;
 
     live++;
     if (live > capacity) throw new Error(`live instance count exceeded capacity ${capacity}`);

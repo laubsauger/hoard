@@ -83,11 +83,10 @@ describe('packCrowdInputs (V2/V3)', () => {
     expect(pose[2]).toBeCloseTo(5, 6);
   });
 
-  it('writes per-instance meta [scale, seed, archetype, animState]', () => {
+  it('writes per-instance meta [scale, seed, archetype, revealAlpha]', () => {
     const s = makeSoa();
     s.alive[0] = 1;
     s.archetype[0] = 4;
-    s.animState[0] = 2;
 
     const { pose, meta } = buffers();
     packCrowdInputs(s.soa.views, pose, meta, {
@@ -101,7 +100,7 @@ describe('packCrowdInputs (V2/V3)', () => {
     expect(meta[0]).toBeCloseTo(variationScale(seed, 16, 0.9, 1.1), 6);
     expect(meta[1]).toBe(seed);
     expect(meta[2]).toBe(4);
-    expect(meta[3]).toBe(2);
+    expect(meta[3]).toBe(1); // V65: meta.w = reveal alpha; full (1) when no vision cull is supplied
   });
 
   it('throws if count exceeds capacity (no silent drop, V4)', () => {
@@ -208,14 +207,12 @@ describe('packCrowdInputs (V2/V3)', () => {
     const s = makeSoa();
     s.alive[0] = 1; s.position[0] = 19; s.position[2] = 0; // just inside a 20m range with a 4m fade band
     const { pose, meta } = buffers();
-    const outFade = new Float32Array(CAP).fill(1);
     packCrowdInputs(s.soa.views, pose, meta, {
       count: 1, capacity: CAP, variationCount: 1, scaleMin: 1, scaleMax: 1,
-      outFade,
       visibility: { px: 0, pz: 0, heading: 0, fovHalf: Math.PI / 2, range: 20, edgeBandMeters: 4, edgeBandRadians: 0 },
     });
-    // (20 - 19) / 4 = 0.25 → V65: the fade lands on the per-instance ALPHA (outFade[0]), NOT the scale.
-    expect(outFade[0]).toBeCloseTo(0.25, 5);
+    // (20 - 19) / 4 = 0.25 → V65: the fade lands on the per-instance reveal ALPHA in meta.w, NOT the scale.
+    expect(meta[3]).toBeCloseTo(0.25, 5);
     expect(meta[0]).toBeCloseTo(1, 6); // scale stays full — members blend via alpha, they don't shrink
   });
 
