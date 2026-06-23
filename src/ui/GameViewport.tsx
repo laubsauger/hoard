@@ -9,18 +9,15 @@
 
 import { useEffect, useRef } from 'react';
 import { Mesh, Plane, Raycaster, Vector2, Vector3, type BufferGeometry, type Material, type Object3D } from 'three';
-import Stats from 'stats.js';
 import {
   RendererHost,
-  createWebGpuBackendFactory,
   detectQualityTier,
   applyTierOverride,
   CameraRig,
   resolveCameraSettings,
   type AdapterLimits,
 } from '../render/engine';
-import { resolve } from '../config/spec';
-import { renderingConfig } from '../config/domains/rendering';
+import { createDevStats, createRendererHost, startRendererHost, attachResize } from './viewport/rendererHost';
 import { combatConfig } from '../config/domains/combat';
 import { audioConfig } from '../config/domains/audio';
 import { weaponsConfig } from '../config/domains/weapons';
@@ -65,24 +62,6 @@ function accessibilityFromSettings(s: SettingsState): RenderAccessibility {
 }
 
 const DEG2RAD = Math.PI / 180;
-
-/**
- * Dev-only real-time perf meter (FPS / frame-ms / heap) over the live WebGPU frame loop. Established
- * stats.js panel, mounted top-right; click the panel to cycle FPS↔MS↔MB. Never ships to players
- * (gated on `import.meta.env.DEV`). True GPU-timestamp timing needs the engine to expose its
- * `WebGPURenderer`; until then this measures the real per-frame wall-clock of update+compute+render.
- */
-function createDevStats(): Stats | null {
-  if (!import.meta.env.DEV) return null;
-  const stats = new Stats();
-  stats.showPanel(0); // 0 = fps, 1 = ms, 2 = mb
-  const dom = stats.dom;
-  // z-index BELOW the UI modals (HUD 20 / pause 60 / settings 80) so the dev meter never overlaps a panel's
-  // controls (e.g. the settings close button, top-right). Visible during play; any open modal covers it.
-  dom.style.cssText = 'position:fixed;top:8px;right:8px;left:auto;z-index:15;cursor:pointer;';
-  document.body.appendChild(dom);
-  return stats;
-}
 
 /** The engine handle the React shell uses to issue slice-level intent (save/load/modify/weather). */
 export interface EngineHandle {
@@ -185,22 +164,8 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       runtime = new GameRuntime({ tier, adapter: adp, scene: district.block, sectors: district.sectors });
       runtime.spawnHorde(combat.gateZeroZombieCount, combat.gateZeroSpawnRadiusMeters);
 
-      host = new RendererHost({
-        factory: createWebGpuBackendFactory({ canvas }),
-        maxRecoveries: resolve(renderingConfig.deviceLossMaxRecoveries, tier),
-      });
-      try {
-        await host.init();
-      } catch (err) {
-        if (cancelled) return;
-        sessionStore.getState().setPhase('error');
-        onError?.(`WebGPU renderer failed to initialise: ${(err as Error).message}`);
-        return;
-      }
-      if (cancelled) {
-        host.dispose();
-        return;
-      }
+      host = createRendererHost(canvas, tier);
+      if (!(await startRendererHost(host, { onError, isCancelled: () => cancelled }))) return;
 
       // Accessibility (V29) resolved once + live-applied; shared by the scene and the gore views below.
       let access = accessibilityFromSettings(settingsStore.getState());
@@ -340,16 +305,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
 
-      const resize = (): void => {
-        const w = canvas.clientWidth || 1;
-        const h = canvas.clientHeight || 1;
-        host?.setSize(w, h);
-        host?.setPixelRatio(Math.min(window.devicePixelRatio, resolve(renderingConfig.pixelRatioMax, tier)));
-        camera.setAspect(w / h);
-      };
-      resize();
-      window.addEventListener('resize', resize);
-      cleanups.push(() => window.removeEventListener('resize', resize));
+      cleanups.push(attachResize(canvas, host, camera, tier));
 
       // ---- input: WASD move, mouse aim, click fire, Q/E rotate, +/- zoom, B breach, R board ----
       const onKeyDown = (e: KeyboardEvent): void => {
