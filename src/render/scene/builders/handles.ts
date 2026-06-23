@@ -32,6 +32,14 @@ export interface SectionMesh {
   readonly objects: Object3D[];
 }
 
+/** Static output of the house builder (per-building shell): the cutaway fade surfaces (upper walls + clapboard
+ *  + roofs) and the destructible section meshes. Push order matches the build loop (blockScene.test asserts the
+ *  fade-surface indices). Consumed per-frame by the cutaway + breach systems. */
+export interface HouseHandles {
+  readonly fadeSurfaces: FadeSurface[];
+  readonly sectionMeshes: SectionMesh[];
+}
+
 /** A hinged door leaf — the DoorSystem eases `current` toward the sim's open/closed target each frame. */
 export interface DoorLeaf {
   readonly navCell: number;
