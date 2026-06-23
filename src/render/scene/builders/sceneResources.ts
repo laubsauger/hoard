@@ -5,13 +5,19 @@
 
 import { MeshStandardMaterial, type BufferGeometry, type BoxGeometry } from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { ResourceRegistry } from '../../engine/resources';
+import type { Disposable, ResourceKind, ResourceRegistry } from '../../engine/resources';
 
 export class SceneResources {
   private readonly mats: MeshStandardMaterial[] = [];
   private readonly geos: BufferGeometry[] = [];
 
   constructor(private readonly registry: ResourceRegistry) {}
+
+  /** Track an arbitrary disposable (InstancedMesh buffers, lights, etc) for V24 disposal. Label namespaced
+   *  `block.<label>`. Builders use this for instanced meshes; mat/geo cover the common material/geometry path. */
+  track<T extends Disposable>(resource: T, kind: ResourceKind, label: string): T {
+    return this.registry.track(resource, kind, `block.${label}`);
+  }
 
   /** Create + track a MeshStandardMaterial. Label is namespaced `block.<label>` for registry diagnostics. */
   mat(label: string, opts: ConstructorParameters<typeof MeshStandardMaterial>[0]): MeshStandardMaterial {
