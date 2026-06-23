@@ -354,6 +354,8 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         if (e.code === 'KeyR') runtime.reloadWeapon();
         if (e.code === 'BracketRight') runtime.cycleWeapon(1);
         if (e.code === 'BracketLeft') runtime.cycleWeapon(-1);
+        // T98: F toggles the player flashlight (the same flag the dev-tools panel exposes).
+        if (e.code === 'KeyF') debugViewStore.getState().toggleFlag('flashlight');
       };
       const onKeyUp = (e: KeyboardEvent): void => {
         keys.delete(e.code);
@@ -545,7 +547,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         // near-ortho eye sits ~100m+ away, so using it for distance would cull every fire).
         fireView.update(dt, fireIgnitions, (cell) => runtime.isRouteBurning(cell), camPos, { x: p.x, y: 0, z: p.z }, access.feedback.reduceFlashes);
         corpseField.update(runtime.corpses.list); // T55/B9 — mirror lingering corpses onto the instanced field
-        scene?.syncFrame(dt, camera.camera);
+        scene?.syncFrame(dt, camera.camera, debugViewStore.getState().flags);
         gizmos.update(
           runtime.zombies,
           debugViewStore.getState().flags,

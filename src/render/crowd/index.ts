@@ -10,6 +10,7 @@ export {
   type PackResult,
 } from './packing';
 export { Crowd, CrowdLimbs, resolveCrowdSettings, type CrowdSettings } from './crowd';
+export { visionCullFade, type VisionCull } from './visionCull';
 export {
   packLimbInputs,
   composeLimbMatrix,

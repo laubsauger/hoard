@@ -9,6 +9,7 @@
 
 import type { FieldViews } from '../../game/core/contracts/soa';
 import { variationScale, variationSeed } from './packing';
+import { visionCullFade, type VisionCull } from './visionCull';
 
 const TAU = Math.PI * 2;
 
@@ -33,6 +34,12 @@ export interface LimbPackOptions {
   readonly scaleMax: number;
   /** Slots with simTier <= this are promoted to the limbed (figure) path (V13). */
   readonly maxSimTier: number;
+  /**
+   * Optional vision-cone fog-of-war cull (T96): hide figures outside the player's forward cone / range /
+   * line-of-sight and fade those near the edges. A culled figure keeps its budget RANK (so the box path does
+   * not redraw it) but writes no instance. Undefined = no cull.
+   */
+  readonly visibility?: VisionCull | undefined;
 }
 
 export interface LimbPackResult {
@@ -55,7 +62,7 @@ export function packLimbInputs(
   outPhase: Float32Array,
   opts: LimbPackOptions,
 ): LimbPackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility } = opts;
   if (count < 0) throw new Error(`count must be >= 0, got ${count}`);
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
   if (outPose.length < capacity * FLOATS_PER_LIMB_POSE) {
@@ -73,10 +80,22 @@ export function packLimbInputs(
   const animPhase = requireView<Float32Array>(views, 'animPhase');
 
   let live = 0;
+  // `rank` counts limbed-eligible alive slots in slot order (independent of the vision cull) so it matches
+  // packCrowdInputs' figureRank exactly: the first `capacity` eligible slots belong to the figure pool, the
+  // rest fall through to the box path there. A vision-culled figure still consumes its rank (so the box does
+  // not redraw it) but writes no instance.
+  let rank = 0;
   for (let slot = 0; slot < count; slot++) {
     if (alive[slot]! === 0) continue;
-    if (simTier[slot]! > maxSimTier) continue;
-    if (live >= capacity) break; // pool cap (V13) — no silent overflow, no throw
+    if (simTier[slot]! > maxSimTier) continue; // not limbed-eligible → drawn as a box
+    if (rank++ >= capacity) continue; // beyond the pool cap (V13) → the box path renders this overflow figure
+
+    // Vision-cone fog-of-war (T96): hide figures outside the wedge; fade those near its edges via scale.
+    let fade = 1;
+    if (visibility) {
+      fade = visionCullFade(position[slot * 3]!, position[slot * 3 + 2]!, visibility);
+      if (fade <= 0) continue;
+    }
 
     const seed = variationSeed(slot, variationCount);
     const p = live * FLOATS_PER_LIMB_POSE;
@@ -84,7 +103,7 @@ export function packLimbInputs(
     outPose[p + 1] = position[slot * 3 + 1]!;
     outPose[p + 2] = position[slot * 3 + 2]!;
     outPose[p + 3] = heading[slot]!;
-    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax);
+    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax) * fade;
     outAnatomy[live] = anatomyFlags[slot]!;
     outPhase[live] = animPhase[slot]!;
     live++;

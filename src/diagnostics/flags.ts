@@ -27,6 +27,13 @@ export interface DebugFlags {
   /** Draw the player's forward vision cone (Project-Zomboid-style awareness wedge). */
   readonly showPlayerVision: boolean;
   /**
+   * Vision-cone fog-of-war: only draw crowd members inside the player's forward vision cone + range +
+   * line-of-sight (Project-Zomboid-style look-around). Default ON; turn OFF to render the whole horde.
+   */
+  readonly cullToVisionCone: boolean;
+  /** Player flashlight SpotLight on/off (toggled with F). Default ON — the main light source at night. */
+  readonly flashlight: boolean;
+  /**
    * Force every renderable crowd member to a fixed LOD level for fidelity inspection.
    * null = automatic LOD selection (no override). A non-negative integer pins that LOD.
    */
@@ -44,6 +51,9 @@ export const DEFAULT_DEBUG_FLAGS: DebugFlags = {
   showZombieState: false,
   showSoundField: false,
   showPlayerVision: false,
+  // Gameplay render features (not overlays) — these default ON; dev can toggle them off for debugging.
+  cullToVisionCone: true,
+  flashlight: true,
   forceLodLevel: null,
 };
 
@@ -63,6 +73,8 @@ const BOOLEAN_FLAG_KEYS: readonly BooleanDebugFlag[] = [
   'showZombieState',
   'showSoundField',
   'showPlayerVision',
+  'cullToVisionCone',
+  'flashlight',
 ];
 
 /** Mutable typed holder for the debug control flags. Node-testable; no DOM/3D dependency. */

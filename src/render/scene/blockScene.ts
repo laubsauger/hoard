@@ -33,6 +33,7 @@ import {
   CapsuleGeometry,
   Quaternion,
   Scene,
+  SpotLight,
   Vector3,
 } from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -44,12 +45,15 @@ import { playerConfig } from '../../config/domains/player';
 import { lightingConfig } from '../../config/domains/lighting';
 import { weatherConfig } from '../../config/domains/weather';
 import { renderingConfig } from '../../config/domains/rendering';
+import { perceptionConfig } from '../../config/domains/perception';
 import { postFXConfig } from '../../config/domains/postFX';
 import { shadowsConfig } from '../../config/domains/shadows';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
+import type { VisionCull } from '../crowd/visionCull';
+import type { DebugFlags } from '../../diagnostics/flags';
 import {
   resolveSurfaceVisibility,
   resolveVisibilitySettings,
@@ -78,6 +82,7 @@ import {
   roofHoles,
   hash01,
   doorAxis,
+  hasLineOfSight,
   type GroundKind,
   type BuildingFootprint,
   type HouseStyle,
@@ -137,6 +142,7 @@ export class BlockScene {
   private readonly lighting = resolveDomain(lightingConfig, this.tierOf());
   private readonly weatherCfg = resolveDomain(weatherConfig, this.tierOf());
   private readonly shadows = resolveDomain(shadowsConfig, this.tierOf());
+  private readonly perception = resolveDomain(perceptionConfig, this.tierOf());
   private readonly visibility = resolveVisibilitySettings(this.tierOf());
   private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
@@ -162,6 +168,12 @@ export class BlockScene {
   private readonly sun: DirectionalLight;
   private readonly ambient: AmbientLight;
   private readonly hemi: HemisphereLight;
+  /** Player flashlight (T98) — a SpotLight at the player aimed along playerAim(), lighting the revealed wedge.
+   *  Owned/tracked by the ResourceRegistry (V24). Driven each frame in syncFlashlight; toggled via F / dev. */
+  private readonly flashlight: SpotLight;
+  /** Live render-feature toggles (mirrored from the debug-flag store each frame by syncFrame). */
+  private flashlightOn = true;
+  private visionConeCullOn = true;
   private readonly fog: Fog;
   private readonly playerMesh: Object3D;
   /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
@@ -224,6 +236,26 @@ export class BlockScene {
       this.sun.shadow.bias = this.shadows.shadowDepthBias;
     }
     this.scene.add(this.ambient, this.hemi, this.sun, this.sun.target);
+
+    // T98: player flashlight — a SpotLight at the player aimed along playerAim(), its cone matched to the
+    // player vision wedge (so the lit area == the fog-of-war-revealed area). Pooled + tracked for disposal
+    // (V24); all tunables typed config (V4). Position/target/intensity are driven each frame in syncFlashlight.
+    const fovHalf = (this.perception.playerFieldOfViewDegrees * Math.PI) / 360;
+    const angleMargin = (this.lighting.flashlightAngleMarginDegrees * Math.PI) / 180;
+    this.flashlight = this.registry.track(
+      new SpotLight(
+        this.lighting.flashlightColor,
+        this.lighting.flashlightIntensity,
+        this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters,
+        Math.min(Math.PI / 2 - 0.01, fovHalf + angleMargin),
+        this.lighting.flashlightPenumbra,
+        this.lighting.flashlightDecay,
+      ),
+      'effect',
+      'block.flashlight',
+    );
+    this.flashlight.castShadow = false; // the sun owns shadows; a second shadow map per frame is not worth it
+    this.scene.add(this.flashlight, this.flashlight.target);
 
     this.featureBuildingIndex = this.computeFeatureBuildingIndex();
     this.buildGround();
@@ -1188,10 +1220,19 @@ export class BlockScene {
    * player avatar, hide breached section cells, drive the sun/moon from the clock, and run the cutaway.
    * `camera` is optional only for the construction-time prime; the live loop always passes it.
    */
-  syncFrame(dtSeconds: number, camera: Camera | undefined): void {
+  syncFrame(dtSeconds: number, camera: Camera | undefined, flags?: DebugFlags): void {
+    // Mirror the live render-feature toggles (vision-cone fog-of-war + flashlight). At the construction-time
+    // prime (no flags) the defaults stand. The flags drive both the crowd cull and the flashlight below.
+    if (flags) {
+      this.flashlightOn = flags.flashlight;
+      this.visionConeCullOn = flags.cullToVisionCone;
+    }
     // Compact live crowd inputs into the GPU storage buffers; the transform mat4 + animation phase are
-    // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport).
-    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds);
+    // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport). When the
+    // vision-cone fog-of-war is on, only members inside the player's wedge (cone+range+LOS) are packed (T98).
+    // The construction-time prime / rebind (no flags) packs the FULL crowd — the cull is a live-loop concern.
+    const visibility = flags && this.visionConeCullOn ? this.buildVisionCull() : undefined;
+    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, visibility);
 
     const p = this.runtime.player();
     this.playerMesh.position.set(p.x, 0, p.z);
@@ -1240,6 +1281,52 @@ export class BlockScene {
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */
   get currentExposure(): number {
     return this.exposure;
+  }
+
+  /**
+   * Build this frame's player vision wedge for the crowd fog-of-war cull (T98): the forward cone (player FOV)
+   * + reveal range + a wall line-of-sight test, all from typed config + the live player pose. Reuses the
+   * canonical V14 cone predicate (via visionCullFade) + the scene LOS walk so it matches the dev overlay cone.
+   */
+  private buildVisionCull(): VisionCull {
+    const p = this.runtime.player();
+    const scene = this.runtime.scene;
+    return {
+      px: p.x,
+      pz: p.z,
+      heading: this.runtime.playerAim(),
+      fovHalf: (this.perception.playerFieldOfViewDegrees * Math.PI) / 360,
+      range: this.perception.playerVisionRange,
+      edgeBandMeters: this.perception.playerVisionRangeFadeMeters,
+      edgeBandRadians: (this.perception.playerVisionConeFadeDegrees * Math.PI) / 180,
+      lineOfSight: (x0, z0, x1, z1) => hasLineOfSight(scene, x0, z0, x1, z1),
+    };
+  }
+
+  /**
+   * Drive the player flashlight (T98): anchor it at the player, aim it along playerAim() so its cone covers
+   * the same wedge the fog-of-war reveals, and scale its intensity by scene brightness — at night it is the
+   * main light, by day it is subtle. Off (or zero intensity) hides it cleanly. `sceneBrightness` is the
+   * 0..1 day/night key+ambient level resolved in syncLighting.
+   */
+  private updateFlashlight(sceneBrightness: number): void {
+    const f = this.flashlight;
+    if (!this.flashlightOn) {
+      f.visible = false;
+      return;
+    }
+    const p = this.runtime.player();
+    const aim = this.runtime.playerAim();
+    const range = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
+    f.position.set(p.x, this.lighting.flashlightHeightMeters, p.z);
+    // Aim the target forward along the ground (cos/sin aim = the same forward the avatar nose + fire dir use)
+    // so the cone rakes from torso height down across the revealed wedge.
+    f.target.position.set(p.x + Math.cos(aim) * range, 0, p.z + Math.sin(aim) * range);
+    f.target.updateMatrixWorld();
+    const dayScale = this.lighting.flashlightDayIntensityScale;
+    const brightness = Math.min(1, Math.max(0, sceneBrightness));
+    f.intensity = this.lighting.flashlightIntensity * (dayScale + (1 - dayScale) * (1 - brightness));
+    f.visible = f.intensity > 0;
   }
 
   private syncBreach(): void {
@@ -1312,6 +1399,10 @@ export class BlockScene {
       sceneBrightness,
       nightBoostStops: this.lighting.nightExposureBoostStops,
     });
+
+    // T98: the flashlight is the main light at night and subtle by day — drive it off the same scene
+    // brightness so it coordinates with the player-anchored sun + the floored ambient fill.
+    this.updateFlashlight(sceneBrightness);
   }
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {

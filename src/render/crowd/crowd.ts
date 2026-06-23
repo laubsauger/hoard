@@ -48,6 +48,7 @@ import {
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed } from './packing';
+import type { VisionCull } from './visionCull';
 import {
   composeLimbMatrix,
   packLimbInputs,
@@ -195,7 +196,7 @@ export class CrowdLimbs {
    * number of live limbed figures (also each part mesh's draw count). Severed parts get a zero (invisible)
    * matrix but keep their instance slot so indices stay aligned across parts.
    */
-  update(views: FieldViews, count: number): number {
+  update(views: FieldViews, count: number, visibility?: VisionCull): number {
     const { liveCount } = packLimbInputs(views, this.pose, this.scaleArr, this.anatomy, this.phase, {
       count,
       capacity: this.budget,
@@ -203,6 +204,7 @@ export class CrowdLimbs {
       scaleMin: this.scaleMin,
       scaleMax: this.scaleMax,
       maxSimTier: this.maxSimTier,
+      visibility,
     });
 
     for (let part = 0; part < this.meshes.length; part++) {
@@ -354,17 +356,21 @@ export class Crowd {
    * delta for the compute phase-advance. Returns the live instance count (also set as mesh.count so only
    * live instances are drawn). The transform mat4 itself is assembled later by renderer.compute(computeNode).
    */
-  update(views: FieldViews, count: number, dtSeconds: number): number {
-    // The box draws ONLY the horde (simTier above the limbed band); hero/active become limbed figures (T72).
+  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull): number {
+    // The box draws the horde (simTier above the limbed band) PLUS any limbed-tier figures that overflowed the
+    // limbed budget this frame — those fall through here instead of vanishing (§B culling fix). The figure /
+    // box split is partitioned by a shared budget rank, so every alive zombie is drawn by exactly one path.
     const { liveCount } = packCrowdInputs(views, this.poseInput, this.metaInput, {
       count,
       capacity: this.settings.capacity,
       variationCount: this.settings.variationCount,
       scaleMin: this.settings.scaleMin,
       scaleMax: this.settings.scaleMax,
-      minSimTier: this.settings.limbedMaxSimTier + 1,
+      limbedMaxSimTier: this.settings.limbedMaxSimTier,
+      limbedBudget: this.settings.limbedBudget,
+      visibility,
     });
-    this.limbs.update(views, count);
+    this.limbs.update(views, count, visibility);
     this.mesh.count = liveCount;
     // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
     // backend re-uploads the freshly compacted inputs this frame. The compute reads these next.

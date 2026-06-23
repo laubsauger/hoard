@@ -4,10 +4,15 @@ import { describe, it, expect } from 'vitest';
 import { DebugFlagState, DEFAULT_DEBUG_FLAGS } from './flags';
 
 describe('DebugFlagState', () => {
-  it('defaults all booleans off and force-LOD auto (null)', () => {
+  it('defaults overlay booleans off, gameplay-render booleans on, and force-LOD auto (null)', () => {
     const s = new DebugFlagState();
     expect(s.get()).toEqual(DEFAULT_DEBUG_FLAGS);
     expect(s.get().forceLodLevel).toBeNull();
+    // Debug OVERLAYS default off.
+    expect(s.get().showPlayerVision).toBe(false);
+    // Gameplay render features (vision-cone fog-of-war + flashlight) default ON.
+    expect(s.get().cullToVisionCone).toBe(true);
+    expect(s.get().flashlight).toBe(true);
   });
 
   it('toggles a single boolean control without touching others', () => {
@@ -55,6 +60,8 @@ describe('DebugFlagState', () => {
       'showZombieState',
       'showSoundField',
       'showPlayerVision',
+      'cullToVisionCone',
+      'flashlight',
     ]);
   });
 });
