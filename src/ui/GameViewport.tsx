@@ -464,7 +464,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         smashWindow: () => { runtime.smashNearestWindow(); },
         boardWindow: () => { if (runtime.boardNearestWindow()) publishInventory(); },
         removeWindowBoard: () => { if (runtime.unboardNearestWindow()) publishInventory(); },
-        climbWindow: () => { /* opening already passable — flavour verb */ },
+        climbWindow: () => { runtime.climbThroughNearestWindow(); },
         nearestInteraction: () => runtime.nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
         nearestInteractable: () => runtime.nearestInteractableTarget(),
         loot: () => {

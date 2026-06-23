@@ -684,9 +684,9 @@ export class GameRuntime {
   }
 
   /** The window NEAREST the player within interaction reach, or null. */
-  private nearestWindowInReach(): { navCell: number } | null {
+  private nearestWindowInReach(): { navCell: number; window: WindowView } | null {
     const near = this.windowSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
-    return near ? { navCell: near.navCell } : null;
+    return near ? { navCell: near.navCell, window: near.window } : null;
   }
 
   /** True iff the player's pack holds at least one of `item`. */
@@ -695,10 +695,50 @@ export class GameRuntime {
     return ref ? this.inventory.count(ref, item as ItemId) > 0 : false;
   }
 
-  /** Smash the intact pane of the NEAREST window in reach (the "smash glass" verb). Returns true on a change. */
+  /** Smash the intact pane of the NEAREST window in reach (the "smash glass" verb). On a real smash the
+   *  pane→void swap is reflected by syncWindows AND a loud GLASS stimulus is emitted at the window so the
+   *  shatter is audible + draws the horde (V14). Returns true only when an intact pane was actually broken. */
   smashNearestWindow(): boolean {
     const near = this.nearestWindowInReach();
-    return near ? this.windowSystem.smashGlass(near.navCell) : false;
+    if (!near || !this.windowSystem.smashGlass(near.navCell)) return false;
+    this.audio.hearEvent('glass', near.window.x, near.window.z, this.clock.tick);
+    return true;
+  }
+
+  /**
+   * Vault the player THROUGH the NEAREST window OPENING in reach (the "climb through" verb). A discrete,
+   * player-ONLY traversal to the walkable cell on the FAR side of the window's wall: it never mutates nav
+   * passability (V68 — the cell stays a blocked wall for AI/pathing + the §G room-seal holds), only the
+   * player's own position moves across the 1-cell wall. No-op unless the window is an opening (glass gone,
+   * no boards) AND the far cell is walkable. Climbing is noisy → emits an impact stimulus the horde hears
+   * (V14). Returns true on a successful vault.
+   */
+  climbThroughNearestWindow(): boolean {
+    const near = this.nearestWindowInReach();
+    if (!near || !this.windowSystem.isOpening(near.navCell)) return false; // glass intact or boarded — can't climb
+    const grid = this.scene.navGrid;
+    const cs = grid.settings.navCellSize;
+    const wcx = near.window.cx;
+    const wcy = near.window.cy;
+    const blocked = (cx: number, cy: number): boolean =>
+      cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height ? true : grid.isBlocked(grid.index(cx, cy));
+    // Wall normal: a window whose ±X neighbours are BOTH walls sits in an X-running wall → cross along Z.
+    const alongX = blocked(wcx - 1, wcy) && blocked(wcx + 1, wcy);
+    let dcx = wcx;
+    let dcy = wcy;
+    if (alongX) {
+      const side = Math.sign(this.playerPos.z - (wcy + 0.5) * cs) || 1; // which side of the wall the player is on
+      dcy = wcy - side; // land on the OPPOSITE side of the window
+    } else {
+      const side = Math.sign(this.playerPos.x - (wcx + 0.5) * cs) || 1;
+      dcx = wcx - side;
+    }
+    const fx = (dcx + 0.5) * cs;
+    const fz = (dcy + 0.5) * cs;
+    if (!isWalkableRadius(this.scene, fx, fz, this.playerCfg.bodyRadiusMeters)) return false; // far side blocked
+    this.playerPos = { x: fx, y: this.playerPos.y, z: fz };
+    this.audio.hearEvent('impact', near.window.x, near.window.z, this.clock.tick);
+    return true;
   }
 
   /**
