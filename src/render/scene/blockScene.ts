@@ -269,7 +269,14 @@ export class BlockScene {
       'effect',
       'block.flashlight',
     );
-    this.flashlight.castShadow = false; // the sun owns shadows; a second shadow map per frame is not worth it
+    // V63: the flashlight casts shadows — a torch that doesn't occlude reads as a flat wash. SpotLight gets its
+    // own shadow map (the spot camera's fov auto-tracks the cone angle); near/far bound to the flashlight reach
+    // so the depth range stays tight. Tunables reuse the typed shadow domain (V4).
+    this.flashlight.castShadow = true;
+    this.flashlight.shadow.mapSize.set(this.shadows.shadowMapResolution, this.shadows.shadowMapResolution);
+    this.flashlight.shadow.bias = this.shadows.shadowDepthBias;
+    this.flashlight.shadow.camera.near = this.shadows.shadowCameraNearMeters;
+    this.flashlight.shadow.camera.far = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
     this.scene.add(this.flashlight, this.flashlight.target);
 
     this.featureBuildingIndex = this.computeFeatureBuildingIndex();
@@ -614,8 +621,11 @@ export class BlockScene {
     return { x: sx, z: 0 };
   }
 
-  /** Horizontal clapboard/lap-siding read: a stack of thin proud trim lines around the house perimeter, plus
-   *  a darker base skirt + an eave fascia + corner boards. Merged into ONE mesh per house (zero extra draws). */
+  /** Horizontal clapboard/lap-siding read: a stack of thin lap lines + base skirt + eave fascia, emitted PER SIDE
+   *  so each side's siding is a cutaway FADE SURFACE that fades in lockstep with that side's wall (V64). Before,
+   *  the lines were ONE non-fading mesh standing 4 cm proud — so when a wall faded for the cutaway the siding
+   *  stayed put as a floating "fence" detached from the wall. Now: nearly flush (polygon-offset, no gap) and
+   *  fades WITH the wall, so the wall + its siding read as ONE surface. Corner boards stay solid (building edge). */
   private buildClapboard(b: CellRect, bi: number, wallH: number, style: HouseStyle, parent: Group): void {
     const cs = this.navCellSize;
     const minX = b.minCx * cs;
@@ -626,36 +636,58 @@ export class BlockScene {
     const rd = maxZ - minZ;
     const cxw = (minX + maxX) / 2;
     const czw = (minZ + maxZ) / 2;
-    const proud = 0.04; // sit just outside the wall plane so the lines read as siding shadow lines
+    const proud = 0.012; // nearly flush with the wall plane (polygon offset keeps it off the wall, no 4 cm gap)
     const lineH = 0.05;
     const lineT = 0.03;
-    const parts: BoxGeometry[] = [];
-    const addSide = (geoW: number, geoH: number, geoD: number, x: number, y: number, z: number): void => {
+    const lines = Math.max(2, Math.round(wallH / this.clapboardSpacing));
+    const upperOffset = resolveCutawayDepthOffset('upperWall', this.cutawayDepth);
+    // One transparent, fadeable lap-line mesh per exterior side (normal = the side it faces).
+    const buildSide = (key: string, normal: VecXZ, centerX: number, centerZ: number, boxes: BoxGeometry[]): void => {
+      const merged = this.mergeBoxes(`clapboard.${bi}.${key}`, boxes);
+      if (!merged) return;
+      const mat = this.mat(`trim.${bi}.${key}`, { color: style.trimColor, roughness: 0.85, transparent: true, opacity: 1 });
+      mat.polygonOffset = upperOffset.polygonOffset;
+      mat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+      mat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+      const mesh = new Mesh(merged, mat);
+      mesh.castShadow = true;
+      mesh.renderOrder = upperOffset.renderOrder;
+      this.scene.add(mesh);
+      this.fadeSurfaces.push({ object: mesh, material: mat, kind: 'upperWall', outwardNormal: normal, heightMeters: wallH, buildingIndex: bi, centerX, centerZ, opacity: 1 });
+    };
+    const sides: { key: string; normal: VecXZ; centerX: number; centerZ: number; boxes: BoxGeometry[] }[] = [
+      { key: 'n', normal: { x: 0, z: -1 }, centerX: cxw, centerZ: minZ, boxes: [] },
+      { key: 's', normal: { x: 0, z: 1 }, centerX: cxw, centerZ: maxZ, boxes: [] },
+      { key: 'w', normal: { x: -1, z: 0 }, centerX: minX, centerZ: czw, boxes: [] },
+      { key: 'e', normal: { x: 1, z: 0 }, centerX: maxX, centerZ: czw, boxes: [] },
+    ];
+    const add = (arr: BoxGeometry[], geoW: number, geoH: number, geoD: number, x: number, y: number, z: number): void => {
       const box = new BoxGeometry(geoW, geoH, geoD);
       box.translate(x, y, z);
-      parts.push(box);
+      arr.push(box);
     };
-    // skirt (thicker board at the base) + fascia (under the eave) + evenly-spaced lap lines between.
-    const lines = Math.max(2, Math.round(wallH / this.clapboardSpacing));
     for (let k = 0; k <= lines; k++) {
       const y = (k / lines) * (wallH - 0.1) + 0.05;
       const h = k === 0 ? 0.18 : k === lines ? 0.12 : lineH; // fat skirt + fascia
-      addSide(rw + proud * 2, h, lineT, cxw, y, minZ - proud);
-      addSide(rw + proud * 2, h, lineT, cxw, y, maxZ + proud);
-      addSide(lineT, h, rd + proud * 2, minX - proud, y, czw);
-      addSide(lineT, h, rd + proud * 2, maxX + proud, y, czw);
+      add(sides[0]!.boxes, rw + proud * 2, h, lineT, cxw, y, minZ - proud);
+      add(sides[1]!.boxes, rw + proud * 2, h, lineT, cxw, y, maxZ + proud);
+      add(sides[2]!.boxes, lineT, h, rd + proud * 2, minX - proud, y, czw);
+      add(sides[3]!.boxes, lineT, h, rd + proud * 2, maxX + proud, y, czw);
     }
-    // corner boards (vertical trim).
+    for (const s of sides) buildSide(s.key, s.normal, s.centerX, s.centerZ, s.boxes);
+    // corner boards (vertical trim) — solid, at the building corners (not part of a single side's fade).
+    const cornerParts: BoxGeometry[] = [];
     for (const [x, z] of [[minX, minZ], [maxX, minZ], [maxX, maxZ], [minX, maxZ]] as const) {
       const c = new BoxGeometry(lineT * 1.6, wallH, lineT * 1.6);
       c.translate(x, wallH / 2, z);
-      parts.push(c);
+      cornerParts.push(c);
     }
-    const merged = this.mergeBoxes(`clapboard.${bi}`, parts);
-    if (!merged) return;
-    const trim = new Mesh(merged, this.mat(`trim.${bi}`, { color: style.trimColor, roughness: 0.85 }));
-    trim.castShadow = true;
-    parent.add(trim);
+    const corners = this.mergeBoxes(`clapboard.corners.${bi}`, cornerParts);
+    if (corners) {
+      const cmesh = new Mesh(corners, this.mat(`trim.${bi}`, { color: style.trimColor, roughness: 0.85 }));
+      cmesh.castShadow = true;
+      parent.add(cmesh);
+    }
   }
 
   /** Shaped roof (gable / hip / flat) + chimney + decay holes, grouped so the whole assembly is the building's
@@ -1084,8 +1116,8 @@ export class BlockScene {
     const winFrameMat = this.mat('window.frame', { color: 0xcfc7b4, roughness: 0.85 });
     const voidMat = this.mat('window.void', { color: 0x0c0d0e, roughness: 1 });
     const boardMat = this.mat('window.board', { color: 0x6b5640, roughness: 0.95 });
-    const winH = this.world.buildingWallHeightMeters * 0.32;
-    const winSpan = cs * 0.62;
+    const winH = this.world.buildingWallHeightMeters * 0.42; // taller, residential-scale (was a small slit)
+    const winSpan = cs * 0.85; // wide picture window filling most of the cell — reads as a real opening to see through
     // shared window geometries (thickness on local X; the caller rotates for N/S walls).
     const paneGeo = this.geo('window.pane.geo', new BoxGeometry(0.08, winH, winSpan));
     const frameGeo = this.geo('window.frame.geo', new BoxGeometry(0.05, winH + 0.16, winSpan + 0.18));
