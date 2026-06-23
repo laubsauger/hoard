@@ -959,6 +959,24 @@ export class GameRuntime {
   }
 
   /**
+   * Current transform of a struck body by entity (Bug A render anchor): a LIVE zombie reports upright
+   * (lying 0) at its sim position; once killed, its lingering CORPSE reports toppled (lying 1) at the spot
+   * it fell. Returns null when the body is gone (despawned with no corpse / corpse pruned) so its gore fades
+   * out. Read-only — the render lane reprojects zombie blood-gore onto this each frame; never feeds the sim.
+   */
+  bodyAnchor(entity: EntityId): { x: number; y: number; z: number; heading: number; lying: number; groundY: number } | null {
+    const slot = this.entityToSlot.get(entity);
+    if (slot !== undefined && this.zombies.isAlive(slot)) {
+      const pos: [number, number, number] = [0, 0, 0];
+      this.zombies.getPosition(slot, pos);
+      return { x: pos[0], y: pos[1], z: pos[2], heading: this.zombies.getHeading(slot), lying: 0, groundY: pos[1] };
+    }
+    const corpse = this.corpses.byEntity(entity as unknown as number);
+    if (corpse) return { x: corpse.x, y: corpse.y, z: corpse.z, heading: corpse.heading, lying: 1, groundY: corpse.y };
+    return null;
+  }
+
+  /**
    * Advance the authoritative sim by `dtSeconds` of real time: integrate the fixed clock, run every due
    * scheduled system per tick, then publish throttled view snapshots (V12/V1/V11). Returns ticks run.
    */

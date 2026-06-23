@@ -323,6 +323,10 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // (T77/V54) and the impact wall-finder (T80/V57). Structure never moves → built once (V2 read-only).
       const surfaceProjector = new RaycastSurfaceProjector(structures);
       bloodView.sim.setProjector(surfaceProjector);
+      // Bug A activation: feed zombie body-gore the struck body's live transform each frame so blood rides the
+      // body down to the corpse instead of hanging mid-air. `runtime` is reassigned on load — the arrow reads
+      // the live binding, so a reload re-targets automatically. null ⇒ the body is gone → that gore fades.
+      bloodView.sim.setBodyAnchors({ resolve: (entity) => runtime.bodyAnchor(entity as unknown as EntityId) });
       // Firearm range = the clean-miss tracer length. stopDistance < range ⇒ the shot stopped on structure
       // (a wall), not a clean miss to max range — that is the STRUCTURE-impact branch (V57). Range carries no
       // tier overrides, so resolving at the render tier matches the sim's authoritative value.

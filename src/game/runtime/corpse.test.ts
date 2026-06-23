@@ -57,6 +57,30 @@ describe('B9/T54 death -> corpse transition', () => {
     expect(rt.corpses.list[0]!.severedFlags & severed).toBe(severed);
   });
 
+  it('bodyAnchor reports upright while alive, toppled after death, null when gone (Bug A render anchor)', () => {
+    const rt = makeRuntime();
+    const e = spawnAdjacent(rt);
+    const slot = rt.slotOf(e)!;
+    const pos: [number, number, number] = [0, 0, 0];
+    rt.zombies.getPosition(slot, pos);
+
+    const live = rt.bodyAnchor(e)!;
+    expect(live).not.toBeNull();
+    expect(live.lying).toBe(0); // upright while alive
+    expect(live.x).toBeCloseTo(pos[0], 4);
+    expect(live.z).toBeCloseTo(pos[2], 4);
+
+    killByFire(rt, e);
+
+    const dead = rt.bodyAnchor(e)!;
+    expect(dead).not.toBeNull();
+    expect(dead.lying).toBe(1); // toppled flat onto the corpse
+    expect(dead.x).toBeCloseTo(pos[0], 4);
+    expect(dead.z).toBeCloseTo(pos[2], 4);
+
+    expect(rt.bodyAnchor(999999 as unknown as EntityId)).toBeNull(); // never-existed body → gore fades
+  });
+
   it('captures the corpse at the body\'s last position', () => {
     const rt = makeRuntime();
     const e = spawnAdjacent(rt);

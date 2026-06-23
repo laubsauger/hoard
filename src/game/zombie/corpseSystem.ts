@@ -88,6 +88,15 @@ export class CorpseSystem {
     return this.live;
   }
 
+  /** The corpse left by a given (now-dead) entity, or undefined if none lingers. Linear scan — the live set
+   *  is pool-capped + small, so this stays cheap for the render lane's per-frame body-anchor lookups (V2). */
+  byEntity(entity: number): Corpse | undefined {
+    for (let i = 0; i < this.live.length; i++) {
+      if (this.live[i]!.entity === entity) return this.live[i];
+    }
+    return undefined;
+  }
+
   /** Record a corpse at a killed zombie's last transform. Capped; recycles the OLDEST record when full. */
   spawn(s: CorpseSpawn): Corpse {
     let rec: Corpse;
