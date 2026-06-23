@@ -1136,26 +1136,26 @@ export class BlockScene {
       const bWallH = wallH * Math.max(1, style.storeys);
       const sillH = this.world.buildingWallHeightMeters * 0.45; // ground-floor sill height (consistent)
       const sills = bWallH > this.world.buildingWallHeightMeters * 1.1 ? [sillH, sillH + this.world.buildingWallHeightMeters] : [sillH];
+      // `wi` counts only ELIGIBLE facade cells (not corners/door-adjacent), incremented ONCE per cell so the
+      // stride is consistent. A window goes on every Nth eligible cell (houseWindowStride) → sparse, believable
+      // walls instead of the old every-other band that read as a greenhouse.
+      const stride = this.world.houseWindowStride;
       let wi = 0;
       for (let cy = b.minCy; cy <= b.maxCy; cy++) {
         for (let cx = b.minCx; cx <= b.maxCx; cx++) {
           const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
           if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
           const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
-          if (corner || doorAdjacent(cx, cy)) {
-            wi += 1;
-            continue;
-          }
-          if (wi % 2 !== 0) {
-            wi += 1;
-            continue; // every other facade cell gets a window (deterministic)
-          }
+          if (corner || doorAdjacent(cx, cy)) continue; // not a window slot — don't count it toward the stride
+          const place = wi % stride === 0;
+          const slot = wi;
+          wi += 1;
+          if (!place) continue;
           const ns = cy === b.minCy || cy === b.maxCy;
           const wx = (cx + 0.5) * cs;
           const wz = (cy + 0.5) * cs;
           for (const sy of sills) {
-            placeWindow(wx, sy, wz, ns, windowState(style, wi, this.windowBoardedFraction));
-            wi += 1;
+            placeWindow(wx, sy, wz, ns, windowState(style, slot, this.windowBoardedFraction));
           }
         }
       }
@@ -1454,7 +1454,12 @@ export class BlockScene {
       // below it (the "blood invisible indoors" root cause). Stop writing depth while faded; restore it when
       // fully opaque so a non-cutaway roof occludes normally.
       s.material.depthWrite = s.opacity >= 0.99;
-      s.object.visible = s.opacity > 0.02;
+      // V60: the cutaway is a VIEW AID ONLY — hiding a surface for the camera must NOT change the sim's physical
+      // light. A faded roof/wall stays in the scene (visible=true) so it KEEPS casting shadows + occluding light
+      // exactly as if solid; only the CAMERA sees through it (opacity). The shadow pass renders it via the depth
+      // material, which ignores opacity, so a hidden roof still shadows the interior as a real roof would. (Sound
+      // + physics already key off the structural/nav grid, never this mesh, so they were never affected.)
+      s.object.visible = true;
     }
   }
 

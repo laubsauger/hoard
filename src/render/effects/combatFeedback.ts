@@ -370,7 +370,9 @@ export class CombatFeedbackView {
 
     // ---- muzzle flash ----
     this.muzzleLight = new PointLight(MUZZLE_COLOR, 0, settings.tracerRangeMeters * 0.5);
-    this.muzzleLight.visible = false;
+    // Stays in the scene PERMANENTLY at intensity 0 (visible never toggles) so firing never changes the
+    // visible-light count → no per-shot lighting-state rebuild / pipeline recompile (V61). Driven by intensity.
+    this.muzzleLight.visible = true;
 
     const beadGeo = registry.track(new PlaneGeometry(0.5, 0.5), 'geometry', 'combat.muzzleBeadGeo');
     const beadMat = registry.track(
@@ -408,7 +410,6 @@ export class CombatFeedbackView {
     if (m && flash > 0) {
       this.muzzleLight.position.set(m.x, m.y, m.z);
       this.muzzleLight.intensity = flash * this.settings.muzzleFlashIntensity;
-      this.muzzleLight.visible = true;
       this.muzzleBead.position.set(m.x, m.y, m.z);
       // Orient the flash along the aim (lie it flat on the fire plane, spin to the shot heading) so it tracks
       // where the weapon points instead of a fixed static rotation (V55). Matches the tracer's heading.
@@ -416,7 +417,12 @@ export class CombatFeedbackView {
       (this.muzzleBead.material as MeshBasicMaterial).opacity = flash;
       this.muzzleBead.visible = true;
     } else {
-      this.muzzleLight.visible = false;
+      // PERF (V61): NEVER toggle the muzzle light's `.visible` — flipping a light in/out of the scene changes
+      // the renderer's visible-light count, which rebuilds the lighting state + recompiles EVERY material's
+      // pipeline. Under WebGPU that pipeline recompile stalls for several frames — a freeze on every shot. The
+      // light stays in the scene permanently; intensity 0 = no contribution, no recompile. (Meshes are exempt —
+      // mesh `.visible` does not affect the lights hash — so the bead toggle below is fine.)
+      this.muzzleLight.intensity = 0;
       this.muzzleBead.visible = false;
     }
 
