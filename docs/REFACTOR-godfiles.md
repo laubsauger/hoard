@@ -25,7 +25,7 @@ the only thing holding both, wiring `builder.output → new System(output)`.
 
 ## Target layout
 
-### `src/render/scene/build/` — static construction, returns handles
+### `src/render/scene/builders/` — static construction, returns handles
 - `handles.ts` — move `FadeSurface` here + define `SectionMesh`, `DoorLeaf`, `HouseHandles`,
   `OpeningHandles`, `PlayerHandles`, `LightingHandles` (plain data, no methods → `exactOptional` clean:
   use explicit `| null`, never `?`).

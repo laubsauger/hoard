@@ -68,8 +68,8 @@ import {
   type CutawayDepthSettings,
   type VecXZ,
 } from '../world/visibility';
-import { SceneResources } from './build/sceneResources';
-import type { FadeSurface } from './build/handles';
+import { SceneResources } from './builders/sceneResources';
+import type { FadeSurface } from './builders/handles';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
