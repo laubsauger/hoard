@@ -159,6 +159,7 @@ export const worldConfig = registerDomain('world', {
   houseWeatherMaxBlend: num({ owner: 'world', unit: 'ratio', doc: 'Max blend of wall tint toward weathered grey at full damage.', default: 0.6, min: 0, max: 1 }),
   /** Of broken windows, the fraction that are BOARDED (rest are smashed-open voids). */
   houseWindowBoardedFraction: num({ owner: 'world', unit: 'ratio', doc: 'Fraction of damaged windows that are boarded vs smashed-open.', default: 0.5, min: 0, max: 1 }),
+  houseWindowStride: num({ owner: 'world', unit: 'count', doc: 'Place a window every Nth eligible facade cell — higher = sparser/believable (every-other reads as a greenhouse band).', default: 3, min: 1, max: 12, integer: true }),
   /** Damage at/above which the roof starts losing shingle patches (holes). */
   houseRoofHoleDamageThreshold: num({ owner: 'world', unit: 'ratio', doc: 'Damage at/above which roof holes (missing shingle patches) appear.', default: 0.38, min: 0, max: 1 }),
   /** Max number of roof holes on the most-ruined house. */

@@ -1165,11 +1165,17 @@ export class GameRuntime {
   }
 
   private scatterWalkable(cx: number, cz: number, radius: number): { x: number; z: number } {
+    const safe2 = this.combatCfg.playerSafeSpawnMeters * this.combatCfg.playerSafeSpawnMeters;
     for (let attempt = 0; attempt < MAX_SPAWN_RESAMPLES; attempt++) {
       const x = cx + (this.rand() * 2 - 1) * radius;
       const z = cz + (this.rand() * 2 - 1) * radius;
       // T58/V42: spawn clear of walls (radius-aware) so a body never starts half-embedded.
-      if (isWalkableRadius(this.scene, x, z, this.collision.defaultAgentRadius)) return { x, z };
+      if (!isWalkableRadius(this.scene, x, z, this.collision.defaultAgentRadius)) continue;
+      // Safe bubble: never spawn a zombie right next to the player at start (resample if inside it).
+      const dpx = x - this.playerPos.x;
+      const dpz = z - this.playerPos.z;
+      if (dpx * dpx + dpz * dpz < safe2) continue;
+      return { x, z };
     }
     // No silent fallback: a spawn area that cannot place a body is a content error (V4).
     throw new Error(`could not find a walkable spawn within ${radius}m of (${cx},${cz})`);

@@ -44,7 +44,7 @@ const GROUPS: readonly ToggleGroup[] = [
     title: 'Survival',
     toggles: [
       { key: 'cullToVisionCone', label: 'Vision fog-of-war', hint: 'only draw threats in the cone (default on)' },
-      { key: 'flashlight', label: 'Flashlight', hint: 'player spotlight — toggle F (default on)' },
+      { key: 'flashlight', label: 'Flashlight', hint: 'player spotlight — toggle L (default on)' },
     ],
   },
   {

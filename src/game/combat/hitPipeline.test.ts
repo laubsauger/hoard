@@ -123,16 +123,45 @@ describe('V16 tier hit-volume filter + promotion', () => {
 });
 
 describe('V16 posture term in resolution', () => {
-  it('a downed/crawling target takes more damage than a standing one', () => {
+  // A floored body is passed over by a standing-aim SHOT (Bug B), so the posture damage term is exercised
+  // through a MELEE sweep — which reaches a downed body — instead of a firearm ray.
+  it('a downed/crawling target takes more damage than a standing one (melee posture term)', () => {
+    const MELEE_ORIGIN = { x: 0, y: 1.6, z: 0 };
     const standing = harness();
-    spawn(standing, 5, 0);
-    const sShot = standing.sys.firePenetrating(ORIGIN, 1, 0, 'torsoUpper')[0]!;
+    spawn(standing, 1, 0);
+    const sShot = standing.sys.meleeSweep(MELEE_ORIGIN, 1, 0, 'torsoUpper')[0]!;
 
     const crawling = harness();
-    spawn(crawling, 5, 0, { flags: regionBit('legLeft') | regionBit('legRight') });
-    const cShot = crawling.sys.firePenetrating(ORIGIN, 1, 0, 'torsoUpper')[0]!;
+    spawn(crawling, 1, 0, { flags: regionBit('legLeft') | regionBit('legRight') });
+    const cShot = crawling.sys.meleeSweep(MELEE_ORIGIN, 1, 0, 'torsoUpper')[0]!;
 
     expect(cShot.effectiveDamage!).toBeGreaterThan(sShot.effectiveDamage!);
+  });
+});
+
+describe('Bug B — a standing-aim shot passes OVER a floored body', () => {
+  it('flies over a prone/crawling body but still strikes a standing one on the same firing line', () => {
+    const h = harness();
+    // A crawler (both legs severed → crawl posture) lying near on the ray, a standing body farther down the
+    // SAME line (z = 0). The flat shot rides above the crawler and resolves on the standing body behind it.
+    const crawler = spawn(h, 3, 0, { flags: regionBit('legLeft') | regionBit('legRight') });
+    const stander = spawn(h, 6, 0);
+
+    const res = h.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
+
+    expect(res.hit).toBe(true);
+    expect(res.targetSlot).toBe(stander); // the standing body is the first (and only) candidate struck
+    expect(h.zombies.isAlive(crawler)).toBe(true);
+    expect(h.zombies.getHealth(crawler)).toBe(100); // the crawler was never a candidate — passed over
+    expect(h.zombies.getHealth(stander)).toBeLessThan(100);
+  });
+
+  it('a lone floored body on the line is a clean miss (shot reaches weapon range)', () => {
+    const h = harness({ blockerDistance: null });
+    spawn(h, 4, 0, { flags: regionBit('legLeft') | regionBit('legRight') }); // only a crawler on the line
+    const res = h.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
+    expect(res.hit).toBe(false);
+    expect(res.stopDistanceMeters).toBe(h.weapons.firearmRangeMeters);
   });
 });
 

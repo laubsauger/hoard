@@ -3,7 +3,7 @@
 // and recycle past the cap; gore-intensity 0 suppresses; reduce-flashes thins; pools never exceed caps.
 
 import { describe, it, expect } from 'vitest';
-import { BloodSim, resolveBloodSettings, dropletStreakDims, type BloodIngestContext, type SurfaceHit, type SurfaceProjector } from './bloodView';
+import { BloodSim, resolveBloodSettings, dropletStreakDims, type BloodIngestContext, type SurfaceHit, type SurfaceProjector, type BodyAnchor } from './bloodView';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import type { EntityId, EventId, StimulusId } from '../../game/core/contracts/ids';
 
@@ -365,5 +365,71 @@ describe('BloodSim — bloody footsteps stand-in (T75/V51)', () => {
       s.update(1 / 30);
     }
     expect(s.decalCount).toBeGreaterThan(before); // footprints stamped while walking
+  });
+});
+
+describe('BloodSim — zombie body-gore follows the body to the corpse (Bug A)', () => {
+  // ctx.playerX/Z sit far away (1000,1000) so the player-coat layer never interferes with these assertions.
+  const anchor = (over: Partial<BodyAnchor> = {}): BodyAnchor => ({ x: 2, y: 0, z: 3, heading: 0, lying: 0, groundY: 0, ...over });
+
+  it('creates NO zombie gore until a body-anchor resolver is wired (no regression)', () => {
+    const s = new BloodSim(settings);
+    s.consume([hitReaction(1), bloodSpray(2, 0, 3)], ctx);
+    expect(s.zombieGoreCount).toBe(0);
+  });
+
+  it('sticks gore to the struck body, then drops it to the floor when the body topples to a corpse', () => {
+    const s = new BloodSim(settings);
+    let body: BodyAnchor | null = anchor({ lying: 0 }); // upright zombie
+    s.setBodyAnchors({ resolve: (e) => (e === 7 ? body : null) });
+    s.consume([hitReaction(1), bloodSpray(2, 0, 3)], ctx);
+    expect(s.zombieGoreCount).toBeGreaterThan(0);
+
+    // Upright: gore sits UP the body, well above the floor.
+    s.update(1 / 60);
+    let maxY = 0;
+    for (let i = 0; i < s.zombieGoreCount; i++) maxY = Math.max(maxY, s.zgWY[i]!);
+    expect(maxY).toBeGreaterThanOrEqual(settings.playerGoreBodyHeightMinMeters);
+
+    // The body topples to a corpse lying on a slab at y=0.2 — the gore drops WITH it (not frozen mid-air).
+    body = anchor({ lying: 1, groundY: 0.2 });
+    s.update(1 / 60);
+    for (let i = 0; i < s.zombieGoreCount; i++) expect(s.zgWY[i]!).toBeLessThan(0.6);
+  });
+
+  it('keeps the gore at the body wherever it moves (re-projected each frame, not parented)', () => {
+    const s = new BloodSim(settings);
+    let body = anchor({ x: 0, y: 0, z: 0 });
+    s.setBodyAnchors({ resolve: (e) => (e === 7 ? body : null) });
+    s.consume([hitReaction(1), bloodSpray(0, 0, 0)], ctx);
+    s.update(1 / 60);
+    // Move the live body 10 m in x; the gore tracks it (its world x shifts by ~10).
+    body = anchor({ x: 10, y: 0, z: 0 });
+    s.update(1 / 60);
+    for (let i = 0; i < s.zombieGoreCount; i++) expect(s.zgWX[i]!).toBeGreaterThan(8);
+  });
+
+  it('collapses gore to nothing when the body is gone (resolver → null) — never frozen in mid-air', () => {
+    const s = new BloodSim(settings);
+    let alive = true;
+    s.setBodyAnchors({ resolve: (e) => (alive && e === 7 ? anchor() : null) });
+    s.consume([hitReaction(1), bloodSpray(2, 0, 3)], ctx);
+    s.update(1 / 60);
+    expect(s.zombieGoreCount).toBeGreaterThan(0);
+    alive = false;
+    s.update(1 / 60);
+    for (let i = 0; i < s.zombieGoreCount; i++) expect(s.zgVis[i]!).toBe(0); // every splat invisible, not stuck
+  });
+
+  it('WORLD floor decals stay in world space — only BODY gore follows the anchor', () => {
+    const s = new BloodSim(settings);
+    s.setBodyAnchors({ resolve: () => anchor({ x: 999, y: 999, z: 999, groundY: 999 }) });
+    s.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0)], ctx);
+    for (let i = 0; i < 120; i++) s.update(1 / 60);
+    expect(s.decalCount).toBeGreaterThan(0);
+    for (let i = 0; i < s.decalCount; i++) {
+      expect(Math.abs(s.cx[i]!)).toBeLessThan(50); // decals near the impact (0,0), NOT teleported to the body
+      expect(Math.abs(s.cz[i]!)).toBeLessThan(50);
+    }
   });
 });

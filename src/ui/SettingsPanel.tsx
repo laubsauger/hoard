@@ -7,7 +7,7 @@
 //
 // Sections:
 //   • Graphics    — quality-tier override (Auto + the V25 tiers; safe-limit guard clamps at engine start).
-//   • Audio       — master volume.
+//   • Audio       — Master / Sound (SFX) / Music volume buses.
 //   • Controls    — V29 rebindable keymap (click-to-capture) + pointer/zoom sensitivity + invert.
 //   • Accessibility — the full V29 surface (outline/highlight/gore/shake/flashes/motion/contrast/scale/…).
 
@@ -169,6 +169,8 @@ export function SettingsPanel() {
   // V11 — subscribe to the individual primitives this panel edits (one row re-renders per change).
   const qualityTierOverride = useSettings((s) => s.qualityTierOverride);
   const masterVolume = useSettings((s) => s.masterVolume);
+  const sfxVolume = useSettings((s) => s.sfxVolume);
+  const musicVolume = useSettings((s) => s.musicVolume);
   const goreIntensity = useSettings((s) => s.goreIntensity);
   const outlineStrength = useSettings((s) => s.outlineStrength);
   const targetHighlightStrength = useSettings((s) => s.targetHighlightStrength);
@@ -219,7 +221,9 @@ export function SettingsPanel() {
       </label>
 
       <h3 className="hbn-a11y__section">Audio</h3>
-      <Slider label="Master volume" value={masterVolume} min={NORM_MIN} max={NORM_MAX} step={NORM_STEP} onChange={set.setMasterVolume} />
+      <Slider label="Master" value={masterVolume} min={NORM_MIN} max={NORM_MAX} step={NORM_STEP} onChange={set.setMasterVolume} />
+      <Slider label="Sound" value={sfxVolume} min={NORM_MIN} max={NORM_MAX} step={NORM_STEP} onChange={set.setSfxVolume} />
+      <Slider label="Music" value={musicVolume} min={NORM_MIN} max={NORM_MAX} step={NORM_STEP} onChange={set.setMusicVolume} />
 
       <ControlsSection />
 

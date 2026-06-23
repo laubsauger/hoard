@@ -15,7 +15,9 @@ const A11Y = resolveDomain(accessibilityConfig, 'desktop-high');
 
 export interface SettingsState {
   readonly qualityTierOverride: QualityTier | null;
-  readonly masterVolume: number; // 0..1
+  readonly masterVolume: number; // 0..1 — overall ceiling for the whole mix
+  readonly sfxVolume: number; // 0..1 — Sound (SFX) bus: gunshots, horde bed/groans, impacts/glass/alarms
+  readonly musicVolume: number; // 0..1 — procedural music bus (tension drone)
   // ---- V29 accessibility ----
   readonly goreIntensity: number; // 0..1
   readonly outlineStrength: number; // 0..1
@@ -31,6 +33,8 @@ export interface SettingsState {
   readonly pauseForComplexActions: boolean; // optional pause/slowdown for inventory + complex actions
   setQualityTierOverride(tier: QualityTier | null): void;
   setMasterVolume(v: number): void;
+  setSfxVolume(v: number): void;
+  setMusicVolume(v: number): void;
   setGoreIntensity(v: number): void;
   setOutlineStrength(v: number): void;
   setTargetHighlightStrength(v: number): void;
@@ -57,6 +61,8 @@ export function createSettingsStore() {
         (set) => ({
           qualityTierOverride: null,
           masterVolume: 0.8,
+          sfxVolume: 0.8,
+          musicVolume: 0.5,
           goreIntensity: A11Y.goreIntensityDefault,
           outlineStrength: A11Y.outlineStrengthDefault,
           targetHighlightStrength: A11Y.targetHighlightStrengthDefault,
@@ -79,6 +85,8 @@ export function createSettingsStore() {
             set({ qualityTierOverride });
           },
           setMasterVolume: (v) => set({ masterVolume: clamp01(v) }),
+          setSfxVolume: (v) => set({ sfxVolume: clamp01(v) }),
+          setMusicVolume: (v) => set({ musicVolume: clamp01(v) }),
           setGoreIntensity: (v) => set({ goreIntensity: clamp01(v) }),
           setOutlineStrength: (v) => set({ outlineStrength: clamp01(v) }),
           setTargetHighlightStrength: (v) => set({ targetHighlightStrength: clamp01(v) }),

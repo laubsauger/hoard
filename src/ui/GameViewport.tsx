@@ -231,15 +231,13 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       // Procedural WebAudio OUTPUT layer (NEW audio-out lane). Synthesized — no asset files. Created here
       // but SILENT until a user gesture resumes its AudioContext (autoplay policy, wired in onClick/onKeyDown
-      // below). Master volume tracks the settings store live; volume 0 also mutes the master node. Disposed
-      // on unmount (V24). It only READS the drained event/stimulus stream — never feeds the sim (V2).
+      // below). Three volume buses track the settings store live: master → {sfx, music}; 0 on a bus mutes
+      // only that bus. Disposed on unmount (V24). It only READS the drained event/stimulus stream (V2).
       const gameAudio = new GameAudio(resolveAudioOutTuning(tier));
-      gameAudio.setMasterVolume(settingsStore.getState().masterVolume);
-      gameAudio.setMuted(settingsStore.getState().masterVolume <= 0);
-      const unsubVolume = settingsStore.subscribe((s) => {
-        gameAudio.setMasterVolume(s.masterVolume);
-        gameAudio.setMuted(s.masterVolume <= 0);
-      });
+      const pushVolumes = (s: SettingsState) =>
+        gameAudio.setVolumes({ master: s.masterVolume, sfx: s.sfxVolume, music: s.musicVolume });
+      pushVolumes(settingsStore.getState());
+      const unsubVolume = settingsStore.subscribe(pushVolumes);
       cleanups.push(unsubVolume);
       cleanups.push(() => gameAudio.dispose());
 
@@ -354,8 +352,9 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         if (e.code === 'KeyR') runtime.reloadWeapon();
         if (e.code === 'BracketRight') runtime.cycleWeapon(1);
         if (e.code === 'BracketLeft') runtime.cycleWeapon(-1);
-        // T98: F toggles the player flashlight (the same flag the dev-tools panel exposes).
-        if (e.code === 'KeyF') debugViewStore.getState().toggleFlag('flashlight');
+        // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
+        // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
+        if (e.code === 'KeyL') debugViewStore.getState().toggleFlag('flashlight');
       };
       const onKeyUp = (e: KeyboardEvent): void => {
         keys.delete(e.code);

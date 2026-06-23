@@ -304,6 +304,10 @@ export class CombatSystem {
     const blocker = this.deps.firstProjectileBlockerDistance(origin, ndx, ndz, range);
     const blockerDistance = blocker ?? Number.POSITIVE_INFINITY;
 
+    // Bug B: a standing-aim shot holds a flat projectile height; a body whose vertical extent (top) sits
+    // below it is passed OVER — the round flies above a corpse / prone / crawling body on the floor.
+    const aimHeight = this.deps.combat.shotProjectileHeightMeters;
+
     const step = this.deps.spatial.cellSize; // derived from collision config, not a literal
     const gatherRadius = hitRadius + step; // ensure no cell adjacent to the line is missed
     const candidates = new Set<ZombieSlot>();
@@ -330,6 +334,13 @@ export class CombatSystem {
       const perp = Math.hypot(perpX, perpZ);
       const agentRadius = this.deps.spatial.get(slot).radius;
       if (perp > hitRadius + agentRadius) continue;
+      // Bug B height gate: a floored body (prone/crawling/downed) only reaches `flooredBodyHeightMeters`,
+      // an upright body reaches `standingBodyHeightMeters`. When the flat shot rides above the body's top,
+      // the round passes over it (no candidate) — a melee sweep, which ignores this gate, can still hit it.
+      const bodyTop = this.postureOf(slot) === Posture.Standing
+        ? this.deps.combat.standingBodyHeightMeters
+        : this.deps.combat.flooredBodyHeightMeters;
+      if (aimHeight > bodyTop) continue;
       hits.push({ slot, travel });
     }
     hits.sort((a, b) => a.travel - b.travel);

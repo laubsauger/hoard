@@ -114,6 +114,16 @@ export const combatConfig = registerDomain('combat', {
     min: 1,
     max: 200,
   }),
+  /** No zombie spawns within this radius of the player start — a safe bubble so one never materializes
+   *  right next to the player at game start (a sampled scatter point inside it is rejected + resampled). */
+  playerSafeSpawnMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Minimum distance a spawned zombie must be from the player (safe bubble at start).',
+    default: 8,
+    min: 0,
+    max: 100,
+  }),
 
   // ---- T16 full pipeline: player melee attack-volume windows (V16) ----
   /** Ticks the player melee damage volume stays OPEN (only window in which melee damage applies, V16). */
@@ -170,6 +180,39 @@ export const combatConfig = registerDomain('combat', {
     default: 1.25,
     min: 0.1,
     max: 10,
+  }),
+
+  // ---- Bug B: a standing-aim shot passes OVER floored bodies (height gate in the hit pipeline) ----
+  /** Height (m) a normal standing-aim shot travels at. The firearm ray is resolved in the xz plane, so the
+   *  projectile holds this flat height along its whole travel. A body whose vertical extent (top) is BELOW
+   *  this is passed over — the shot flies above a corpse / prone / crawling body lying on the floor. */
+  shotProjectileHeightMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Flat height a standing-aim firearm shot travels at; a body whose top is below this is passed over (Bug B).',
+    default: 1.2,
+    min: 0.05,
+    max: 5,
+  }),
+  /** Vertical extent (top, m) of an upright/standing body — its head clears the projectile height so a
+   *  standing zombie is struck by a normal shot. */
+  standingBodyHeightMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Top height of a standing body; at/above shotProjectileHeightMeters so a standing target is hit (Bug B).',
+    default: 1.8,
+    min: 0.1,
+    max: 5,
+  }),
+  /** Vertical extent (top, m) of a body lying on the floor — a corpse, or a prone/downed/crawling LIVE
+   *  zombie. Below shotProjectileHeightMeters so a standing-aim shot flies over it instead of striking it. */
+  flooredBodyHeightMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Top height of a floored (corpse / prone / crawling) body; below shotProjectileHeightMeters so a standing shot passes over (Bug B).',
+    default: 0.5,
+    min: 0.05,
+    max: 3,
   }),
 
   // ---- T17 dismemberment: detached-part pooling + missing-limb consequences (V17) ----

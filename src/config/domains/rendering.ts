@@ -883,6 +883,29 @@ export const renderingConfig = registerDomain('rendering', {
     max: 20,
   }),
 
+  // ---- Bug A: blood coated onto a ZOMBIE body follows that body to the floor (corpse), mirroring the
+  //      player body-gore layer. Anchored to the struck entity + re-projected to its current transform each
+  //      frame via an injected body-anchor resolver (live zombie while alive, corpse once it topples). ----
+  bloodZombieGorePoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hard cap on body-gore splats stuck on ZOMBIE bodies/corpses (Bug A). Ring buffer — oldest recycled past the cap (V24). Larger than the player pool since many bodies can be coated.',
+    default: 192,
+    min: 0,
+    max: 4096,
+    integer: true,
+    tiers: { 'desktop-high': 256, 'desktop-compat': 160, 'mobile-webgpu': 96 },
+  }),
+  bloodZombieGoreSplatsPerHit: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Max body-gore splats coated onto the STRUCK zombie body by ONE blood spray (scaled by energy/intensity). Always >=1. Pooled (V24) (Bug A).',
+    default: 3,
+    min: 1,
+    max: 32,
+    integer: true,
+  }),
+
   // ---- Pooled GIB system (T76 / V52): flung faceted lit meat chunks that tumble, land, settle, then dry +
   // shrink away. Sibling to the blood spray but SOLID matter — lit MeshStandardMaterial, low emissive so dark
   // gore reads on the dark floor (B6). Driven by partDetached (sever) + strong hits. Pooled + capped (V24).

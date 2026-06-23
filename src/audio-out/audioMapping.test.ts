@@ -9,8 +9,12 @@ import {
   type AudioOutTuning,
   admitVoice,
   baseGainFor,
+  busGain,
   clamp,
   hordeBedGain,
+  musicBedGain,
+  musicFilterHz,
+  musicTension,
   newOnsetIds,
   oneShotVoiceFor,
   panForWorldX,
@@ -40,6 +44,16 @@ const T: AudioOutTuning = {
   footstepGain: 0.18,
   panWidthMeters: 18,
   maxVoices: 12,
+  musicBedGain: 0.4,
+  musicMinLevel: 0.25,
+  musicBaseFreqHz: 48,
+  musicDetuneCents: 8,
+  musicFilterBaseHz: 180,
+  musicFilterRangeHz: 500,
+  musicLfoHz: 0.05,
+  musicLfoDepthHz: 40,
+  musicTensionFullCount: 30,
+  musicGlideSeconds: 2.5,
 };
 
 describe('clamp', () => {
@@ -122,6 +136,53 @@ describe('hordeBedGain (V28 group bed)', () => {
   });
   it('rejects a non-positive full count', () => {
     expect(() => hordeBedGain(5, 1, { ...T, hordeBedFullCount: 0 })).toThrow();
+  });
+});
+
+describe('busGain (master → {sfx, music} routing)', () => {
+  it('effective bus gain is master × bus volume', () => {
+    expect(busGain(1, 1)).toBe(1);
+    expect(busGain(0.8, 0.5)).toBeCloseTo(0.4); // master 0.8 × music 0.5
+    expect(busGain(0.5, 0.8)).toBeCloseTo(0.4); // master 0.5 × sfx 0.8
+  });
+  it('a 0 on one bus mutes ONLY that bus (the other pair is unaffected)', () => {
+    const master = 0.7;
+    // music muted, sfx still audible at master × sfx.
+    expect(busGain(master, 0)).toBe(0);
+    expect(busGain(master, 0.9)).toBeCloseTo(master * 0.9);
+  });
+  it('master 0 silences every bus; clamps out-of-range inputs', () => {
+    expect(busGain(0, 1)).toBe(0);
+    expect(busGain(2, 2)).toBe(1); // both clamped to 1
+    expect(busGain(-1, 0.5)).toBe(0);
+  });
+});
+
+describe('music bed tension (scales with horde count + clamped)', () => {
+  it('is calm (0 tension) when alone and rises linearly to full', () => {
+    expect(musicTension(0, T)).toBe(0);
+    expect(musicTension(T.musicTensionFullCount / 2, T)).toBeCloseTo(0.5);
+    expect(musicTension(T.musicTensionFullCount, T)).toBe(1);
+  });
+  it('clamps above the full count and floors negative/garbage counts', () => {
+    expect(musicTension(10_000, T)).toBe(1);
+    expect(musicTension(-50, T)).toBe(0);
+  });
+  it('bed gain lerps the calm floor up to full with tension, clamped to the ceiling', () => {
+    // Alone → floor level × bed gain.
+    expect(musicBedGain(0, T)).toBeCloseTo(T.musicMinLevel * T.musicBedGain);
+    // Surrounded → full bed gain.
+    expect(musicBedGain(T.musicTensionFullCount, T)).toBeCloseTo(T.musicBedGain);
+    expect(musicBedGain(0, T)).toBeLessThan(musicBedGain(T.musicTensionFullCount, T));
+    // Never exceeds the master ceiling even with an absurd bed gain.
+    expect(musicBedGain(10_000, { ...T, musicBedGain: 1, musicMinLevel: 1 })).toBe(T.masterCeiling);
+  });
+  it('filter cutoff opens from the base toward base+range as tension rises', () => {
+    expect(musicFilterHz(0, T)).toBeCloseTo(T.musicFilterBaseHz);
+    expect(musicFilterHz(T.musicTensionFullCount, T)).toBeCloseTo(T.musicFilterBaseHz + T.musicFilterRangeHz);
+  });
+  it('rejects a non-positive full count (no silent fallback)', () => {
+    expect(() => musicTension(5, { ...T, musicTensionFullCount: 0 })).toThrow();
   });
 });
 

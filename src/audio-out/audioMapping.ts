@@ -35,6 +35,17 @@ export interface AudioOutTuning {
   readonly footstepGain: number;
   readonly panWidthMeters: number;
   readonly maxVoices: number;
+  // ---- music bed (MUSIC bus) ----
+  readonly musicBedGain: number;
+  readonly musicMinLevel: number;
+  readonly musicBaseFreqHz: number;
+  readonly musicDetuneCents: number;
+  readonly musicFilterBaseHz: number;
+  readonly musicFilterRangeHz: number;
+  readonly musicLfoHz: number;
+  readonly musicLfoDepthHz: number;
+  readonly musicTensionFullCount: number;
+  readonly musicGlideSeconds: number;
 }
 
 /** A sound stimulus currently REACHING the player this frame (class + position + attenuated level). */
@@ -76,6 +87,16 @@ export function panForWorldX(sourceX: number, playerX: number, panWidthMeters: n
  */
 export function voiceGain(reaching: number, baseGain: number, masterVolume: number, masterCeiling: number): number {
   return clamp(clamp01(reaching) * baseGain * clamp01(masterVolume), 0, masterCeiling);
+}
+
+/**
+ * Effective gain of a single bus in the master→{sfx, music} routing: the live master volume times the
+ * bus volume, both clamped to 0..1. Setting EITHER to 0 mutes that bus (and only that bus, since the
+ * other bus reads its own pair). This is the headless-testable contract for the node graph in GameAudio
+ * (master GainNode in series with each bus GainNode → effective = master × bus).
+ */
+export function busGain(masterVolume: number, busVolume: number): number {
+  return clamp01(masterVolume) * clamp01(busVolume);
 }
 
 /** Combined pan+gain for an audible world sound. */
@@ -128,6 +149,31 @@ export function hordeBedGain(hordeCount: number, masterVolume: number, t: AudioO
   if (hordeCount <= 0) return 0;
   const level = clamp01(hordeCount / t.hordeBedFullCount);
   return clamp(level * t.hordeBedGain * clamp01(masterVolume), 0, t.masterCeiling);
+}
+
+/**
+ * MUSIC tension (0..1): rises LINEARLY with the nearby horde count up to a full-tension cap, clamped.
+ * 0 when alone → 1 when surrounded. Drives the music bed level + filter so it darkens/densifies as the
+ * horde closes in. Pure + clamped (negative or huge counts are bounded, never NaN).
+ */
+export function musicTension(hordeCount: number, t: AudioOutTuning): number {
+  if (!(t.musicTensionFullCount > 0)) throw new Error(`musicTensionFullCount must be > 0, got ${t.musicTensionFullCount}`);
+  return clamp01(Math.max(0, hordeCount) / t.musicTensionFullCount);
+}
+
+/**
+ * MUSIC bed gain (pre bus scaling): a calm floor (`musicMinLevel`) lerped up to full with tension, times
+ * the bed gain, clamped to the master ceiling. The MUSIC bus then applies master × music on top, so this
+ * is purely the tension-shaped level. Always > 0 (the bed is ever-present) unless `musicBedGain` is 0.
+ */
+export function musicBedGain(hordeCount: number, t: AudioOutTuning): number {
+  const level = t.musicMinLevel + (1 - t.musicMinLevel) * musicTension(hordeCount, t);
+  return clamp(clamp01(level) * t.musicBedGain, 0, t.masterCeiling);
+}
+
+/** MUSIC bed lowpass cutoff (Hz): the base cutoff opens by the full range as tension goes 0→1. */
+export function musicFilterHz(hordeCount: number, t: AudioOutTuning): number {
+  return t.musicFilterBaseHz + musicTension(hordeCount, t) * t.musicFilterRangeHz;
 }
 
 /** New stimulus ids present this frame but not last frame → discrete onsets to one-shot. */

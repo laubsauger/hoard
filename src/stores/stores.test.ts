@@ -92,4 +92,35 @@ describe('persistence partition (V11 — only settings + session persist)', () =
     expect(Object.keys(partial).sort()).toEqual(['saveSlot', 'sessionId']);
     expect('phase' in partial).toBe(false);
   });
+
+  it('settings persist under the settings partition', () => {
+    const store = createSettingsStore();
+    expect(store.persist.getOptions().name).toContain('settings');
+  });
+});
+
+describe('audio volume buses (master / sound / music) — settings store', () => {
+  it('exposes three independent volume primitives with sensible defaults', () => {
+    const s = createSettingsStore().getState();
+    expect(s.masterVolume).toBeGreaterThan(0);
+    expect(s.masterVolume).toBeLessThanOrEqual(1);
+    expect(s.sfxVolume).toBe(0.8);
+    expect(s.musicVolume).toBe(0.5);
+  });
+
+  it('each setter clamps to 0..1 and writes only its own field', () => {
+    const store = createSettingsStore();
+    store.getState().setMasterVolume(2);
+    store.getState().setSfxVolume(-1);
+    store.getState().setMusicVolume(0.33);
+    const s = store.getState();
+    expect(s.masterVolume).toBe(1);
+    expect(s.sfxVolume).toBe(0);
+    expect(s.musicVolume).toBe(0.33);
+  });
+
+  it('rejects a non-finite volume (no silent fallback)', () => {
+    const store = createSettingsStore();
+    expect(() => store.getState().setMusicVolume(Number.NaN)).toThrow();
+  });
 });

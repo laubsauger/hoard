@@ -130,7 +130,32 @@ export interface BloodSettings {
   readonly playerGoreSplatsPerCoat: number;
   readonly puddlePickupRadiusMeters: number;
   readonly puddlePickupWetnessPerSecond: number;
+  // ---- Bug A: zombie body-gore (follows the struck body to the corpse) ----
+  readonly zombieGorePoolSize: number;
+  readonly zombieGoreSplatsPerHit: number;
   readonly regionHeights: RegionHeights;
+}
+
+/**
+ * Bug A — the current world transform of a struck body, resolved by the runtime each frame from sim authority
+ * (the live zombie SoA while alive, the corpse record once it topples). Pure-view (V2): the blood layer READS
+ * this to keep gore stuck on the body; it never writes the sim back. Returned by entity id, never a raw slot
+ * (V26). `null` = the body is gone (despawned with no corpse / corpse pruned) → its gore fades out at once.
+ */
+export interface BodyAnchor {
+  readonly x: number;
+  readonly y: number; // body BASE world Y (feet on the ground/slab)
+  readonly z: number;
+  readonly heading: number; // body facing (yaw) — the toppled corpse lies along this
+  /** 0 = upright/standing, 1 = fully toppled flat on the ground (corpse). The death→floor transition. */
+  readonly lying: number;
+  /** World Y the toppled body rests at (floor/slab top under it). */
+  readonly groundY: number;
+}
+
+/** Render-side, read-only resolver of a struck body's current transform by entity id (Bug A). */
+export interface BodyAnchorResolver {
+  resolve(entity: number): BodyAnchor | null;
 }
 
 export function resolveBloodSettings(tier: QualityTier): BloodSettings {
@@ -177,6 +202,8 @@ export function resolveBloodSettings(tier: QualityTier): BloodSettings {
     playerGoreSplatsPerCoat: resolve(renderingConfig.bloodPlayerGoreSplatsPerCoat, tier),
     puddlePickupRadiusMeters: resolve(renderingConfig.bloodPuddlePickupRadiusMeters, tier),
     puddlePickupWetnessPerSecond: resolve(renderingConfig.bloodPuddlePickupWetnessPerSecond, tier),
+    zombieGorePoolSize: resolve(renderingConfig.bloodZombieGorePoolSize, tier),
+    zombieGoreSplatsPerHit: resolve(renderingConfig.bloodZombieGoreSplatsPerHit, tier),
     regionHeights: {
       head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
       torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
@@ -277,11 +304,37 @@ export class BloodSim {
   private pgHead = 0;
   private pgCount = 0;
 
+  // --- ZOMBIE BODY-gore SoA (ring buffer, Bug A). Each splat stores the struck entity + a BODY-LOCAL offset
+  //     (around/up the standing body). update() re-projects every splat to the body's CURRENT transform via
+  //     the injected resolver (live body while alive, toppled corpse once dead), writing the world position
+  //     into zgWX/zgWY/zgWZ — so the gore travels WITH the body down to the floor (never frozen mid-air). ---
+  readonly zgEntity: Int32Array; // struck entity id (-1 = free)
+  readonly zgLX: Float32Array; // body-local X offset (around the body)
+  readonly zgLY: Float32Array; // body-local height up the body
+  readonly zgLZ: Float32Array; // body-local Z offset (around the body)
+  readonly zgWX: Float32Array; // re-projected world X (read by the view)
+  readonly zgWY: Float32Array; // re-projected world Y
+  readonly zgWZ: Float32Array; // re-projected world Z
+  readonly zgSize: Float32Array;
+  readonly zgVis: Float32Array; // 0..1 visibility/shrink (1 fresh → 0 dried/gone), recomputed each update
+  readonly zgr: Float32Array;
+  readonly zgg: Float32Array;
+  readonly zgb: Float32Array;
+  private readonly zgAge: Float32Array;
+  private readonly zgLife: Float32Array;
+  private zgHead = 0;
+  private zgCount = 0;
+
+  /** Bug A — resolves a struck body's current transform by entity id each frame (null when not wired → no
+   *  zombie gore is created, identical to the prior behaviour). Injected once by the runtime via the view. */
+  private bodyAnchors: BodyAnchorResolver | null = null;
+
   readonly dryTarget = DRY_TARGET;
 
   // hitReaction is position-less; pair it with the following bloodSpray (emission order, like combatFeedback).
-  private pending: { energy: number; dirX: number; dirZ: number; region: AnatomyRegion } | null = null;
-  private lastImpact: { x: number; y: number; z: number; dirX: number; dirZ: number; fy: number } | null = null;
+  // It carries the struck `entity` so the paired spray can anchor body-gore to that body (Bug A).
+  private pending: { energy: number; dirX: number; dirZ: number; region: AnatomyRegion; entity: number } | null = null;
+  private lastImpact: { x: number; y: number; z: number; dirX: number; dirZ: number; fy: number; entity: number } | null = null;
 
   /** Render-side, read-only surface projector (T77/V54). Null in unit tests → decals fall back to the flat
    *  base floor height (the documented open-ground default, NOT a brittle fallback masking a bug). */
@@ -340,6 +393,21 @@ export class BloodSim {
     this.pgb = new Float32Array(P);
     this.pgAge = new Float32Array(P);
     this.pgLife = new Float32Array(P);
+    const Z = Math.max(0, settings.zombieGorePoolSize);
+    this.zgEntity = new Int32Array(Z).fill(-1);
+    this.zgLX = new Float32Array(Z);
+    this.zgLY = new Float32Array(Z);
+    this.zgLZ = new Float32Array(Z);
+    this.zgWX = new Float32Array(Z);
+    this.zgWY = new Float32Array(Z);
+    this.zgWZ = new Float32Array(Z);
+    this.zgSize = new Float32Array(Z);
+    this.zgVis = new Float32Array(Z);
+    this.zgr = new Float32Array(Z);
+    this.zgg = new Float32Array(Z);
+    this.zgb = new Float32Array(Z);
+    this.zgAge = new Float32Array(Z);
+    this.zgLife = new Float32Array(Z);
   }
 
   get dropletCount(): number {
@@ -354,6 +422,10 @@ export class BloodSim {
   get playerGoreCount(): number {
     return this.pgCount;
   }
+  /** Live zombie body-gore splats (Bug A) — the view mirrors [0, zombieGoreCount) onto its instanced batch. */
+  get zombieGoreCount(): number {
+    return this.zgCount;
+  }
   /** Tracked player world position (the body-gore layer follows it; the sim never feeds the sim, V2). */
   get trackedPlayerX(): number {
     return this.playerX;
@@ -365,6 +437,12 @@ export class BloodSim {
   /** Inject the render-side surface projector (T77/V54). Called once by BloodView with the scene structures. */
   setProjector(projector: SurfaceProjector | null): void {
     this.projector = projector;
+  }
+
+  /** Inject the body-anchor resolver (Bug A). Until set (null) no zombie body-gore is created, so behaviour is
+   *  unchanged. Once wired, blood that lands on a zombie body sticks to it and follows it to the floor. */
+  setBodyAnchors(resolver: BodyAnchorResolver | null): void {
+    this.bodyAnchors = resolver;
   }
 
   /** Consume one frame's drained VisualEvents. `goreIntensity` 0 fully suppresses (V29). */
@@ -384,7 +462,7 @@ export class BloodSim {
     for (const e of events) {
       switch (e.kind) {
         case 'hitReaction':
-          this.pending = { energy: clamp01(e.energy), dirX: e.dirX, dirZ: e.dirZ, region: e.region };
+          this.pending = { energy: clamp01(e.energy), dirX: e.dirX, dirZ: e.dirZ, region: e.region, entity: e.target as number };
           break;
         case 'bloodSpray': {
           const dist = Math.hypot(e.x - ctx.cameraX, e.y - ctx.cameraY, e.z - ctx.cameraZ);
@@ -401,8 +479,11 @@ export class BloodSim {
           // Wall behind the struck body catches a vertical splat (the spray travels along the hit vector).
           this.spawnWallSplat(e.x, y, e.z, dirX, dirZ, goreColor('blood'), dist, ctx);
           this.coatPlayer(e.x, e.z, goreColor('blood'), energy, ctx); // T79 — splatter gore onto the player body
+          // Bug A — coat the STRUCK zombie body itself; the gore sticks to it and follows it to the floor.
+          const entity = this.pending ? this.pending.entity : -1;
+          this.coatZombie(entity, goreColor('blood'), energy, ctx);
           this.addWetness(e.x, e.z);
-          this.lastImpact = { x: e.x, y, z: e.z, dirX, dirZ, fy: landY };
+          this.lastImpact = { x: e.x, y, z: e.z, dirX, dirZ, fy: landY, entity };
           this.pending = null;
           break;
         }
@@ -426,6 +507,7 @@ export class BloodSim {
               at.fy,
             );
             this.coatPlayer(at.x, at.z, goreColor('blood'), 1, ctx); // T79 — a sever near the player coats them
+            this.coatZombie(at.entity, goreColor('blood'), 1, ctx); // Bug A — sever spatters the body
             this.addWetness(at.x, at.z);
           }
           break;
@@ -604,6 +686,71 @@ export class BloodSim {
     }
   }
 
+  /** Splatter gore onto the STRUCK ZOMBIE BODY (Bug A). Anchored to the body's entity with BODY-LOCAL offsets
+   *  (around + up the body, biased to the side facing the blood source) into a ring buffer; update() re-projects
+   *  each splat to the body's CURRENT transform (live, then the toppled corpse) via the injected resolver — so it
+   *  follows the body to the floor instead of hanging where it was standing. No-op until a resolver is wired and
+   *  for an unknown entity. Pooled + capped (V24); render-local RNG only (V2/V3). */
+  private coatZombie(entity: number, color: Color, energy: number, ctx: BloodIngestContext): void {
+    const s = this.settings;
+    if (!this.bodyAnchors || this.zgEntity.length === 0 || ctx.goreIntensity <= 0) return;
+    if (entity < 0 || !this.bodyAnchors.resolve(entity)) return; // unknown/gone body — nothing to stick to
+    let count = Math.max(1, Math.round(s.zombieGoreSplatsPerHit * (0.4 + energy * 0.8)));
+    if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
+    count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
+    const R = s.playerGoreBodyRadiusMeters;
+    const hRange = s.playerGoreBodyHeightMaxMeters - s.playerGoreBodyHeightMinMeters;
+    const bright = s.playerGoreBrightness;
+    for (let k = 0; k < count; k++) {
+      const i = this.zgHead;
+      this.zgHead = (this.zgHead + 1) % this.zgEntity.length;
+      if (this.zgCount < this.zgEntity.length) this.zgCount++;
+      const ang = rnd() * Math.PI * 2;
+      this.zgEntity[i] = entity;
+      this.zgLX[i] = Math.cos(ang) * R;
+      this.zgLY[i] = s.playerGoreBodyHeightMinMeters + rnd() * hRange;
+      this.zgLZ[i] = Math.sin(ang) * R;
+      this.zgSize[i] = s.playerGoreSizeMeters * (0.7 + rnd() * 0.9);
+      this.zgAge[i] = 0;
+      this.zgLife[i] = s.playerGoreLifeSeconds * (0.7 + rnd() * 0.6);
+      this.zgVis[i] = 1;
+      this.zgr[i] = Math.min(1, color.r * bright + 0.06);
+      this.zgg[i] = Math.min(1, color.g * bright);
+      this.zgb[i] = Math.min(1, color.b * bright);
+      // Seed the world position immediately so a splat is placed even before the first update() reprojection.
+      this.reprojectZombieGore(i);
+    }
+  }
+
+  /** Re-project one zombie-gore splat from its body-local offset to world space via the current body transform
+   *  (Bug A). Interpolates between the upright placement and the toppled (corpse-on-floor) placement by the
+   *  anchor's `lying` term, so the gore drops to the floor as the body topples. A vanished body (resolve→null)
+   *  collapses the splat (vis 0) so it never hangs frozen in mid-air. */
+  private reprojectZombieGore(i: number): void {
+    const a = this.bodyAnchors ? this.bodyAnchors.resolve(this.zgEntity[i]!) : null;
+    if (!a) {
+      this.zgVis[i] = 0;
+      return;
+    }
+    const lx = this.zgLX[i]!;
+    const ly = this.zgLY[i]!;
+    const lz = this.zgLZ[i]!;
+    // Upright: offsets sit around/up the standing body. Toppled: the body lies flat along `heading`, so the
+    // up-the-body height maps to a forward ground offset and the around-body offset to a lateral one.
+    const ux = a.x + lx;
+    const uy = a.y + ly;
+    const uz = a.z + lz;
+    const ch = Math.cos(a.heading);
+    const sh = Math.sin(a.heading);
+    const tx = a.x + ch * ly - sh * lx;
+    const ty = a.groundY;
+    const tz = a.z + sh * ly + ch * lx;
+    const t = a.lying < 0 ? 0 : a.lying > 1 ? 1 : a.lying;
+    this.zgWX[i] = ux + (tx - ux) * t;
+    this.zgWY[i] = uy + (ty - uy) * t;
+    this.zgWZ[i] = uz + (tz - uz) * t;
+  }
+
   /** Stamp a settled, directional decal (lobed teardrop, elongated along travel) onto a surface (floor or
    *  wall) into the ring buffer. Floor decals lie flat + streak along the impact velocity; wall decals stand
    *  vertical + run downward. `nx,ny,nz` is the surface normal the quad is oriented to (T77/V54). */
@@ -714,6 +861,15 @@ export class BloodSim {
       this.pgAge[i]! += dt;
       const t = this.pgAge[i]! / this.pgLife[i]!;
       this.pgVis[i] = t >= 1 ? 0 : 1 - t * t * t; // hold fresh, dry/shrink late
+    }
+    // Zombie body-gore (Bug A): age (dry/shrink), then RE-PROJECT each splat to the body's current transform
+    // so it travels with the body to the floor. A vanished body collapses its splats to nothing (reproject).
+    for (let i = 0; i < this.zgCount; i++) {
+      this.zgAge[i]! += dt;
+      const t = this.zgAge[i]! / this.zgLife[i]!;
+      const ageVis = t >= 1 ? 0 : 1 - t * t * t;
+      this.reprojectZombieGore(i); // may set zgVis to 0 when the body is gone
+      if (this.zgVis[i]! > 0) this.zgVis[i] = ageVis;
     }
     this.pickUpFromPuddles(dt);
     this.footsteps(dt);
@@ -830,6 +986,7 @@ export class BloodView {
   private readonly dropMesh: InstancedMesh;
   private readonly decalMesh: InstancedMesh;
   private readonly pgMesh: InstancedMesh; // player BODY-gore layer (T79)
+  private readonly zgMesh: InstancedMesh; // zombie BODY-gore layer — follows the body to the corpse (Bug A)
   private readonly dummy = new Object3D();
   private readonly tmp = new Color();
   private readonly normalScratch = new Vector3();
@@ -873,11 +1030,20 @@ export class BloodView {
     this.pgMesh = registry.track(new InstancedMesh(pgGeo, pgMat, Math.max(1, settings.playerGorePoolSize)), 'buffer', 'blood.playerGoreMesh');
     primeInstanced(this.pgMesh);
     this.pgMesh.renderOrder = 2; // over the body + floor decals so the coating reads
+
+    // Zombie BODY-gore layer (Bug A): same solid faceted-blob look as player gore, but each splat is anchored
+    // to the struck body and re-projected to its CURRENT world transform every frame (the sim's BodyAnchor),
+    // so coating follows the body — and drops to the floor when it topples to a corpse. depthTest ON (V56).
+    const zgGeo = registry.track(new SphereGeometry(1, 7, 6), 'geometry', 'blood.zombieGoreGeo');
+    const zgMat = registry.track(new MeshBasicMaterial({ name: 'blood.zombieGore', toneMapped: false }), 'material', 'blood.zombieGoreMat');
+    this.zgMesh = registry.track(new InstancedMesh(zgGeo, zgMat, Math.max(1, settings.zombieGorePoolSize)), 'buffer', 'blood.zombieGoreMesh');
+    primeInstanced(this.zgMesh);
+    this.zgMesh.renderOrder = 2; // over the corpse + floor decals so the coating reads
   }
 
   /** Add the blood meshes to the scene graph (parent owns graph membership; registry owns disposal). */
   attachTo(scene: Scene | Object3D): void {
-    scene.add(this.dropMesh, this.decalMesh, this.pgMesh);
+    scene.add(this.dropMesh, this.decalMesh, this.pgMesh, this.zgMesh);
   }
 
   consume(events: readonly VisualEvent[], ctx: BloodIngestContext): void {
@@ -957,6 +1123,25 @@ export class BloodView {
     this.pgMesh.count = np;
     this.pgMesh.instanceMatrix.needsUpdate = true;
     if (this.pgMesh.instanceColor) this.pgMesh.instanceColor.needsUpdate = true;
+
+    // Zombie BODY-gore (Bug A): the sim already re-projected each splat to the body's current world transform
+    // (zgWX/zgWY/zgWZ) — including the drop to the floor as it toppled — so the view just places + colours each
+    // blob there, shrinking + darkening it by its dried visibility. Expired/gone splats collapse to nothing.
+    const nz = sim.zombieGoreCount;
+    for (let i = 0; i < nz; i++) {
+      const vis = sim.zgVis[i]!;
+      const sc = sim.zgSize[i]! * vis;
+      this.dummy.position.set(sim.zgWX[i]!, sim.zgWY[i]!, sim.zgWZ[i]!);
+      this.dummy.quaternion.identity();
+      this.dummy.scale.set(sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_RADIAL_FLATTEN);
+      this.dummy.updateMatrix();
+      this.zgMesh.setMatrixAt(i, this.dummy.matrix);
+      const drk = 0.45 + 0.55 * vis; // darken as it dries
+      this.zgMesh.setColorAt(i, this.tmp.setRGB(sim.zgr[i]! * drk, sim.zgg[i]! * drk, sim.zgb[i]! * drk));
+    }
+    this.zgMesh.count = nz;
+    this.zgMesh.instanceMatrix.needsUpdate = true;
+    if (this.zgMesh.instanceColor) this.zgMesh.instanceColor.needsUpdate = true;
   }
 }
 

@@ -107,4 +107,17 @@ export const audioConfig = registerDomain('audio', {
   // ---- spatialization + voice budget ----
   outPanWidthMeters: num({ owner: 'audio', unit: 'meters', doc: 'World-x offset from the player mapped to full left/right stereo pan.', default: 18, min: 0.1, max: 1000 }),
   outMaxVoices: num({ owner: 'audio', unit: 'count', doc: 'Hard cap on concurrent pooled world/groan one-shot voices (player gunshot is exempt).', default: 12, min: 1, max: 128, integer: true }),
+  // ---- procedural MUSIC bed (low, slow, evolving ambient/tension drone on the dedicated MUSIC bus) ----
+  // One ever-present bed (a couple of detuned oscillators + a slow filter LFO); tension rises with the
+  // nearby horde count — calmer when alone, denser/edgier when surrounded. Level + cutoff glide (no pops).
+  outMusicBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the music drone bed at full tension, before music+master bus scaling.', default: 0.4, min: 0, max: 1 }),
+  outMusicMinLevel: num({ owner: 'audio', unit: 'ratio', doc: 'Floor level of the music bed when the player is alone (fraction of the bed gain; tension lerps to 1).', default: 0.25, min: 0, max: 1 }),
+  outMusicBaseFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the low music drone.', default: 48, min: 16, max: 400 }),
+  outMusicDetuneCents: num({ owner: 'audio', unit: 'ratio', doc: 'Detune (cents) of the second drone oscillator → slow beating, an uneasy bed.', default: 8, min: 0, max: 1200 }),
+  outMusicFilterBaseHz: num({ owner: 'audio', unit: 'hz', doc: 'Lowpass cutoff of the music bed at zero tension (calmest, darkest).', default: 180, min: 40, max: 8000 }),
+  outMusicFilterRangeHz: num({ owner: 'audio', unit: 'hz', doc: 'How far the lowpass cutoff opens at full tension (added to the base cutoff → edgier, denser).', default: 500, min: 0, max: 8000 }),
+  outMusicLfoHz: num({ owner: 'audio', unit: 'hz', doc: 'Slow LFO rate modulating the music-bed filter cutoff (the drone "breathes").', default: 0.05, min: 0.005, max: 4 }),
+  outMusicLfoDepthHz: num({ owner: 'audio', unit: 'hz', doc: 'Peak cutoff deviation of the slow filter LFO.', default: 40, min: 0, max: 4000 }),
+  outMusicTensionFullCount: num({ owner: 'audio', unit: 'count', doc: 'Nearby horde size at which music tension reaches full (linear ramp below, clamped above).', default: 30, min: 1, max: 100000, integer: true }),
+  outMusicGlideSeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Time constant for the music bed level + cutoff to glide toward their tension targets (no pops).', default: 2.5, min: 0.05, max: 30 }),
 });
