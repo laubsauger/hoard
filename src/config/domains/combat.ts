@@ -104,6 +104,17 @@ export const combatConfig = registerDomain('combat', {
     min: 1,
     max: 200,
   }),
+  /** Arrival ring (m): once a horde member is within this radius of the shared flow target it STOPS steering
+   *  and holds position, so it settles at the ring instead of piling onto the target + fighting separation
+   *  every tick (the jitter fix, B21/V19/V35). */
+  hordeArriveRadiusMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Radius around the shared flow target within which a horde member stops steering and holds (B21).',
+    default: 1.5,
+    min: 0.1,
+    max: 16,
+  }),
 
   // ---- T16 full pipeline: player melee attack-volume windows (V16) ----
   /** Ticks the player melee damage volume stays OPEN (only window in which melee damage applies, V16). */

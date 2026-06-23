@@ -4,7 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { ResourceRegistry, CameraRig, resolveCameraSettings } from '../engine';
 import { GameRuntime } from '../../game/runtime';
-import { buildCityBlock } from '../../game/scene';
+import { buildCityBlock, buildCityDistrict, buildingsOf } from '../../game/scene';
 import { InMemoryPersistenceAdapter } from '../../game/persistence';
 import { resolveDomain } from '../../config/registry';
 import { combatConfig } from '../../config/domains/combat';
@@ -53,6 +53,25 @@ describe('BlockScene (T38 render integration)', () => {
     expect(Math.min(...scene.debugFadeOpacity)).toBeCloseTo(1, 5); // opaque before cutaway runs
     for (let i = 0; i < 8; i++) scene.syncFrame(0.5, camera);
     expect(Math.min(...scene.debugFadeOpacity)).toBeLessThan(0.5); // roof faded to reveal the interior
+  });
+
+  it('renders a roof per building + fades ONLY the building the player occupies (T80 per-building cutaway)', () => {
+    const adapter = new InMemoryPersistenceAdapter();
+    const district = buildCityDistrict(TIER);
+    const runtime = new GameRuntime({ tier: TIER, adapter, scene: district.block, sectors: district.sectors });
+    runtime.spawnHorde(8, resolveDomain(combatConfig, TIER).gateZeroSpawnRadiusMeters);
+    const registry = new ResourceRegistry();
+    const scene = new BlockScene({ runtime, tier: TIER, registry });
+    const buildingCount = buildingsOf(district.block).length;
+    // at least one fade surface (roof) per building.
+    expect(scene.debugInfo.fadeSurfaces).toBeGreaterThanOrEqual(buildingCount);
+
+    const camera = new CameraRig(resolveCameraSettings(TIER), 1).camera;
+    expect(Math.min(...scene.debugFadeOpacity)).toBeCloseTo(1, 5); // all opaque before the cutaway runs
+    for (let i = 0; i < 8; i++) scene.syncFrame(0.5, camera);
+    // the player's building faded (some surface revealed) while at least one NEIGHBOUR stayed fully opaque.
+    expect(Math.min(...scene.debugFadeOpacity)).toBeLessThan(0.5);
+    expect(Math.max(...scene.debugFadeOpacity)).toBeGreaterThan(0.95);
   });
 
   it('disposes the scene graph without leaking the registry', () => {

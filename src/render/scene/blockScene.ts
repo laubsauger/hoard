@@ -12,10 +12,12 @@ import {
   type BufferGeometry,
   type Camera,
   Color,
+  CylinderGeometry,
   DirectionalLight,
   Fog,
   Group,
   HemisphereLight,
+  IcosahedronGeometry,
   Mesh,
   MeshStandardMaterial,
   Object3D,
@@ -54,6 +56,7 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
+import { buildingsOf, type GroundKind, type PropKind } from '../../game/scene';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -65,12 +68,15 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
   motionReduction: false,
 });
 
-/** A roof / upper-wall surface that fades for the cutaway (V20). */
+/** A roof / upper-wall surface that fades for the cutaway (V20). In a multi-building district each building
+ *  owns its own roof + upper-wall surfaces tagged with `buildingIndex`, so ONLY the building the player is
+ *  inside fades (per-building cutaway, V57) — neighbours stay opaque. */
 interface FadeSurface {
   readonly object: Object3D;
   readonly material: MeshStandardMaterial;
   readonly kind: 'roof' | 'upperWall';
   readonly heightMeters: number;
+  readonly buildingIndex: number;
   opacity: number;
 }
 
@@ -169,8 +175,10 @@ export class BlockScene {
     this.scene.add(this.ambient, this.hemi, this.sun, this.sun.target);
 
     this.buildGround();
+    this.buildGroundRects();
     this.buildWallsAndRoof();
     this.buildDoorsAndWindows();
+    this.buildProps();
     this.playerMesh = this.buildPlayer();
     this.scene.add(this.playerMesh);
 
@@ -213,56 +221,74 @@ export class BlockScene {
   private buildGround(): void {
     const { width, depth } = this.worldExtent();
     const margin = this.navCellSize * 4;
+    // Base ground = grass/dirt verge under the whole district; the suburban paint (asphalt street, concrete
+    // sidewalk, grass yards) is layered on top by buildGroundRects.
     const ground = new Mesh(
       this.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
-      this.mat('ground', { color: 0x23262a, roughness: 0.95 }),
+      this.mat('ground', { color: 0x2a3120, roughness: 0.98 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(width / 2, 0, depth / 2);
     ground.receiveShadow = true;
     this.scene.add(ground);
 
-    // Interior floor slab over the building footprint, slightly raised + lighter so rooms read.
-    const b = this.runtime.scene.buildingBounds;
-    const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
-    const fd = (b.maxCy - b.minCy + 1) * this.navCellSize;
-    const floor = new Mesh(
-      this.geo('floor.geo', new PlaneGeometry(fw, fd)),
-      this.mat('floor', { color: 0x3a3d38, roughness: 0.9 }),
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, this.world.floorThicknessMeters, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
-    floor.receiveShadow = true;
-    this.scene.add(floor);
+    // Per-building interior floor slab — slightly raised + lighter so each house's rooms read (multi-building).
+    const floorMat = this.mat('floor', { color: 0x3a3d38, roughness: 0.9 });
+    buildingsOf(this.runtime.scene).forEach((bld, i) => {
+      const b = bld.bounds;
+      const fw = (b.maxCx - b.minCx + 1) * this.navCellSize;
+      const fd = (b.maxCy - b.minCy + 1) * this.navCellSize;
+      const floor = new Mesh(this.geo(`floor.geo.${i}`, new PlaneGeometry(fw, fd)), floorMat);
+      floor.rotation.x = -Math.PI / 2;
+      floor.position.set(((b.minCx + b.maxCx + 1) / 2) * this.navCellSize, this.world.floorThicknessMeters, ((b.minCy + b.maxCy + 1) / 2) * this.navCellSize);
+      floor.receiveShadow = true;
+      this.scene.add(floor);
+    });
+  }
+
+  /** Suburban ground paint (T80): asphalt street, concrete sidewalk, grass yards as flat coloured quads
+   *  layered by a small per-kind Y offset (highest kind wins on overlap). Pure dressing; no nav effect. */
+  private buildGroundRects(): void {
+    const rects = this.runtime.scene.groundRects;
+    if (!rects || rects.length === 0) return;
+    const cs = this.navCellSize;
+    const color: Record<GroundKind, number> = { asphalt: 0x26282c, sidewalk: 0x6a6c6e, grass: 0x3b4a2c };
+    const yOf: Record<GroundKind, number> = { asphalt: 0.012, sidewalk: 0.02, grass: 0.028 };
+    const mats: Record<GroundKind, MeshStandardMaterial> = {
+      asphalt: this.mat('ground.asphalt', { color: color.asphalt, roughness: 0.96 }),
+      sidewalk: this.mat('ground.sidewalk', { color: color.sidewalk, roughness: 0.9 }),
+      grass: this.mat('ground.grass', { color: color.grass, roughness: 1 }),
+    };
+    const group = new Group();
+    rects.forEach((r, i) => {
+      const w = (r.rect.maxCx - r.rect.minCx + 1) * cs;
+      const d = (r.rect.maxCy - r.rect.minCy + 1) * cs;
+      const m = new Mesh(this.geo(`groundRect.${i}`, new PlaneGeometry(w, d)), mats[r.kind]);
+      m.rotation.x = -Math.PI / 2;
+      m.position.set(((r.rect.minCx + r.rect.maxCx + 1) / 2) * cs, yOf[r.kind], ((r.rect.minCy + r.rect.maxCy + 1) / 2) * cs);
+      m.receiveShadow = true;
+      group.add(m);
+    });
+    this.scene.add(group);
   }
 
   private buildWallsAndRoof(): void {
     const ts = this.runtime.scene;
     const grid = ts.navGrid;
-    const wallH = this.world.buildingWallHeightMeters;
-    const baseH = Math.min(this.visibility.baseHeightMeters, wallH);
-    const upperH = Math.max(0, wallH - baseH);
+    const buildings = buildingsOf(ts);
     const th = Math.min(this.wallPanelThickness, this.navCellSize); // thin shell, never wider than the cell
+    const baseHeightCap = this.visibility.baseHeightMeters;
 
-    // B3: walls are THIN oriented shells on exposed cell edges (not cell-filling blocks). Two geometries per
-    // band: one for edges running along X (thickness in Z), one for edges along Z (thickness in X).
-    const baseGeoX = this.geo('wallBaseX.geo', new BoxGeometry(this.navCellSize, baseH, th));
-    const baseGeoZ = this.geo('wallBaseZ.geo', new BoxGeometry(th, baseH, this.navCellSize));
-    const upperGeoX = upperH > 0 ? this.geo('wallUpperX.geo', new BoxGeometry(this.navCellSize, upperH, th)) : null;
-    const upperGeoZ = upperH > 0 ? this.geo('wallUpperZ.geo', new BoxGeometry(th, upperH, this.navCellSize)) : null;
+    // shared (never-fade) materials: plain wall base + the tinted destructible section.
     const baseMat = this.mat('wallBase', { color: 0x6b6256, roughness: 0.85 });
-    const upperMat = this.mat('wallUpper', { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
-    const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 }); // the destructible wall, tinted
+    const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 });
 
-    // B3: bias the fading upper-wall faces back + lift them off the retained base so reveal faces never
-    // z-fight the coplanar base top / ground (cutaway). Decision is pure (resolveCutawayDepthOffset).
+    // B3: bias fading upper-wall + roof faces back + lift them off the retained base so reveal faces never
+    // z-fight the coplanar base top / ground (cutaway). Decisions are pure (resolveCutawayDepthOffset).
     const upperOffset = resolveCutawayDepthOffset('upperWall', this.cutawayDepth);
-    upperMat.polygonOffset = upperOffset.polygonOffset;
-    upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
-    upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
-    const upperBottomY = baseH + upperOffset.verticalInsetMeters;
+    const roofOffset = resolveCutawayDepthOffset('roof', this.cutawayDepth);
 
-    // structural-section nav cells get distinct, hideable meshes; everything else is a plain wall.
+    // structural-section nav cells get distinct, hideable meshes; everything else is a plain wall (global).
     const sectionByNav = new Map<number, number>(); // navIndex -> structuralCell
     for (let z = 0; z < ts.wall.sizeZ; z++) {
       const sc = ts.wall.packCell(0, 0, z);
@@ -270,90 +296,191 @@ export class BlockScene {
       sectionByNav.set(grid.index(cell.cx, cell.cy), sc);
     }
 
-    const wallsGroup = new Group();
-    const upperGroup = new Group();
-
     // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
-    const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
+    const edges = (cx: number, cy: number): ('x' | 'z')[] => {
       const open = (nx: number, ny: number): boolean =>
         nx < 0 || ny < 0 || nx >= grid.width || ny >= grid.height || !grid.isBlocked(grid.index(nx, ny));
-      const out: { dx: number; dz: number; along: 'x' | 'z' }[] = [];
-      if (open(cx, cy - 1)) out.push({ dx: 0, dz: -1, along: 'x' });
-      if (open(cx, cy + 1)) out.push({ dx: 0, dz: 1, along: 'x' });
-      if (open(cx + 1, cy)) out.push({ dx: 1, dz: 0, along: 'z' });
-      if (open(cx - 1, cy)) out.push({ dx: -1, dz: 0, along: 'z' });
+      const out: ('x' | 'z')[] = [];
+      if (open(cx, cy - 1) || open(cx, cy + 1)) out.push('x');
+      if (open(cx + 1, cy) || open(cx - 1, cy)) out.push('z');
       return out;
     };
 
-    for (let cy = 0; cy < grid.height; cy++) {
-      for (let cx = 0; cx < grid.width; cx++) {
-        const idx = grid.index(cx, cy);
-        if (!grid.isBlocked(idx)) continue;
-        const wx = (cx + 0.5) * this.navCellSize;
-        const wz = (cy + 0.5) * this.navCellSize;
-        const sc = sectionByNav.get(idx);
-        const exposed = edges(cx, cy);
-        // A fully-enclosed wall cell would have no exposed edge — emit a single thin core panel so it still
-        // reads (and, for a section cell, still has a hideable mesh for breach). Walls border open space.
-        const faces = exposed.length > 0 ? exposed : [{ dx: 0, dz: 1, along: 'x' as const }];
-        // T70/B12: a 1-cell-thick wall is open on BOTH sides — emitting a panel per exposed face produced
-        // TWO parallel walls a whole cell apart (the "doubled wall + gap"). Emit ONE panel per RUN
-        // orientation, CENTRED on the cell: an X-run panel when a north/south face is exposed, a Z-run panel
-        // when an east/west face is exposed (a corner cell gets both → an L). No doubling, no gap.
-        const orientations: ('x' | 'z')[] = [];
-        if (faces.some((f) => f.along === 'x')) orientations.push('x');
-        if (faces.some((f) => f.along === 'z')) orientations.push('z');
-        if (orientations.length === 0) orientations.push('x');
-        const sectionObjs: Object3D[] = [];
+    // shared wall base group (base walls never fade); cache wall geometries by per-storey height.
+    const wallsGroup = new Group();
+    this.scene.add(wallsGroup);
+    const geoCache = new Map<string, { baseGeoX: BoxGeometry; baseGeoZ: BoxGeometry; upperGeoX: BoxGeometry | null; upperGeoZ: BoxGeometry | null }>();
 
-        for (const along of orientations) {
-          const baseGeo = along === 'x' ? baseGeoX : baseGeoZ;
-          const upperGeo = along === 'x' ? upperGeoX : upperGeoZ;
+    buildings.forEach((bld, bi) => {
+      const wallH = this.world.buildingWallHeightMeters * Math.max(1, bld.storeys ?? 1);
+      const baseH = Math.min(baseHeightCap, wallH);
+      const upperH = Math.max(0, wallH - baseH);
+      const upperBottomY = baseH + upperOffset.verticalInsetMeters;
 
-          const base = new Mesh(baseGeo, sc !== undefined ? sectionMat : baseMat);
-          base.position.set(wx, baseH / 2, wz); // centred on the cell — one wall line, not two opposite faces
-          base.castShadow = true;
-          base.receiveShadow = true;
-          wallsGroup.add(base);
-          if (sc !== undefined) sectionObjs.push(base);
+      const key = `${baseH.toFixed(3)}_${upperH.toFixed(3)}`;
+      let g = geoCache.get(key);
+      if (!g) {
+        g = {
+          baseGeoX: this.geo(`wallBaseX.${key}`, new BoxGeometry(this.navCellSize, baseH, th)),
+          baseGeoZ: this.geo(`wallBaseZ.${key}`, new BoxGeometry(th, baseH, this.navCellSize)),
+          upperGeoX: upperH > 0 ? this.geo(`wallUpperX.${key}`, new BoxGeometry(this.navCellSize, upperH, th)) : null,
+          upperGeoZ: upperH > 0 ? this.geo(`wallUpperZ.${key}`, new BoxGeometry(th, upperH, this.navCellSize)) : null,
+        };
+        geoCache.set(key, g);
+      }
 
-          if (upperGeo) {
-            const upper = new Mesh(upperGeo, sc !== undefined ? sectionMat : upperMat);
-            upper.position.set(wx, upperBottomY + upperH / 2, wz);
-            upper.castShadow = true;
-            if (sc !== undefined) {
-              // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
-              wallsGroup.add(upper);
-              sectionObjs.push(upper);
-            } else {
-              upper.renderOrder = upperOffset.renderOrder;
-              upperGroup.add(upper);
+      // each building owns its upper-wall + roof materials so they fade INDEPENDENTLY (per-building cutaway).
+      const upperMat = this.mat(`wallUpper.${bi}`, { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
+      upperMat.polygonOffset = upperOffset.polygonOffset;
+      upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+      upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+      const upperGroup = new Group();
+
+      const b = bld.bounds;
+      for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+        for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+          const idx = grid.index(cx, cy);
+          if (!grid.isBlocked(idx)) continue;
+          const wx = (cx + 0.5) * this.navCellSize;
+          const wz = (cy + 0.5) * this.navCellSize;
+          const sc = sectionByNav.get(idx);
+          // T70/B12: ONE centred panel per run orientation (an X-run when a N/S face is exposed, a Z-run when
+          // an E/W face is exposed; a corner gets both → an L). No doubling, no gap.
+          const orientations = edges(cx, cy);
+          if (orientations.length === 0) orientations.push('x');
+          const sectionObjs: Object3D[] = [];
+
+          for (const along of orientations) {
+            const baseGeo = along === 'x' ? g.baseGeoX : g.baseGeoZ;
+            const upperGeo = along === 'x' ? g.upperGeoX : g.upperGeoZ;
+
+            const base = new Mesh(baseGeo, sc !== undefined ? sectionMat : baseMat);
+            base.position.set(wx, baseH / 2, wz);
+            base.castShadow = true;
+            base.receiveShadow = true;
+            wallsGroup.add(base);
+            if (sc !== undefined) sectionObjs.push(base);
+
+            if (upperGeo) {
+              const upper = new Mesh(upperGeo, sc !== undefined ? sectionMat : upperMat);
+              upper.position.set(wx, upperBottomY + upperH / 2, wz);
+              upper.castShadow = true;
+              if (sc !== undefined) {
+                // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
+                wallsGroup.add(upper);
+                sectionObjs.push(upper);
+              } else {
+                upper.renderOrder = upperOffset.renderOrder;
+                upperGroup.add(upper);
+              }
             }
           }
+          if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
         }
-        if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
       }
-    }
-    this.scene.add(wallsGroup, upperGroup);
-    if (upperH > 0) {
-      this.fadeSurfaces.push({ object: upperGroup, material: upperMat, kind: 'upperWall', heightMeters: wallH, opacity: 1 });
-    }
 
-    // Roof over the building interior — the primary cutaway occluder (fades when the player is inside).
-    const b = ts.buildingBounds;
-    const rw = (b.maxCx - b.minCx + 1) * this.navCellSize;
-    const rd = (b.maxCy - b.minCy + 1) * this.navCellSize;
-    const roofMat = this.mat('roof', { color: 0x4c4a44, roughness: 0.9, transparent: true, opacity: 1 });
-    const roofOffset = resolveCutawayDepthOffset('roof', this.cutawayDepth);
-    roofMat.polygonOffset = roofOffset.polygonOffset;
-    roofMat.polygonOffsetFactor = roofOffset.polygonOffsetFactor;
-    roofMat.polygonOffsetUnits = roofOffset.polygonOffsetUnits;
-    const roof = new Mesh(this.geo('roof.geo', new PlaneGeometry(rw, rd)), roofMat);
-    roof.rotation.x = -Math.PI / 2;
-    roof.renderOrder = roofOffset.renderOrder;
-    roof.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, wallH, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
-    this.scene.add(roof);
-    this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', heightMeters: wallH, opacity: 1 });
+      this.scene.add(upperGroup);
+      if (upperH > 0) {
+        this.fadeSurfaces.push({ object: upperGroup, material: upperMat, kind: 'upperWall', heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+      }
+
+      // Roof over this building's interior — the primary cutaway occluder (fades when the player is inside it).
+      const rw = (b.maxCx - b.minCx + 1) * this.navCellSize;
+      const rd = (b.maxCy - b.minCy + 1) * this.navCellSize;
+      const roofMat = this.mat(`roof.${bi}`, { color: 0x4c4a44, roughness: 0.9, transparent: true, opacity: 1 });
+      roofMat.polygonOffset = roofOffset.polygonOffset;
+      roofMat.polygonOffsetFactor = roofOffset.polygonOffsetFactor;
+      roofMat.polygonOffsetUnits = roofOffset.polygonOffsetUnits;
+      const roof = new Mesh(this.geo(`roof.geo.${bi}`, new PlaneGeometry(rw, rd)), roofMat);
+      roof.rotation.x = -Math.PI / 2;
+      roof.renderOrder = roofOffset.renderOrder;
+      roof.position.set(((b.minCx + b.maxCx + 1) / 2) * this.navCellSize, wallH, ((b.minCy + b.maxCy + 1) / 2) * this.navCellSize);
+      this.scene.add(roof);
+      this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+    });
+  }
+
+  /** Decorative district dressing (T80): abandoned cars, tires, bushes, trees, picket fences. Shared
+   *  geometry + material per kind (built lazily), positioned at the authored cell. Static; not nav-blocking. */
+  private buildProps(): void {
+    const props = this.runtime.scene.props;
+    if (!props || props.length === 0) return;
+    const cs = this.navCellSize;
+    const group = new Group();
+
+    // lazily-built shared resources per prop kind (tracked for disposal, V24).
+    const fenceMat = this.mat('prop.fence', { color: 0x4a3a2a, roughness: 0.9 });
+    const tireMat = this.mat('prop.tire', { color: 0x161616, roughness: 0.95 });
+    const bushMat = this.mat('prop.bush', { color: 0x33491f, roughness: 1 });
+    const trunkMat = this.mat('prop.trunk', { color: 0x39281a, roughness: 0.95 });
+    const foliageMat = this.mat('prop.foliage', { color: 0x2c4a24, roughness: 1 });
+    const carBodyMat = this.mat('prop.carBody', { color: 0x5a5247, roughness: 0.7, metalness: 0.2 });
+    const carCabinMat = this.mat('prop.carCabin', { color: 0x2b3036, roughness: 0.5, metalness: 0.2 });
+
+    const fenceGeo = this.geo('prop.fence.geo', new BoxGeometry(cs * 0.92, 1.0, 0.08));
+    const tireGeo = this.geo('prop.tire.geo', new CylinderGeometry(0.34, 0.34, 0.38, 12));
+    const bushGeo = this.geo('prop.bush.geo', new IcosahedronGeometry(0.75, 0));
+    const trunkGeo = this.geo('prop.trunk.geo', new CylinderGeometry(0.18, 0.24, 2.2, 7));
+    const foliageGeo = this.geo('prop.foliage.geo', new IcosahedronGeometry(1.5, 0));
+    const carBodyGeo = this.geo('prop.carBody.geo', new BoxGeometry(2.0, 0.9, 4.2));
+    const carCabinGeo = this.geo('prop.carCabin.geo', new BoxGeometry(1.8, 0.8, 2.0));
+
+    const build: Record<PropKind, (cx: number, cy: number, rot: number, variant: number) => void> = {
+      fence: (cx, cy, rot) => {
+        const m = new Mesh(fenceGeo, fenceMat);
+        m.position.set((cx + 0.5) * cs, 0.5, (cy + 0.5) * cs);
+        m.rotation.y = rot;
+        m.castShadow = true;
+        m.receiveShadow = true;
+        group.add(m);
+      },
+      tire: (cx, cy) => {
+        const m = new Mesh(tireGeo, tireMat);
+        m.rotation.x = Math.PI / 2;
+        m.position.set((cx + 0.5) * cs, 0.19, (cy + 0.5) * cs);
+        m.castShadow = true;
+        group.add(m);
+      },
+      bush: (cx, cy, _rot, variant) => {
+        const m = new Mesh(bushGeo, bushMat);
+        const s = 0.8 + variant * 0.25;
+        m.scale.set(s, s * 0.8, s);
+        m.position.set((cx + 0.5) * cs, 0.5 * s, (cy + 0.5) * cs);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        group.add(m);
+      },
+      tree: (cx, cy, _rot, variant) => {
+        const x = (cx + 0.5) * cs;
+        const z = (cy + 0.5) * cs;
+        const trunk = new Mesh(trunkGeo, trunkMat);
+        trunk.position.set(x, 1.1, z);
+        trunk.castShadow = true;
+        const foliage = new Mesh(foliageGeo, foliageMat);
+        const s = 1 + variant * 0.3;
+        foliage.scale.setScalar(s);
+        foliage.position.set(x, 2.6, z);
+        foliage.castShadow = true;
+        group.add(trunk, foliage);
+      },
+      car: (cx, cy, rot) => {
+        const x = (cx + 0.5) * cs;
+        const z = (cy + 0.5) * cs;
+        const body = new Mesh(carBodyGeo, carBodyMat);
+        body.position.set(x, 0.55, z);
+        body.rotation.y = rot;
+        body.castShadow = true;
+        body.receiveShadow = true;
+        const cabin = new Mesh(carCabinGeo, carCabinMat);
+        cabin.position.set(x, 1.3, z);
+        cabin.rotation.y = rot;
+        cabin.castShadow = true;
+        group.add(body, cabin);
+      },
+    };
+
+    for (const p of props) build[p.kind](p.cx, p.cy, p.rot ?? 0, p.variant ?? 0);
+    this.scene.add(group);
   }
 
   /**
@@ -364,7 +491,6 @@ export class BlockScene {
   private buildDoorsAndWindows(): void {
     const ts = this.runtime.scene;
     const grid = ts.navGrid;
-    const b = ts.buildingBounds;
     const cs = this.navCellSize;
     const wallH = this.world.buildingWallHeightMeters;
     const group = new Group();
@@ -403,35 +529,43 @@ export class BlockScene {
       group.add(post1, post2, lintel, leaf);
     }
 
-    // ---- WINDOWS: glass panes on a deterministic subset of facade (perimeter) wall cells. ----
-    const sillH = wallH * 0.45;
-    const winH = wallH * 0.32;
-    const paneGeo = this.geo('window.pane.geo', new BoxGeometry(0.08, winH, cs * 0.62));
+    // ---- WINDOWS: glass panes on a deterministic subset of facade (perimeter) wall cells, per building. ----
     const doorAdjacent = (cx: number, cy: number): boolean =>
       ts.exitCells.some((e) => Math.abs(e.cx - cx) + Math.abs(e.cy - cy) <= 1);
-    let wi = 0;
-    for (let cy = b.minCy; cy <= b.maxCy; cy++) {
-      for (let cx = b.minCx; cx <= b.maxCx; cx++) {
-        const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
-        if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
-        const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
-        if (corner || doorAdjacent(cx, cy)) {
-          wi += 1;
-          continue;
+    buildingsOf(ts).forEach((bld, bi) => {
+      const b = bld.bounds;
+      const bWallH = wallH * Math.max(1, bld.storeys ?? 1);
+      const sillH = this.world.buildingWallHeightMeters * 0.45; // ground-floor sill height (consistent)
+      const winH = this.world.buildingWallHeightMeters * 0.32;
+      const paneGeo = this.geo(`window.pane.geo.${bi}`, new BoxGeometry(0.08, winH, cs * 0.62));
+      // a second-storey band of windows on two-storey houses.
+      const sills = bWallH > this.world.buildingWallHeightMeters * 1.1 ? [sillH, sillH + this.world.buildingWallHeightMeters] : [sillH];
+      let wi = 0;
+      for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+        for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+          const onEdge = cx === b.minCx || cx === b.maxCx || cy === b.minCy || cy === b.maxCy;
+          if (!onEdge || !grid.isBlocked(grid.index(cx, cy))) continue;
+          const corner = (cx === b.minCx || cx === b.maxCx) && (cy === b.minCy || cy === b.maxCy);
+          if (corner || doorAdjacent(cx, cy)) {
+            wi += 1;
+            continue;
+          }
+          if (wi++ % 2 !== 0) continue; // every other facade cell gets a window (deterministic)
+          let nx = 0;
+          let nz = 0;
+          if (cx === b.minCx) nx = -1;
+          else if (cx === b.maxCx) nx = 1;
+          else if (cy === b.minCy) nz = -1;
+          else nz = 1;
+          for (const sy of sills) {
+            const pane = new Mesh(paneGeo, glassMat);
+            pane.position.set((cx + 0.5) * cs + nx * 0.02, sy + winH / 2, (cy + 0.5) * cs + nz * 0.02);
+            if (nz !== 0) pane.rotation.y = Math.PI / 2; // pane spans X on a north/south wall
+            group.add(pane);
+          }
         }
-        if (wi++ % 2 !== 0) continue; // every other facade cell gets a window (deterministic)
-        let nx = 0;
-        let nz = 0;
-        if (cx === b.minCx) nx = -1;
-        else if (cx === b.maxCx) nx = 1;
-        else if (cy === b.minCy) nz = -1;
-        else nz = 1;
-        const pane = new Mesh(paneGeo, glassMat);
-        pane.position.set((cx + 0.5) * cs + nx * 0.02, sillH + winH / 2, (cy + 0.5) * cs + nz * 0.02);
-        if (nz !== 0) pane.rotation.y = Math.PI / 2; // pane spans X on a north/south wall
-        group.add(pane);
       }
-    }
+    });
 
     this.scene.add(group);
   }
@@ -595,7 +729,9 @@ export class BlockScene {
   }
 
   private syncCutaway(dtSeconds: number, camera: Camera | undefined): void {
-    const playerInside = this.isPlayerInsideBuilding();
+    // Per-building cutaway (V57): only the building the player currently occupies fades; its neighbours stay
+    // opaque so the district still reads as solid streets of houses.
+    const insideIndex = this.playerBuildingIndex();
     // V29 motion reduction: cut roofs/upper walls instantly rather than animating the fade (less motion).
     const fadeRate = this.accessibility.feedback.reduceMotion
       ? 1
@@ -603,6 +739,7 @@ export class BlockScene {
         ? dtSeconds / this.roofFadeSeconds
         : 1;
     for (const s of this.fadeSurfaces) {
+      const playerInside = s.buildingIndex === insideIndex;
       const ctx: OcclusionContext = {
         playerInside,
         // The top-down tactical camera looking into an enclosed room is occluded by its roof/upper walls.
@@ -624,12 +761,21 @@ export class BlockScene {
     }
   }
 
-  private isPlayerInsideBuilding(): boolean {
-    const b = this.runtime.scene.buildingBounds;
+  /** Index of the building the player currently occupies, or -1 if they are out on the street/yard. */
+  private playerBuildingIndex(): number {
     const p = this.runtime.player();
     const cx = Math.floor(p.x / this.navCellSize);
     const cy = Math.floor(p.z / this.navCellSize);
-    return cx >= b.minCx && cx <= b.maxCx && cy >= b.minCy && cy <= b.maxCy;
+    const buildings = buildingsOf(this.runtime.scene);
+    for (let i = 0; i < buildings.length; i++) {
+      const b = buildings[i]!.bounds;
+      if (cx >= b.minCx && cx <= b.maxCx && cy >= b.minCy && cy <= b.maxCy) return i;
+    }
+    return -1;
+  }
+
+  private isPlayerInsideBuilding(): boolean {
+    return this.playerBuildingIndex() >= 0;
   }
 
   /** Detach the scene graph. The injected registry owns disposal of tracked geometries/materials (V24). */
