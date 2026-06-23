@@ -36,7 +36,6 @@ import {
   SpotLight,
   Vector3,
 } from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { resolve } from '../../config/spec';
 import { resolveDomain } from '../../config/registry';
 import { worldConfig } from '../../config/domains/world';
@@ -69,6 +68,8 @@ import {
   type CutawayDepthSettings,
   type VecXZ,
 } from '../world/visibility';
+import { SceneResources } from './build/sceneResources';
+import type { FadeSurface } from './build/handles';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -110,25 +111,6 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
   motionReduction: false,
 });
 
-/**
- * A roof / upper-wall surface that fades for the cutaway (V20/V58). Each surface is tagged with the
- * `buildingIndex` that owns it so ONLY the building the player currently occupies fades (per-building cutaway,
- * V59) — neighbours stay opaque so the district reads solid. An upper-wall group also carries the shared
- * outward horizontal normal of its panels so the DIRECTIONAL cutaway (V58) fades only the side(s) turned
- * toward the camera; the far walls stay to read enclosure. `outwardNormal` is null for the roof.
- */
-interface FadeSurface {
-  readonly object: Object3D;
-  readonly material: MeshStandardMaterial;
-  readonly kind: 'roof' | 'upperWall';
-  readonly outwardNormal: VecXZ | null;
-  readonly heightMeters: number;
-  readonly buildingIndex: number;
-  /** World-XZ centre of the surface (on the wall plane) — used by the OUTSIDE-WALL cutaway (V62). */
-  readonly centerX: number;
-  readonly centerZ: number;
-  opacity: number;
-}
 
 const PLAYER_BASE_EMISSIVE = 0.4; // authored player-rim glow at full outline strength (scaled by V29 setting)
 // Authored cool-grey fog/atmosphere hue (relative channel weights); luminance is lifted off near-black to
@@ -215,9 +197,10 @@ export class BlockScene {
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame. */
   private exposure = 1;
 
-  // shared, tracked GPU resources (V24)
-  private readonly mats: MeshStandardMaterial[] = [];
-  private readonly geos: BufferGeometry[] = [];
+  // shared, tracked GPU-resource factory (V24). Builders create materials/geometries through this; mat/geo/
+  // mergeBoxes below delegate to it (kept as thin methods so the many existing call sites stay unchanged).
+  // Assigned in the constructor (after `registry`), not as a field initializer — those run before the body.
+  private readonly res: SceneResources;
 
   private tierOf(): QualityTier {
     return this.tier;
@@ -227,6 +210,7 @@ export class BlockScene {
     this.runtime = opts.runtime;
     this.tier = opts.tier;
     this.registry = opts.registry;
+    this.res = new SceneResources(this.registry);
     this.accessibility = opts.accessibility ?? DEFAULT_ACCESSIBILITY;
     this.basePlayerEmissive = PLAYER_BASE_EMISSIVE;
     this.navCellSize = this.runtime.scene.navGrid.settings.navCellSize;
@@ -315,24 +299,19 @@ export class BlockScene {
 
   // ---- geometry construction ----
 
+  // Thin delegators to the SceneResources factory (Phase 0 of the blockScene decomposition) — kept so the many
+  // existing `this.mat()/this.geo()/this.mergeBoxes()` call sites are untouched; builders extracted in later
+  // phases take a SceneResources directly.
   private mat(label: string, opts: ConstructorParameters<typeof MeshStandardMaterial>[0]): MeshStandardMaterial {
-    const m = this.registry.track(new MeshStandardMaterial(opts), 'material', `block.${label}`);
-    this.mats.push(m);
-    return m;
+    return this.res.mat(label, opts);
   }
 
   private geo<T extends BufferGeometry>(label: string, g: T): T {
-    this.registry.track(g, 'geometry', `block.${label}`);
-    this.geos.push(g);
-    return g;
+    return this.res.geo(label, g);
   }
 
-  /** Merge a batch of throwaway BoxGeometries into ONE tracked geometry (cuts per-cell wall draw calls). */
   private mergeBoxes(label: string, boxes: BoxGeometry[]): BufferGeometry | null {
-    if (boxes.length === 0) return null;
-    const merged = mergeGeometries(boxes, false);
-    for (const b of boxes) b.dispose();
-    return merged ? this.geo(label, merged) : null;
+    return this.res.mergeBoxes(label, boxes);
   }
 
   private worldExtent(): { width: number; depth: number } {
@@ -1672,7 +1651,7 @@ export class BlockScene {
 
   /** Test/diagnostics: number of fadeable cutaway surfaces + tracked GPU resources. */
   get debugInfo(): { fadeSurfaces: number; materials: number; geometries: number; sectionGroups: number } {
-    return { fadeSurfaces: this.fadeSurfaces.length, materials: this.mats.length, geometries: this.geos.length, sectionGroups: this.sectionMeshes.length };
+    return { fadeSurfaces: this.fadeSurfaces.length, materials: this.res.materialCount, geometries: this.res.geometryCount, sectionGroups: this.sectionMeshes.length };
   }
 
   /** Test/diagnostics: current opacity of each cutaway surface (roof + upper walls). */
