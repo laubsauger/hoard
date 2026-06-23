@@ -53,6 +53,39 @@ export interface Vec3 {
   readonly z: number;
 }
 
+/**
+ * One enterable building in a multi-building district (T80). `bounds` is the shell footprint (perimeter
+ * walls + interior) in nav cells; the renderer gives EACH building its own roof + interior floor slab and
+ * fades ONLY the building the player currently occupies (per-building cutaway, V20/V57). `storeys` scales
+ * the wall/roof height (1 = single-storey, 2 = two-storey ~6 m). A district with a single building is just
+ * the one-element case — every prior single-building scene keeps working through `buildingsOf` (below).
+ */
+export interface BuildingFootprint {
+  readonly bounds: CellRect;
+  /** Storeys (default 1). Wall height = world.buildingWallHeightMeters × storeys. */
+  readonly storeys?: number;
+}
+
+/** Suburban ground paint (T80) — the renderer draws each as a flat coloured quad (asphalt street, concrete
+ *  sidewalk, grass verge/yard). Pure presentation; never consulted by the sim. */
+export type GroundKind = 'asphalt' | 'sidewalk' | 'grass';
+export interface GroundRect {
+  readonly kind: GroundKind;
+  readonly rect: CellRect;
+}
+
+/** Decorative district dressing (T80) — abandoned cars, tires, bushes, trees, yard fences. The renderer
+ *  builds simple shared geometry per kind at the cell centre; these do NOT block nav (kept out of the grid
+ *  so they never render as full-height walls). `rot` is a Y-rotation (radians); `variant` tweaks size/tint. */
+export type PropKind = 'car' | 'tire' | 'bush' | 'tree' | 'fence';
+export interface PropInstance {
+  readonly kind: PropKind;
+  readonly cx: number;
+  readonly cy: number;
+  readonly rot?: number;
+  readonly variant?: number;
+}
+
 export interface TestBlock {
   readonly navGrid: NavGrid;
   readonly region: RegionGraph;
@@ -64,9 +97,17 @@ export interface TestBlock {
   /** Player aim/eye position is filled per-runtime using player config aim height. */
   readonly playerCell: CellXY;
   readonly spawnCenterCell: CellXY;
-  /** Building shell rectangle (walls + interior) for the renderer's roof + cutaway (T38). */
+  /** Union bounding box of all buildings (walls + interior) — back-compat single-rect accessor (T38). For a
+   *  multi-building district this is the bbox covering every building; the renderer iterates `buildings`. */
   readonly buildingBounds: CellRect;
-  /** Walkable cells the player can leave the building through (escape route, T38). May be empty. */
+  /** Every enterable building in the district (T80). Absent/empty ⇒ the single-building case `[buildingBounds]`
+   *  (see `buildingsOf`). The renderer gives each its own roof + floor + per-building cutaway. */
+  readonly buildings?: readonly BuildingFootprint[];
+  /** Suburban ground paint quads (asphalt/sidewalk/grass) the renderer draws over the base ground (T80). */
+  readonly groundRects?: readonly GroundRect[];
+  /** Decorative district dressing (cars/tires/bushes/trees/fences) the renderer instantiates (T80). */
+  readonly props?: readonly PropInstance[];
+  /** Walkable cells the player can leave/enter a building through (front doors, T38). May be empty. */
   readonly exitCells: readonly CellXY[];
   /** World-space centre of a nav cell (y = 0 floor). */
   cellCenter(cell: CellXY): Vec3;
@@ -97,6 +138,19 @@ export function isWalkableRadius(
     scene.isWalkableWorld(x, z + r) &&
     scene.isWalkableWorld(x, z - r)
   );
+}
+
+/**
+ * The buildings of a scene as a non-empty list (T80). Multi-building districts supply `buildings`; every
+ * legacy single-building scene falls back to the one-element `[{ bounds: buildingBounds }]` so the renderer
+ * has ONE code path. A building with no explicit storeys reads as single-storey at the configured height.
+ */
+export function buildingsOf(
+  block: Pick<TestBlock, 'buildings' | 'buildingBounds'>,
+): readonly BuildingFootprint[] {
+  return block.buildings && block.buildings.length > 0
+    ? block.buildings
+    : [{ bounds: block.buildingBounds }];
 }
 
 /** Sample step (m) for the LOS walk — ~half a nav cell so a wall between two points is never skipped. */
