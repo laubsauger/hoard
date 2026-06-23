@@ -4,7 +4,7 @@
 // `exactOptionalPropertyTypes` stays satisfied. Mutable fields (opacity, current) are annotated where systems
 // write them.
 
-import type { Object3D, MeshStandardMaterial } from 'three';
+import type { Object3D, Mesh, MeshStandardMaterial } from 'three';
 import type { VecXZ } from '../../world/visibility';
 
 /**
@@ -38,4 +38,12 @@ export interface DoorLeaf {
   readonly pivot: Object3D;
   readonly openTarget: number;
   current: number;
+}
+
+/** Player avatar handles. `rimMat` drives the accessibility outline glow; `aoContact` follows the player each
+ *  frame (both null when disabled by config). */
+export interface PlayerHandles {
+  readonly mesh: Object3D;
+  readonly rimMat: MeshStandardMaterial | null;
+  readonly aoContact: Mesh | null;
 }

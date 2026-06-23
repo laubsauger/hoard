@@ -12,12 +12,10 @@ import {
   BoxGeometry,
   type BufferGeometry,
   type Camera,
-  CircleGeometry,
   Color,
   DirectionalLight,
   DoubleSide,
   Euler,
-  Float32BufferAttribute,
   Fog,
   Group,
   HemisphereLight,
@@ -25,10 +23,8 @@ import {
   InstancedMesh,
   Matrix4,
   Mesh,
-  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
-  CapsuleGeometry,
   Quaternion,
   Scene,
   SpotLight,
@@ -72,6 +68,7 @@ import type { BuildContext } from './builders/buildContext';
 import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { buildProps } from './builders/propsBuilder';
 import { buildContainers } from './builders/containersBuilder';
+import { buildPlayer } from './builders/playerBuilder';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -288,9 +285,17 @@ export class BlockScene {
       cupboardDepthMeters: this.structures.cupboardDepthMeters,
       floorThicknessMeters: this.world.floorThicknessMeters,
     });
-    this.playerMesh = this.buildPlayer();
-    this.scene.add(this.playerMesh);
-    this.buildContactAo();
+    const playerHandles = buildPlayer(this.buildCtx(), {
+      bodyRadiusMeters: this.player.bodyRadiusMeters,
+      bodyHeightMeters: this.player.bodyHeightMeters,
+      baseEmissive: PLAYER_BASE_EMISSIVE,
+      outlineStrength: this.accessibility.outlineStrength,
+      aoStrength: this.lighting.ambientOcclusionStrength,
+      aoRadiusMeters: this.lighting.contactAoRadiusMeters,
+    });
+    this.playerMesh = playerHandles.mesh;
+    this.playerRimMat = playerHandles.rimMat;
+    this.aoContact = playerHandles.aoContact;
 
     this.crowd = new Crowd(resolveCrowdSettings(this.tier), this.registry);
     this.crowd.mesh.castShadow = true; // B13: the horde casts shadows too (was unset → zombies floated shadowless)
@@ -816,40 +821,6 @@ export class BlockScene {
     this.scene.add(mesh);
   }
 
-
-  /**
-   * Cheap contact-AO grounding disc (T45/V36): a soft dark radial gradient laid flat under the player that
-   * follows them each frame. Reads as ambient occlusion / contact darkening even when the sun shadow is faint
-   * (overcast / night / interior), so the diorama always feels grounded. Pure geometry (per-vertex alpha,
-   * NO texture binding → zero WebGPU validation cost); strength + radius are per-tier config (V4/V8).
-   */
-  private buildContactAo(): void {
-    const strength = this.lighting.ambientOcclusionStrength;
-    const radius = this.lighting.contactAoRadiusMeters;
-    if (strength <= 0 || radius <= 0) return; // disabled by tier/config — skip cleanly (no empty mesh)
-    const segments = 32;
-    const geo = this.geo('contactAo.geo', new CircleGeometry(radius, segments));
-    // Per-vertex RGBA: opaque-dark centre (alpha = strength) fading to fully transparent at the rim.
-    const count = geo.getAttribute('position').count;
-    const colors = new Float32Array(count * 4);
-    for (let i = 0; i < count; i++) {
-      const center = i === 0; // CircleGeometry vertex 0 is the centre; 1..n are the rim ring
-      colors[i * 4 + 3] = center ? strength : 0;
-    }
-    geo.setAttribute('color', new Float32BufferAttribute(colors, 4));
-    // Tracked for disposal (V24); not pushed into `mats` (that array is typed to the lit standard materials).
-    const mat = this.registry.track(
-      new MeshBasicMaterial({ color: 0x000000, transparent: true, vertexColors: true, depthWrite: false }),
-      'material',
-      'block.contactAo',
-    );
-    const disc = new Mesh(geo, mat);
-    disc.rotation.x = -Math.PI / 2; // lay flat on the ground plane
-    disc.renderOrder = 1; // draw after opaque ground/floor so the soft darkening composites cleanly
-    this.aoContact = disc;
-    this.scene.add(disc);
-  }
-
   /**
    * T70 — doors + windows so each shell reads as a house. Additive render pass (does not alter the wall
    * grid): a framed door leaf at each exit gap, and per-building windows on a deterministic subset of facade
@@ -1017,32 +988,6 @@ export class BlockScene {
     this.syncWindows();
   }
 
-  private buildPlayer(): Object3D {
-    const group = new Group();
-    const bodyMat = this.mat('player', {
-      color: 0x9cc4ff,
-      roughness: 0.5,
-      emissive: 0x16324f,
-      // V29: the player's strongest-silhouette rim scales with the outline-strength accessibility setting.
-      emissiveIntensity: PLAYER_BASE_EMISSIVE * this.accessibility.outlineStrength,
-    });
-    this.playerRimMat = bodyMat;
-    const body = new Mesh(
-      this.geo('player.geo', new CapsuleGeometry(this.player.bodyRadiusMeters, this.player.bodyHeightMeters - 2 * this.player.bodyRadiusMeters, 6, 12)),
-      bodyMat,
-    );
-    body.castShadow = true;
-    body.position.y = this.player.bodyHeightMeters / 2;
-    group.add(body);
-    // Facing marker so aim direction reads at a glance.
-    const nose = new Mesh(
-      this.geo('playerNose.geo', new BoxGeometry(this.player.bodyRadiusMeters * 1.4, 0.12, this.player.bodyRadiusMeters * 0.5)),
-      this.mat('playerNose', { color: 0xffffff }),
-    );
-    nose.position.set(this.player.bodyRadiusMeters, this.player.bodyHeightMeters * 0.6, 0);
-    group.add(nose);
-    return group;
-  }
 
   // ---- per-frame sync ----
 
