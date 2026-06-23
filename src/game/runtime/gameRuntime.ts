@@ -47,6 +47,9 @@ import {
   type PersistenceAdapter,
 } from '@/game/persistence';
 import { RuntimePersistence } from './runtimePersistence';
+import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot } from '@/game/inventory';
+import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
+import type { ContainerView } from '@/stores/inventoryView';
 import { resolveDomain } from '@/config/registry';
 import { weaponsConfig } from '@/config/domains/weapons';
 import { combatConfig } from '@/config/domains/combat';
@@ -146,6 +149,10 @@ export class GameRuntime {
   private readonly horde: HordeSimulation;
   /** Save/load orchestration (V9/V23/V26) — runtime delegates save()/loadFrom() here, owns no I/O flow. */
   private readonly persistence: RuntimePersistence;
+  /** Real container inventory (T23/T85): the player's pack + lootable world containers (T84 loot). */
+  readonly inventory: InventorySystem;
+  /** Display-name -> ContainerRef for the named containers the inventory UI surfaces. */
+  private readonly namedContainers = new Map<string, ContainerRef>();
   /** M2 medium-term objective state machine (find parts -> repair radio -> evacuate). */
   readonly objective: ObjectiveSystem;
   /** M2 decisive horde event shaped by the player's structural mods (§G central promise). */
@@ -343,7 +350,44 @@ export class GameRuntime {
       setWeather: (profile) => { this.weatherProfile = profile as WeatherProfile; },
     });
 
+    // Real container inventory (T85): player pack + a lootable kitchen cupboard seeded from the T84 loot
+    // tables, so the loot UI shows live data the player can actually transfer.
+    this.inventory = new InventorySystem({
+      catalog: buildDefaultCatalog(this.tier),
+      nextEventId: () => this.ids.next<EventId>('event'),
+    });
+    const playerRef: ContainerRef = { entity: this.playerEntity, container: 'player' };
+    this.inventory.addContainer(playerRef, { type: 'backpack' });
+    this.namedContainers.set('player', playerRef);
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1]] as const) {
+      this.inventory.seed(playerRef, item as ItemId, count);
+    }
+    const cupRef: ContainerRef = { entity: this.ids.next<EntityId>('entity'), container: 'Kitchen Cupboard' };
+    this.inventory.addContainer(cupRef, { type: 'cupboard' });
+    this.namedContainers.set('Kitchen Cupboard', cupRef);
+    for (const s of rollLoot('kitchen', this.rand)) this.inventory.seed(cupRef, s.item, s.count);
+
     this.registerSystems();
+  }
+
+  /** Snapshot the player + nearby containers for the inventory view store (T62/T85). */
+  inventorySnapshot(): ContainerView[] {
+    const out: ContainerView[] = [];
+    for (const [name, ref] of this.namedContainers) {
+      const slots = this.inventory.contents(ref).map((s) => ({ item: s.item as number, count: s.count }));
+      out.push({ container: name, capacity: 0, weight: this.inventory.containerWeight(ref), slots });
+    }
+    return out;
+  }
+
+  /** Transfer a whole item stack between two named containers (T85). Returns true on success. */
+  transferItem(fromName: string, toName: string, item: number): boolean {
+    const from = this.namedContainers.get(fromName);
+    const to = this.namedContainers.get(toName);
+    if (!from || !to) return false;
+    const count = this.inventory.count(from, item as ItemId);
+    if (count <= 0) return false;
+    return this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, count).result.ok;
   }
 
   /** Absolute tick (survives reload via tickOffset) — the basis for objective + event timing. */

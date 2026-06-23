@@ -36,6 +36,7 @@ import { CorpseField, resolveCorpseFieldSettings } from '../render/corpse';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
 import { createNoiseSnapshotGate, noiseViewStore } from '../stores/noiseView';
+import { inventoryViewStore } from '../stores/inventoryView';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
 import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
@@ -249,6 +250,20 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       });
       const noiseGate = createNoiseSnapshotGate(noiseViewStore, tier);
       cleanups.push(() => noiseViewStore.getState().clear());
+
+      // T85: publish the runtime's REAL inventory into the view store + make the menu's transfers real
+      // (route them through runtime.transferItem, then re-publish). `runtime` is reassigned on load — the
+      // closures read the live binding, so looting stays correct across a reload.
+      const publishInventory = (): void => inventoryViewStore.getState().setContainers(runtime.inventorySnapshot());
+      publishInventory();
+      inventoryViewStore.getState().setOpenContainer('Kitchen Cupboard');
+      inventoryViewStore.setState({
+        transfer: (from, to, item) => {
+          runtime.transferItem(from, to, item);
+          publishInventory();
+        },
+      });
+      cleanups.push(() => inventoryViewStore.getState().setContainers([]));
       scene.scene.add(gizmos.group);
       cleanups.push(() => {
         scene?.scene.remove(gizmos.group);
@@ -404,6 +419,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           await fresh.loadFrom();
           runtime = fresh;
           scene?.rebindRuntime(fresh);
+          publishInventory(); // re-surface the reloaded runtime's inventory (T85)
         },
         breach: () => {
           runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'breach' });
