@@ -362,3 +362,46 @@ body,
   font: 10px/1.4 ui-monospace, Menlo, monospace;
   color: #7e8da9;
 }
+
+/* ---- InventoryMenu: dual-pane loot/inventory ---- */
+.hbn-inv {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(6, 9, 12, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+}
+.hbn-inv__frame { display: flex; gap: 14px; }
+.hbn-inv__pane {
+  width: 280px; max-height: 60vh; display: flex; flex-direction: column;
+  background: rgba(16, 20, 27, 0.94); border: 1px solid rgba(130, 160, 210, 0.22);
+  border-radius: 12px; box-shadow: 0 16px 44px rgba(0,0,0,0.5); overflow: hidden;
+}
+.hbn-inv__pane--empty {
+  width: 280px; padding: 40px 0; text-align: center; color: #6b7a99;
+  font: 11px ui-monospace, Menlo, monospace; background: rgba(16,20,27,0.7);
+  border: 1px dashed rgba(130,160,210,0.2); border-radius: 12px;
+}
+.hbn-inv__pane-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 11px 14px; border-bottom: 1px solid rgba(130,160,210,0.16);
+}
+.hbn-inv__pane-title { font: 600 12px ui-sans-serif, system-ui; letter-spacing: 0.1em; text-transform: uppercase; color: #e8eefb; }
+.hbn-inv__weight { font: 10px ui-monospace, Menlo, monospace; color: #8fa1c2; }
+.hbn-inv__list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; }
+.hbn-inv__empty { padding: 18px 0; text-align: center; color: #5e6f92; font: 11px ui-monospace, Menlo; }
+.hbn-inv__item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 9px;
+  font: 12px ui-sans-serif, system-ui; text-align: left; color: #d7e0f2;
+  background: transparent; border: 0; border-left: 3px solid transparent; border-radius: 6px; cursor: pointer;
+  transition: background 0.1s ease;
+}
+.hbn-inv__item:hover { background: rgba(120,160,220,0.12); }
+.hbn-inv__name { flex: 1; }
+.hbn-inv__count { font: 11px ui-monospace, Menlo; color: #9fb0cc; }
+.hbn-inv__action { font: 9px ui-monospace, Menlo; color: #5aa0ff; opacity: 0; }
+.hbn-inv__item:hover .hbn-inv__action { opacity: 1; }
+.hbn-inv__item.cat-weapon { border-left-color: #ef4444; }
+.hbn-inv__item.cat-ammo { border-left-color: #f59e0b; }
+.hbn-inv__item.cat-food, .hbn-inv__item.cat-water { border-left-color: #22c55e; }
+.hbn-inv__item.cat-medical { border-left-color: #ec4899; }
+.hbn-inv__item.cat-tool, .hbn-inv__item.cat-material { border-left-color: #38bdf8; }
+.hbn-inv__hint { margin-top: 12px; font: 10px ui-monospace, Menlo; color: #7e8da9; }

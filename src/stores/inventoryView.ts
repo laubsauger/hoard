@@ -21,6 +21,34 @@ export interface InventoryViewState {
   readonly openContainer: string | null;
   setContainers(containers: readonly ContainerView[]): void;
   setOpenContainer(container: string | null): void;
+  /** Move a whole item stack between two containers in the view (demo transfer until the sim owns it). */
+  transfer(fromContainer: string, toContainer: string, item: number): void;
+}
+
+/** Move the whole `item` stack from `from` to `to`, merging counts + recomputing weight. Pure view update. */
+function applyTransfer(
+  containers: readonly ContainerView[],
+  from: string,
+  to: string,
+  item: number,
+): readonly ContainerView[] {
+  const src = containers.find((c) => c.container === from);
+  const moved = src?.slots.find((s) => s.item === item);
+  if (!src || !moved) return containers;
+  return containers.map((c) => {
+    if (c.container === from) {
+      const slots = c.slots.filter((s) => s.item !== item);
+      return { ...c, slots, weight: slots.reduce((w, s) => w + s.count, 0) };
+    }
+    if (c.container === to) {
+      const existing = c.slots.find((s) => s.item === item);
+      const slots = existing
+        ? c.slots.map((s) => (s.item === item ? { ...s, count: s.count + moved.count } : s))
+        : [...c.slots, { item, count: moved.count }];
+      return { ...c, slots, weight: slots.reduce((w, s) => w + s.count, 0) };
+    }
+    return c;
+  });
 }
 
 export function createInventoryViewStore() {
@@ -30,6 +58,7 @@ export function createInventoryViewStore() {
       openContainer: null,
       setContainers: (containers) => set({ containers }),
       setOpenContainer: (openContainer) => set({ openContainer }),
+      transfer: (from, to, item) => set((s) => ({ containers: applyTransfer(s.containers, from, to, item) })),
     })),
   );
 }
