@@ -55,9 +55,8 @@ describe('BlockScene (T38 render integration)', () => {
     expect(Math.min(...scene.debugFadeOpacity)).toBeLessThan(0.5); // roof faded to reveal the interior
   });
 
-  // T87: the multi-building RENDER patch is pending — the merge kept main's single-building blockScene
-  // (preserving combat/lighting); this per-building-cutaway test re-enables once blockScene renders buildingsOf().
-  it.skip('renders a roof per building + fades ONLY the building the player occupies (T80 per-building cutaway)', () => {
+  // T87: blockScene now renders buildingsOf() — each building gets its own roof + per-building cutaway.
+  it('renders a roof per building + fades ONLY the building the player occupies (T80 per-building cutaway)', () => {
     const adapter = new InMemoryPersistenceAdapter();
     const district = buildCityDistrict(TIER);
     const runtime = new GameRuntime({ tier: TIER, adapter, scene: district.block, sectors: district.sectors });
