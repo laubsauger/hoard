@@ -91,6 +91,34 @@ describe('packLimbInputs — tier selection (V13)', () => {
     expect(o.anatomy[0]).toBe(flags);
     expect(o.phase[0]).toBeCloseTo(0.42, 6);
   });
+
+  it('vision-cone cull hides figures outside the wedge (T98)', () => {
+    const s = makeSoa();
+    // slot 0 ahead (visible), slot 1 behind (hidden by the cone).
+    s.alive[0] = 1; s.simTier[0] = 0; s.position[0] = 5; s.position[2] = 0;
+    s.alive[1] = 1; s.simTier[1] = 0; s.position[1 * 3] = -5; s.position[1 * 3 + 2] = 0;
+    const o = out(CAP);
+    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, {
+      count: 2,
+      capacity: CAP,
+      ...OPTS,
+      visibility: { px: 0, pz: 0, heading: 0, fovHalf: Math.PI / 4, range: 20, edgeBandMeters: 0, edgeBandRadians: 0 },
+    });
+    expect(res.liveCount).toBe(1);
+    expect(o.pose[0]).toBeCloseTo(5, 6);
+  });
+
+  it('over-budget figures fall through (continue, not break) so later slots still rank correctly', () => {
+    // 3 limbed-eligible slots, budget 2: the first 2 become figures; the 3rd is left for the box path. The
+    // ranking must keep counting past the cap (continue), matching packCrowdInputs' figureRank.
+    const s = makeSoa();
+    for (let i = 0; i < 3; i++) { s.alive[i] = 1; s.simTier[i] = 0; s.position[i * 3] = i; }
+    const o = out(2);
+    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: 3, capacity: 2, ...OPTS });
+    expect(res.liveCount).toBe(2);
+    expect(o.pose[0]).toBeCloseTo(0, 6);
+    expect(o.pose[FLOATS_PER_LIMB_POSE]).toBeCloseTo(1, 6);
+  });
 });
 
 describe('composeLimbMatrix — transform composition (V2)', () => {

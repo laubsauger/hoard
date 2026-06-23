@@ -132,7 +132,7 @@ describe('packCrowdInputs (V2/V3)', () => {
     ).toThrow();
   });
 
-  it('with minSimTier set, the box packs ONLY the horde tiers (limbed tiers go to figures, T72)', () => {
+  it('with limbedMaxSimTier set, the box packs ONLY the horde tiers (limbed tiers go to figures, T72)', () => {
     const s = makeSoa();
     // slots 0,1 = hero/active (limbed); slots 2,3 = horde/abstract (box).
     for (let i = 0; i < 4; i++) {
@@ -147,7 +147,7 @@ describe('packCrowdInputs (V2/V3)', () => {
       variationCount: 1,
       scaleMin: 1,
       scaleMax: 1,
-      minSimTier: 2, // limbedMaxSimTier (1) + 1
+      limbedMaxSimTier: 1, // tiers 0,1 are figures; the box draws 2,3 (budget large enough to claim 0,1)
     });
     expect(res.liveCount).toBe(2);
     // Compacted horde: instance 0 = slot 2 (x=2), instance 1 = slot 3 (x=3).
@@ -155,7 +155,68 @@ describe('packCrowdInputs (V2/V3)', () => {
     expect(pose[FLOATS_PER_POSE]).toBeCloseTo(3, 6);
   });
 
-  it('without minSimTier the box packs all live slots (default, unchanged)', () => {
+  it('§B culling fix: over-budget limbed-tier zombies FALL THROUGH to the box instead of vanishing', () => {
+    // 4 NEAR zombies, all limbed-eligible (simTier 0). Limbed budget = 2 → the figure path renders the first 2;
+    // WITHOUT the fix the other 2 matched neither path and disappeared (the "near zombies culled" bug). They
+    // must now render as boxes here so the live set is fully covered: figures(2) + boxes(2) == alive(4).
+    const s = makeSoa();
+    for (let i = 0; i < 4; i++) {
+      s.alive[i] = 1;
+      s.simTier[i] = 0;
+      s.position[i * 3] = i;
+    }
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
+      count: 4,
+      capacity: CAP,
+      variationCount: 1,
+      scaleMin: 1,
+      scaleMax: 1,
+      limbedMaxSimTier: 1,
+      limbedBudget: 2,
+    });
+    // The box draws the 2 overflow figures (slots 2,3) — NOT zero (the pre-fix bug dropped them entirely).
+    expect(res.liveCount).toBe(2);
+    expect(pose[0]).toBeCloseTo(2, 6); // slot 2 fell through to the box
+    expect(pose[FLOATS_PER_POSE]).toBeCloseTo(3, 6); // slot 3 fell through to the box
+  });
+
+  it('vision-cone cull: only members inside the cone + range are packed; outside ones are hidden', () => {
+    const s = makeSoa();
+    // slot 0 straight ahead (visible), slot 1 behind the player (hidden), slot 2 far beyond range (hidden).
+    s.alive[0] = 1; s.position[0] = 5; s.position[2] = 0;
+    s.alive[1] = 1; s.position[1 * 3] = -5; s.position[1 * 3 + 2] = 0;
+    s.alive[2] = 1; s.position[2 * 3] = 50; s.position[2 * 3 + 2] = 0;
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
+      count: 3,
+      capacity: CAP,
+      variationCount: 1,
+      scaleMin: 1,
+      scaleMax: 1,
+      visibility: {
+        px: 0, pz: 0, heading: 0, // facing +x
+        fovHalf: Math.PI / 4, range: 20,
+        edgeBandMeters: 0, edgeBandRadians: 0,
+      },
+    });
+    expect(res.liveCount).toBe(1); // only the forward, in-range zombie
+    expect(pose[0]).toBeCloseTo(5, 6);
+  });
+
+  it('vision-cone cull: a soft edge band shrinks the packed scale toward zero near the boundary', () => {
+    const s = makeSoa();
+    s.alive[0] = 1; s.position[0] = 19; s.position[2] = 0; // just inside a 20m range with a 4m fade band
+    const { pose, meta } = buffers();
+    packCrowdInputs(s.soa.views, pose, meta, {
+      count: 1, capacity: CAP, variationCount: 1, scaleMin: 1, scaleMax: 1,
+      visibility: { px: 0, pz: 0, heading: 0, fovHalf: Math.PI / 2, range: 20, edgeBandMeters: 4, edgeBandRadians: 0 },
+    });
+    // (20 - 19) / 4 = 0.25 → the instance scale (meta[0]) is faded down from 1.
+    expect(meta[0]).toBeCloseTo(0.25, 5);
+  });
+
+  it('without limbedMaxSimTier the box packs all live slots (default, unchanged)', () => {
     const s = makeSoa();
     for (let i = 0; i < 3; i++) {
       s.alive[i] = 1;

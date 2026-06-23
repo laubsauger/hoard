@@ -38,10 +38,30 @@ export const perceptionConfig = registerDomain('perception', {
   playerVisionRange: num({
     owner: 'perception',
     unit: 'meters',
-    doc: 'Range of the player forward vision cone (overlay + future reveal).',
+    doc: 'Range of the player forward vision cone (overlay + fog-of-war reveal).',
     default: 18,
     min: 1,
     max: 200,
+  }),
+  /** Soft fade band (m) at the FAR edge of the player vision reveal — crowd members within it shrink out
+   *  instead of hard-popping (T98 fog-of-war). */
+  playerVisionRangeFadeMeters: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'Soft fade band at the far edge of the player vision reveal so threats fade out near max range (T98).',
+    default: 3,
+    min: 0,
+    max: 50,
+  }),
+  /** Soft fade band (half-angle, degrees) at the CONE edge of the player vision reveal — members near the
+   *  cone boundary fade out instead of hard-popping (T98 fog-of-war). */
+  playerVisionConeFadeDegrees: num({
+    owner: 'perception',
+    unit: 'degrees',
+    doc: 'Soft fade band at the cone edge of the player vision reveal so threats fade as they leave the wedge (T98).',
+    default: 12,
+    min: 0,
+    max: 90,
   }),
   /** Sound reaching the horde through a wall is multiplied by this (V28 occlusion). 1 = no muffle. */
   soundWallOcclusion: num({
