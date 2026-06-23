@@ -61,6 +61,7 @@ import { buildPlayer } from './builders/playerBuilder';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
+import { buildingIndexAt } from './systems/playerLocation';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -72,7 +73,6 @@ import { computeSkyState } from './sky';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
 import {
-  buildingsOf,
   resolveHouseVariation,
   hasLineOfSight,
   rayDistanceToWall,
@@ -699,14 +699,7 @@ export class BlockScene {
   /** Index of the building the player currently occupies, or -1 if they are out on the street/yard. */
   private playerBuildingIndex(): number {
     const p = this.runtime.player();
-    const cx = Math.floor(p.x / this.navCellSize);
-    const cy = Math.floor(p.z / this.navCellSize);
-    const buildings = buildingsOf(this.runtime.scene);
-    for (let i = 0; i < buildings.length; i++) {
-      const b = buildings[i]!.bounds;
-      if (cx >= b.minCx && cx <= b.maxCx && cy >= b.minCy && cy <= b.maxCy) return i;
-    }
-    return -1;
+    return buildingIndexAt(this.runtime.scene, this.navCellSize, p.x, p.z);
   }
 
   private isPlayerInsideBuilding(): boolean {
