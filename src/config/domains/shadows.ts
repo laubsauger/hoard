@@ -46,6 +46,43 @@ export const shadowsConfig = registerDomain('shadows', {
     tiers: { 'desktop-high': 200, 'desktop-medium': 120, 'desktop-compat': 80, 'mobile-webgpu': 40 },
   }),
 
+  // ---- Directional shadow ORTHO frustum sizing (T45/V36/V8) — the budgeted area the key actually shadows.
+  // The frustum is re-centred on the player each frame so it always covers the play area without a hard cut.
+  // Per-tier so the map's texels-per-metre (sharpness) + cost scale with the tier (V8/V22). V4: no literals.
+  shadowOrthoHalfExtentMeters: num({
+    owner: 'shadows',
+    unit: 'meters',
+    doc: 'Half-width of the directional shadow ortho frustum, centred on the player each frame. Smaller = sharper shadows for a given map resolution; scaled down on lower tiers for both sharpness + cost (V36/V8).',
+    default: 55,
+    min: 8,
+    max: 400,
+    tiers: { 'desktop-high': 70, 'desktop-medium': 55, 'desktop-compat': 42, 'mobile-webgpu': 28 },
+  }),
+  shadowLightDistanceMeters: num({
+    owner: 'shadows',
+    unit: 'meters',
+    doc: 'Distance the directional key light + its shadow camera sit from their target (the player) along the sky direction (T45/V36).',
+    default: 60,
+    min: 5,
+    max: 500,
+  }),
+  shadowCameraNearMeters: num({
+    owner: 'shadows',
+    unit: 'meters',
+    doc: 'Near plane of the directional shadow ortho camera (T45/V36).',
+    default: 1,
+    min: 0.01,
+    max: 50,
+  }),
+  shadowDepthBias: num({
+    owner: 'shadows',
+    unit: 'ratio',
+    doc: 'Directional shadow depth bias to suppress shadow acne (negative pulls the comparison toward the light) (T45/V36).',
+    default: -0.0005,
+    min: -0.01,
+    max: 0.01,
+  }),
+
   // ---- Local/secondary caster budget (V22 #2 "secondary casters") ----
   localCasterBudget: num({
     owner: 'shadows',

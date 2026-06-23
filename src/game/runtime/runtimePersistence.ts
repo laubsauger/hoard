@@ -14,6 +14,7 @@ import {
   readSaveDelta,
   writeSaveDelta,
   SaveCompatError,
+  type CorpseRecord,
   type ModuleDelta,
   type PartitionKey,
   type PersistenceAdapter,
@@ -38,6 +39,13 @@ export interface DistrictPort {
   restore(s: readonly SectorPopulationSave[]): void;
 }
 
+/** Capture/restore of the lingering corpses (B9/T54). Structural subset of CorpseSystem — persists the
+ *  §I `corpses` save-delta category (V9) so killed bodies survive a save/reload exactly where they fell. */
+export interface CorpsePort {
+  capture(): CorpseRecord[];
+  restore(records: readonly CorpseRecord[]): void;
+}
+
 /**
  * The authoritative state RuntimePersistence reads/writes. GameRuntime supplies this via closures so its
  * own fields stay private — persistence never reaches into the runtime's internals directly (V1).
@@ -50,6 +58,7 @@ export interface RuntimePersistencePort {
   readonly ids: IdFactory;
   readonly objective: ObjectivePort;
   readonly district: DistrictPort | null;
+  readonly corpses: CorpsePort;
   entityOf(slot: ZombieSlot): EntityId;
   placeZombie(entity: EntityId, e: PopulationEntry): void;
   openBreachedNav(structuralCell: number): void;
@@ -102,6 +111,8 @@ export class RuntimePersistence {
       partition: p.partition,
       capturedAtTick: p.getClockTick(),
       modules: moduleDeltas,
+      // B9/T54: lingering corpses persist as the §I `corpses` delta category (V9).
+      corpses: p.corpses.capture(),
     });
     await writeSaveDelta(p.adapter, delta);
 
@@ -143,6 +154,8 @@ export class RuntimePersistence {
         const cell = p.scene.wall.packCell(0, 0, z);
         if (p.scene.wall.isBreached(cell)) p.openBreachedNav(cell);
       }
+      // B9/T54: restore lingering corpses exactly where they fell (with severed-region flags — V9).
+      p.corpses.restore(delta.corpses);
     }
 
     const stored = await p.adapter.get<RuntimeSave>(p.partition, RUNTIME_SAVE_KEY);

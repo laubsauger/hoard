@@ -9,6 +9,11 @@ import { resolveInteractions, type InteractionContext, type InteractionVerb } fr
 import { ITEM } from '../game/inventory';
 import type { EngineHandle } from './GameViewport';
 
+// Stable empty fallback — a `?? []` literal inside the selector returns a NEW array every call, which makes
+// useSyncExternalStore (zustand) see an ever-changing snapshot → "getSnapshot should be cached" infinite
+// re-render loop (V11). A shared frozen ref keeps the snapshot stable when there is no player container yet.
+const EMPTY_SLOTS: readonly { readonly item: number; readonly count: number }[] = [];
+
 /** Derive the tool/material context from the player's inventory stacks (T59 gating). */
 function contextFromInventory(playerItems: readonly number[]): InteractionContext {
   const has = (id: number): boolean => playerItems.includes(id);
@@ -22,7 +27,7 @@ function contextFromInventory(playerItems: readonly number[]): InteractionContex
 
 export function InteractionWheel({ handle }: { handle: EngineHandle | null }) {
   const [open, setOpen] = useState(false);
-  const playerSlots = useInventoryView((s) => s.containers.find((c) => c.container === 'player')?.slots ?? []);
+  const playerSlots = useInventoryView((s) => s.containers.find((c) => c.container === 'player')?.slots ?? EMPTY_SLOTS);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {

@@ -51,4 +51,33 @@ describe('render config domains (V4)', () => {
       resolve(renderingConfig.upperWallFadeStartHeightMeters, 'desktop-high'),
     );
   });
+
+  it('resolves the directional-cutaway camera-facing threshold as a cosine in [-1,1] (T82/V58)', () => {
+    const t = resolve(renderingConfig.cutawayCameraFacingDotThreshold, 'desktop-high');
+    expect(t).toBeGreaterThan(-1);
+    expect(t).toBeLessThan(1);
+  });
+
+  it('scales the directional shadow ortho frustum + map down on lower tiers (T45/V36/V8)', () => {
+    // smaller frustum + map on mobile → sharper-for-cost + cheaper budget per tier (V8/V22)
+    expect(resolve(shadowsConfig.shadowOrthoHalfExtentMeters, 'desktop-high')).toBeGreaterThan(
+      resolve(shadowsConfig.shadowOrthoHalfExtentMeters, 'mobile-webgpu'),
+    );
+    expect(resolve(shadowsConfig.shadowMaxDistanceMeters, 'desktop-high')).toBeGreaterThan(
+      resolve(shadowsConfig.shadowMaxDistanceMeters, 'mobile-webgpu'),
+    );
+    // the shadow camera far must clear the light distance so nothing between light + scene is clipped
+    for (const tier of ['desktop-high', 'mobile-webgpu'] as const) {
+      const far = resolve(shadowsConfig.shadowLightDistanceMeters, tier) + resolve(shadowsConfig.shadowMaxDistanceMeters, tier);
+      expect(far).toBeGreaterThan(resolve(shadowsConfig.shadowLightDistanceMeters, tier));
+    }
+  });
+
+  it('resolves contact-AO strength per tier (stronger on high) + a non-negative ground lift (T45/V36)', () => {
+    expect(resolve(lightingConfig.ambientOcclusionStrength, 'desktop-high')).toBeGreaterThanOrEqual(
+      resolve(lightingConfig.ambientOcclusionStrength, 'mobile-webgpu'),
+    );
+    expect(resolve(lightingConfig.contactAoRadiusMeters, 'desktop-high')).toBeGreaterThan(0);
+    expect(resolve(lightingConfig.contactAoGroundLiftMeters, 'desktop-high')).toBeGreaterThanOrEqual(0);
+  });
 });

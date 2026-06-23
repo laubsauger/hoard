@@ -6,6 +6,16 @@ import { bool, num } from '../spec';
 import { registerDomain } from '../registry';
 
 export const combatConfig = registerDomain('combat', {
+  /** Within this distance of the shared-flow target a horde member STOPS steering (arrival) so it settles at
+   *  the ring instead of piling into the target + jittering against the separation pass (V19/V35). */
+  hordeArriveRadiusMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Distance from the flow-field target at which a horde member stops steering (arrival ring).',
+    default: 1.1,
+    min: 0.3,
+    max: 8,
+  }),
   /** Default zombie health for the test-block population (T16/T17 archetypes refine this later). */
   zombieBaseHealth: num({
     owner: 'combat',
@@ -248,5 +258,39 @@ export const combatConfig = registerDomain('combat', {
     default: 10,
     min: 0.1,
     max: 100_000,
+  }),
+
+  // ---- T73 per-weapon ballistics: per-body penetration resistance (V50) ----
+  /** Penetration budget one body consumes when a shot passes through it (V50). With the pistol's
+   *  default 1-budget this stops the shot at the FIRST body; a rifle's larger budget pierces several. */
+  bodyPenetrationResistance: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Stopping-power budget consumed per body a shot passes through; exhausted budget stops the shot (V50).',
+    default: 1,
+    min: 0.01,
+    max: 1000,
+  }),
+
+  // ---- T57 lethality + reactions: non-head hits wound/stagger, not instakill (V16/V17) ----
+  /** Effective damage at/above which a non-lethal, non-head hit knocks the body into a brief stagger
+   *  (slowed/interrupted) instead of just chipping health (V16/V17 wound reaction). */
+  staggerDamageThreshold: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Effective damage on a surviving (non-head) hit at/above which the body enters a brief stagger (V16/V17).',
+    default: 30,
+    min: 0.1,
+    max: 100_000,
+  }),
+  /** Duration of the brief stagger state a wounding hit applies (drives the SoA stateTimer in seconds,
+   *  consumed by behaviour to slow/interrupt the staggered body) (V16/V17). */
+  staggerDurationSeconds: num({
+    owner: 'combat',
+    unit: 'seconds',
+    doc: 'Seconds a wounded body stays in the stagger state (slowed/interrupted), written to the SoA stateTimer (V16/V17).',
+    default: 0.6,
+    min: 0.05,
+    max: 30,
   }),
 });

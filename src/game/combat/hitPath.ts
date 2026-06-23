@@ -9,13 +9,14 @@
 
 import type { EntityId, EventId, VisualEvent, WorldEvent, AnatomyRegion } from '@/game/core/contracts';
 import { CollisionLayer, layerMask, type SpatialHash } from '@/game/navigation/collision';
-import { SimTier, type SimulationZombies, type ZombieSlot } from '@/game/simulation';
+import { SimTier, ZombieState, type SimulationZombies, type ZombieSlot } from '@/game/simulation';
 import type { ResolvedDomain } from '@/config/types';
 import type { weaponsConfig } from '@/config/domains/weapons';
 import type { combatConfig } from '@/config/domains/combat';
 import { damageClass, isFatalRegion, isSeverable, regionBit } from './anatomy';
 import { coarsenRegion, needsDetail } from './hitVolume';
 import { Posture, limbConsequences } from './segments';
+import { buildWeaponRegistry, WEAPON_IDS, type WeaponClass, type WeaponId } from './weaponRegistry';
 
 export interface ShotOrigin {
   readonly x: number;
@@ -32,6 +33,8 @@ export interface ShotResult {
   readonly travelMeters?: number;
   readonly killed?: boolean;
   readonly severed?: boolean;
+  /** The hit was non-lethal but knocked the body into a brief stagger (slowed/interrupted) (V16/V17). */
+  readonly staggered?: boolean;
   /** The target was force-promoted to hero for detailed anatomy this hit (V13/V16). */
   readonly promoted?: boolean;
   /** Candidate slots gathered from swept cells before the precise line filter (diagnostics, V16). */
@@ -41,6 +44,24 @@ export interface ShotResult {
    * structure cell, or the weapon range — whichever is nearest (V53/B20). Drives the tracer (V49).
    */
   readonly stopDistanceMeters?: number;
+  /**
+   * Rounds the equipped weapon spent on this call (T74): 1 for a resolved shot (a shotgun spends ONE
+   * shell for its whole pellet pattern), 0 for a no-fire (empty magazine, mid-reload or mid-swap). A
+   * dry click does not resolve damage — `hit` is false and `firedRounds` is 0.
+   */
+  readonly firedRounds?: number;
+  /** True when the call was a dry click on an empty magazine (no round chambered, no damage) (T74). */
+  readonly empty?: boolean;
+}
+
+/** Live ammunition state of the equipped weapon for a HUD/UI (T74). Melee reports unlimited (Infinity). */
+export interface AmmoStatus {
+  /** Rounds chambered in the magazine (Infinity for the unlimited melee class). */
+  readonly magazine: number;
+  /** Spare rounds in reserve, fed into the magazine on reload (Infinity for melee). */
+  readonly reserve: number;
+  /** True while a reload of the equipped weapon is in progress (fire is blocked). */
+  readonly reloading: boolean;
 }
 
 export interface CombatDeps {
@@ -72,6 +93,13 @@ export interface CombatDeps {
     dirZ: number,
     range: number,
   ) => number | null;
+  /**
+   * Optional authoritative tick source for the deterministic reload/swap timers (T74). When supplied
+   * (e.g. the runtime wiring `() => clock.tick`) every reload/swap deadline is measured against it. When
+   * omitted, the system tracks its own monotonic tick advanced explicitly by `CombatSystem.tick(dtTicks)`
+   * — both paths are deterministic; pick exactly ONE per CombatSystem instance.
+   */
+  readonly nowTick?: () => number;
 }
 
 const PROJECTILE_MASK = layerMask(CollisionLayer.Projectile);
@@ -97,7 +125,153 @@ interface ResolveOpts {
 }
 
 export class CombatSystem {
-  constructor(private readonly deps: CombatDeps) {}
+  /** Immutable per-weapon ballistic models, assembled from typed config (T73/V50). */
+  private readonly weaponRegistry: Readonly<Record<WeaponId, WeaponClass>>;
+  /** The equipped weapon class `fire` resolves against. Defaults to the pistol (GATE-0 parity). */
+  private equippedId: WeaponId = 'pistol';
+
+  // ---- T74 ammo + deterministic reload/swap timers ----
+  /** Per-firearm magazine + reserve. Melee is unlimited and carries no entry here. */
+  private readonly ammo: Partial<Record<WeaponId, { magazine: number; reserve: number }>> = {};
+  /** Self-tracked monotonic tick, used only when no `deps.nowTick` source is supplied. */
+  private internalTick = 0;
+  /** A reload or swap is in flight until `busyUntilTick`; null when the weapon is ready. */
+  private busyKind: 'reload' | 'swap' | null = null;
+  /** Tick at which the in-flight reload/swap completes (deadline measured against `now()`). */
+  private busyUntilTick = 0;
+  /** The weapon a pending reload refills (its rounds move reserve->magazine when the reload settles). */
+  private reloadingWeapon: WeaponId | null = null;
+
+  constructor(private readonly deps: CombatDeps) {
+    this.weaponRegistry = buildWeaponRegistry(deps.weapons);
+    // Each firearm class starts with a FULL magazine (GATE-0 parity: the default weapon fires at once)
+    // plus its configured reserve. Melee carries no ammo entry — it is unlimited (T74).
+    for (const id of WEAPON_IDS) {
+      const w = this.weaponRegistry[id];
+      if (w.magazineSize !== undefined && w.reserveAmmo !== undefined) {
+        this.ammo[id] = { magazine: w.magazineSize, reserve: w.reserveAmmo };
+      }
+    }
+  }
+
+  /** The current authoritative tick: the injected source if present, else the self-tracked counter (T74). */
+  private now(): number {
+    return this.deps.nowTick ? this.deps.nowTick() : this.internalTick;
+  }
+
+  /**
+   * Settle any in-flight reload/swap whose deadline the clock has reached (T74). A completed reload moves
+   * rounds reserve->magazine for its weapon; a completed swap simply clears the ready delay. Called at the
+   * head of every state-reading entry point so timers resolve lazily and deterministically.
+   */
+  private settle(): void {
+    if (this.busyKind === null || this.now() < this.busyUntilTick) return;
+    if (this.busyKind === 'reload' && this.reloadingWeapon !== null) {
+      const w = this.weaponRegistry[this.reloadingWeapon];
+      const state = this.ammo[this.reloadingWeapon];
+      if (state && w.magazineSize !== undefined) {
+        const moved = Math.min(w.magazineSize - state.magazine, state.reserve);
+        state.magazine += moved;
+        state.reserve -= moved;
+      }
+    }
+    this.busyKind = null;
+    this.reloadingWeapon = null;
+  }
+
+  /**
+   * Advance the self-tracked tick by `dtTicks` and settle due reload/swap timers (T74). Use this ONLY
+   * when no `deps.nowTick` source is injected; it keeps reload/swap deterministic under a fixed clock.
+   */
+  tick(dtTicks = 1): void {
+    if (!Number.isInteger(dtTicks) || dtTicks < 0) {
+      throw new Error(`tick(dtTicks) expects a non-negative integer, got ${dtTicks}`);
+    }
+    if (this.deps.nowTick) {
+      throw new Error('CombatSystem.tick is unavailable when an external nowTick source is injected');
+    }
+    this.internalTick += dtTicks;
+    this.settle();
+  }
+
+  /** Equip a weapon class immediately (no swap delay) — the inventory/loadout primitive (T73/V50). */
+  setWeapon(id: WeaponId): void {
+    if (!(id in this.weaponRegistry)) {
+      throw new Error(`unknown weapon class '${id}'`);
+    }
+    this.equippedId = id;
+  }
+
+  /**
+   * Cycle the equipped weapon by `dir` (+1 / -1) around the registry order and arm the new class's swap
+   * ready delay — `fire` is blocked until the swap settles (T74). A cycle requested while a reload or an
+   * earlier swap is still in flight is ignored (the equipped weapon is unchanged) so timers never stack.
+   * Returns the now-equipped weapon id.
+   */
+  cycleWeapon(dir: 1 | -1): WeaponId {
+    this.settle();
+    if (dir !== 1 && dir !== -1) {
+      throw new Error(`cycleWeapon expects +1 or -1, got ${dir}`);
+    }
+    if (this.busyKind !== null) return this.equippedId;
+    const n = WEAPON_IDS.length;
+    const idx = WEAPON_IDS.indexOf(this.equippedId);
+    const next = WEAPON_IDS[(idx + dir + n) % n]!;
+    this.equippedId = next;
+    const swapTicks = this.weaponRegistry[next].swapTicks;
+    if (swapTicks > 0) {
+      this.busyKind = 'swap';
+      this.busyUntilTick = this.now() + swapTicks;
+    }
+    return next;
+  }
+
+  /**
+   * Reload the equipped firearm: begin moving rounds reserve->magazine over its `reloadTicks` (T74).
+   * `fire` is blocked until the reload settles. Returns false (no reload started) when the class is
+   * unlimited melee, the system is already busy, the magazine is already full, or the reserve is empty
+   * (out of reserve cannot reload — no silent top-up).
+   */
+  reload(): boolean {
+    this.settle();
+    const w = this.weaponRegistry[this.equippedId];
+    if (w.reloadTicks === undefined) return false; // melee: unlimited, nothing to reload
+    if (this.busyKind !== null) return false; // a reload/swap is already in flight
+    const state = this.ammo[this.equippedId];
+    if (!state || w.magazineSize === undefined) return false;
+    if (state.reserve <= 0) return false; // out of reserve
+    if (state.magazine >= w.magazineSize) return false; // already full
+    this.busyKind = 'reload';
+    this.reloadingWeapon = this.equippedId;
+    this.busyUntilTick = this.now() + w.reloadTicks;
+    return true;
+  }
+
+  /** True while a reload of the equipped weapon is in flight (fire is blocked) (T74). */
+  isReloading(): boolean {
+    this.settle();
+    return this.busyKind === 'reload';
+  }
+
+  /** Live ammo state of the equipped weapon for a HUD/UI; melee reports unlimited (Infinity) (T74). */
+  currentAmmo(): AmmoStatus {
+    this.settle();
+    const state = this.ammo[this.equippedId];
+    if (!state) {
+      return { magazine: Number.POSITIVE_INFINITY, reserve: Number.POSITIVE_INFINITY, reloading: false };
+    }
+    return { magazine: state.magazine, reserve: state.reserve, reloading: this.busyKind === 'reload' };
+  }
+
+  /** The equipped weapon's stable id, for a HUD/UI (T74). */
+  currentWeaponId(): WeaponId {
+    return this.equippedId;
+  }
+
+  /** The currently-equipped weapon class model (T73/V50). */
+  currentWeapon(): WeaponClass {
+    return this.weaponRegistry[this.equippedId];
+  }
 
   /** Per-region damage multiplier from typed weapon config (V4 — no literals). */
   private regionMultiplier(region: AnatomyRegion): number {
@@ -166,28 +340,88 @@ export class CombatSystem {
   }
 
   /**
-   * Fire one firearm ray from `origin` toward (dirX,dirZ), resolving the FIRST body struck at hero
-   * fidelity (the documented GATE-0 single-hit subset — kept back-compatible). For ammo, sound and
-   * line-of-fire penetration use `firePenetrating` / the WeaponSystem (T18).
+   * Fire the EQUIPPED weapon class from `origin` toward (dirX,dirZ), resolving its full ballistic model
+   * (T73/V50): one ray per pellet across the weapon's angular spread; along each ray a penetration
+   * BUDGET (stopping power) is consumed per body by its resistance, so the shot pierces bodies until the
+   * budget is exhausted — a pistol stops at 1 body, a rifle pierces several, a shotgun fires many pellets
+   * in a spread. Damage falls off with travel distance. Returns the PRIMARY resolved hit (first body of
+   * the centre ray) as a single ShotResult, always carrying the true `stopDistanceMeters` of that ray
+   * (V49/V53). Every other penetrated body / pellet is resolved as a side effect (authoritative SoA +
+   * events). For ammo, sound and the timed melee window use the WeaponSystem (T18).
    */
   fire(origin: ShotOrigin, dirX: number, dirZ: number, region: AnatomyRegion): ShotResult {
+    this.settle();
+    const weapon = this.weaponRegistry[this.equippedId];
+
+    // T74: fire is blocked while a reload or swap is in flight — a no-fire that resolves no damage.
+    if (this.busyKind !== null) {
+      return { hit: false, candidateCount: 0, stopDistanceMeters: weapon.rangeMeters, firedRounds: 0 };
+    }
+
+    // T74 ammo: a firearm spends ONE round per shot (a shotgun spends one SHELL for its pellet pattern).
+    // An empty magazine is a dry click — no damage. Melee carries no ammo entry and is unlimited.
+    const state = this.ammo[this.equippedId];
+    if (state) {
+      if (state.magazine <= 0) {
+        if (this.deps.weapons.autoReloadWhenEmpty && state.reserve > 0) this.reload();
+        return {
+          hit: false,
+          candidateCount: 0,
+          stopDistanceMeters: weapon.rangeMeters,
+          firedRounds: 0,
+          empty: true,
+        };
+      }
+      state.magazine -= 1;
+    }
+
     const { ndx, ndz } = normalizeXZ(dirX, dirZ, 'firearm');
-    const range = this.deps.weapons.firearmRangeMeters;
+    const range = weapon.rangeMeters;
     const hitRadius = this.deps.weapons.firearmHitRadiusMeters;
-    const { candidateCount, hits, stopDistance } = this.gatherAlongRay(origin, ndx, ndz, range, hitRadius);
-    if (hits.length === 0) return { hit: false, candidateCount, stopDistanceMeters: stopDistance };
-    const first = hits[0]!;
-    return {
-      ...this.resolveHit(first.slot, region, ndx, ndz, first.travel, {
-        baseDamage: this.deps.weapons.firearmDamage,
-        armorPenetration: this.deps.weapons.firearmArmorPenetration,
-        tier: SimTier.Hero,
-        severScale: 1,
-        candidateCount,
-        damageScale: 1,
-      }),
-      stopDistanceMeters: stopDistance,
-    };
+    const resistance = this.deps.combat.bodyPenetrationResistance;
+    const spreadRad = (weapon.spreadDegrees * Math.PI) / 180;
+
+    let primary: ShotResult | undefined;
+    let centreStop = range;
+    let centreCandidates = 0;
+
+    for (let i = 0; i < weapon.pellets; i++) {
+      // Deterministic, symmetric spread: pellet i is fanned from -spread/2 .. +spread/2 (centre = 0).
+      const angle = weapon.pellets === 1 ? 0 : -spreadRad / 2 + (spreadRad * i) / (weapon.pellets - 1);
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const px = ndx * cos - ndz * sin;
+      const pz = ndx * sin + ndz * cos;
+
+      const { candidateCount, hits, stopDistance } = this.gatherAlongRay(origin, px, pz, range, hitRadius);
+      if (i === 0) {
+        centreStop = stopDistance;
+        centreCandidates = candidateCount;
+      }
+
+      // Walk the ordered bodies, spending the penetration budget per body until it is exhausted (V50).
+      let budget = weapon.stoppingPower;
+      for (const h of hits) {
+        if (budget <= 0) break;
+        const falloff = Math.max(0, 1 - h.travel * weapon.damageFalloffPerMeter);
+        const shot = this.resolveHit(h.slot, region, px, pz, h.travel, {
+          baseDamage: weapon.damage,
+          armorPenetration: weapon.armorPenetration,
+          tier: SimTier.Hero,
+          severScale: 1,
+          candidateCount,
+          damageScale: falloff,
+        });
+        if (!primary) {
+          primary = { ...shot, stopDistanceMeters: stopDistance };
+        }
+        budget -= resistance;
+      }
+    }
+
+    // The round was already spent (or the class is unlimited melee): this call fired exactly once.
+    if (primary) return { ...primary, firedRounds: 1 };
+    return { hit: false, candidateCount: centreCandidates, stopDistanceMeters: centreStop, firedRounds: 1 };
   }
 
   /**
@@ -326,6 +560,17 @@ export class CombatSystem {
 
     this.deps.onDamaged(slot);
 
+    // --- T57 wound reaction (V16/V17): a surviving NON-head hit that lands hard enough knocks the body
+    // into a brief stagger (slowed/interrupted). Head/neck stays the lethal class; accumulating chip
+    // damage from ordinary hits eventually kills. Stagger is driven through the SoA state + stateTimer
+    // (seconds) so behaviour can slow/interrupt the staggered body. Lethal hits skip it (it's dead). ---
+    let staggered = false;
+    if (!killed && !isFatalRegion(region) && effective >= this.deps.combat.staggerDamageThreshold) {
+      z.setState(slot, ZombieState.Stagger);
+      z.setStateTimer(slot, this.deps.combat.staggerDurationSeconds);
+      staggered = true;
+    }
+
     // persistent world facts (feed save/AI). EntityId crosses the boundary, never the raw slot (V26).
     this.deps.worldEvents.push({
       kind: 'hitResolved',
@@ -380,6 +625,7 @@ export class CombatSystem {
       travelMeters: travel,
       killed,
       severed,
+      staggered,
       promoted,
       candidateCount: opts.candidateCount,
     };

@@ -10,6 +10,15 @@ import { SimTier } from '@/game/simulation';
 export type BodyFamily = 'humanoid' | 'humanoid-heavy' | 'humanoid-light';
 export type LocomotionKind = 'shamble' | 'run' | 'crawl';
 
+/**
+ * Gore palette key an archetype bleeds (V7 — authored categorical data, not a render concern).
+ * The render gore system branches on this via its `goreColor(kind)` seam: `blood`/`ichor` are wet,
+ * `burned` is a charred/ash response that emits little-to-no blood. Kept value-compatible with the
+ * render-side `GoreType` so an archetype can ride a gore event unchanged once wired (note in report).
+ */
+export type GoreType = 'blood' | 'ichor' | 'burned';
+const GORE_TYPES: ReadonlySet<GoreType> = new Set<GoreType>(['blood', 'ichor', 'burned']);
+
 export interface LocomotionProfile {
   readonly kind: LocomotionKind;
   /** World meters per second at full health/anatomy. */
@@ -24,6 +33,8 @@ export interface PerceptionProfile {
 export interface AttackProfile {
   readonly damage: number;
   readonly rangeMeters: number;
+  /** Seconds between consecutive attacks on a reached target (per-archetype cadence, V17). */
+  readonly cooldownSeconds: number;
 }
 
 export interface AnatomyProfile {
@@ -51,6 +62,10 @@ export interface ZombieArchetype {
   readonly attack: AttackProfile;
   readonly anatomy: AnatomyProfile;
   readonly durability: DurabilityProfile;
+  /** Gore palette this archetype bleeds — the render gore system branches on it (V7 seam). */
+  readonly gore: GoreType;
+  /** Emits a burst death effect when killed (data flag only — render hooks on it later, V7). */
+  readonly burstsOnDeath: boolean;
   /** Sim tiers this archetype may occupy (V13). */
   readonly allowedSimTiers: readonly SimTier[];
   /** Render tiers this archetype may occupy. */
@@ -67,7 +82,9 @@ export function defineArchetype(a: ZombieArchetype): ZombieArchetype {
     throw new Error(`archetype ${a.id}: perception ranges must be > 0`);
   }
   if (a.attack.rangeMeters <= 0) throw new Error(`archetype ${a.id}: attack range must be > 0`);
+  if (a.attack.cooldownSeconds <= 0) throw new Error(`archetype ${a.id}: attack cooldown must be > 0`);
   if (a.anatomy.severThresholdScale <= 0) throw new Error(`archetype ${a.id}: severThresholdScale must be > 0`);
+  if (!GORE_TYPES.has(a.gore)) throw new Error(`archetype ${a.id}: unknown gore type '${a.gore}'`);
   if (a.allowedSimTiers.length === 0) throw new Error(`archetype ${a.id}: needs >= 1 allowed sim tier`);
   if (a.allowedRenderTiers.length === 0) throw new Error(`archetype ${a.id}: needs >= 1 allowed render tier`);
   // crawler invariant: a crawl-locomotion archetype must not list legs as severable (already gone).

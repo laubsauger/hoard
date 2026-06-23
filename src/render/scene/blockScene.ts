@@ -11,12 +11,15 @@ import {
   BoxGeometry,
   type BufferGeometry,
   type Camera,
+  CircleGeometry,
   Color,
   DirectionalLight,
+  Float32BufferAttribute,
   Fog,
   Group,
   HemisphereLight,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
@@ -41,8 +44,10 @@ import {
   resolveVisibilitySettings,
   resolveCutawayDepthSettings,
   resolveCutawayDepthOffset,
+  wallFacesCamera,
   type OcclusionContext,
   type CutawayDepthSettings,
+  type VecXZ,
 } from '../world/visibility';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
@@ -65,11 +70,17 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
   motionReduction: false,
 });
 
-/** A roof / upper-wall surface that fades for the cutaway (V20). */
+/** A roof / upper-wall surface that fades for the cutaway (V20/V58). */
 interface FadeSurface {
   readonly object: Object3D;
   readonly material: MeshStandardMaterial;
   readonly kind: 'roof' | 'upperWall';
+  /**
+   * For an upper-wall group: the shared outward horizontal normal of its panels (the directional cutaway
+   * fades it only when this normal turns toward the camera — T82/V58). Null for the roof (it occludes from
+   * directly above whenever the player is inside + the camera is looking in).
+   */
+  readonly outwardNormal: VecXZ | null;
   readonly heightMeters: number;
   opacity: number;
 }
@@ -112,6 +123,8 @@ export class BlockScene {
   private readonly hemi: HemisphereLight;
   private readonly fog: Fog;
   private readonly playerMesh: Object3D;
+  /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
+  private aoContact: Mesh | null = null;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -148,23 +161,21 @@ export class BlockScene {
     this.hemi = new HemisphereLight(0xa7b8c8, 0x2a2620, this.lighting.ambientIntensity * 0.5);
     this.sun = new DirectionalLight(0xfff2dc, this.lighting.sunIntensity);
     this.sun.castShadow = true;
-    // B13/V36: size the directional shadow ortho frustum to cover the block + set resolution/bias so the
-    // key actually casts readable shadows (renderer.shadowMap is enabled in the WebGPU backend).
+    // B13/T45/V36: size the directional shadow ortho frustum (per-tier, config-driven — no literals/V4) so
+    // the key casts readable shadows. The frustum is re-centred on the player each frame (syncLighting) so it
+    // always covers the play area without a hard cut-off; far reaches from the light past the receive band.
     {
-      const ext = this.worldExtent();
-      // Cap the half-extent so the shadow map stays sharp; the frustum is re-centred on the player each
-      // frame (syncLighting) so it always covers the play area without a hard cut-off at world origin.
-      const half = Math.min(Math.max(ext.width, ext.depth) * 0.6, 55);
+      const half = this.shadows.shadowOrthoHalfExtentMeters;
       const sc = this.sun.shadow.camera;
       sc.left = -half;
       sc.right = half;
       sc.top = half;
       sc.bottom = -half;
-      sc.near = 1;
-      sc.far = 220;
+      sc.near = this.shadows.shadowCameraNearMeters;
+      sc.far = this.shadows.shadowLightDistanceMeters + this.shadows.shadowMaxDistanceMeters;
       sc.updateProjectionMatrix();
       this.sun.shadow.mapSize.set(this.shadows.shadowMapResolution, this.shadows.shadowMapResolution);
-      this.sun.shadow.bias = -0.0005;
+      this.sun.shadow.bias = this.shadows.shadowDepthBias;
     }
     this.scene.add(this.ambient, this.hemi, this.sun, this.sun.target);
 
@@ -173,6 +184,7 @@ export class BlockScene {
     this.buildDoorsAndWindows();
     this.playerMesh = this.buildPlayer();
     this.scene.add(this.playerMesh);
+    this.buildContactAo();
 
     this.crowd = new Crowd(resolveCrowdSettings(this.tier), this.registry);
     this.crowd.mesh.castShadow = true; // B13: the horde casts shadows too (was unset → zombies floated shadowless)
@@ -251,16 +263,33 @@ export class BlockScene {
     const upperGeoX = upperH > 0 ? this.geo('wallUpperX.geo', new BoxGeometry(this.navCellSize, upperH, th)) : null;
     const upperGeoZ = upperH > 0 ? this.geo('wallUpperZ.geo', new BoxGeometry(th, upperH, this.navCellSize)) : null;
     const baseMat = this.mat('wallBase', { color: 0x6b6256, roughness: 0.85 });
-    const upperMat = this.mat('wallUpper', { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
     const sectionMat = this.mat('section', { color: 0xb04a32, roughness: 0.7 }); // the destructible wall, tinted
 
     // B3: bias the fading upper-wall faces back + lift them off the retained base so reveal faces never
     // z-fight the coplanar base top / ground (cutaway). Decision is pure (resolveCutawayDepthOffset).
     const upperOffset = resolveCutawayDepthOffset('upperWall', this.cutawayDepth);
-    upperMat.polygonOffset = upperOffset.polygonOffset;
-    upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
-    upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
     const upperBottomY = baseH + upperOffset.verticalInsetMeters;
+
+    // T82/V58 DIRECTIONAL cutaway: bucket non-section upper walls by their cardinal OUTWARD normal so each
+    // side fades INDEPENDENTLY — only the side(s) turned toward the camera fade; the far walls stay opaque so
+    // the room never collapses to a roofless open box. One shared transparent material + group per direction.
+    const bb = ts.buildingBounds;
+    const centerX = ((bb.minCx + bb.maxCx + 1) / 2) * this.navCellSize;
+    const centerZ = ((bb.minCy + bb.maxCy + 1) / 2) * this.navCellSize;
+    const upperFadeGroups = new Map<string, { group: Group; material: MeshStandardMaterial; normal: VecXZ }>();
+    const upperFadeGroup = (normal: VecXZ): { group: Group; material: MeshStandardMaterial; normal: VecXZ } => {
+      const key = `${normal.x},${normal.z}`;
+      let g = upperFadeGroups.get(key);
+      if (!g) {
+        const m = this.mat(`wallUpper.${key}`, { color: 0x6b6256, roughness: 0.85, transparent: true, opacity: 1 });
+        m.polygonOffset = upperOffset.polygonOffset;
+        m.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+        m.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+        g = { group: new Group(), material: m, normal };
+        upperFadeGroups.set(key, g);
+      }
+      return g;
+    };
 
     // structural-section nav cells get distinct, hideable meshes; everything else is a plain wall.
     const sectionByNav = new Map<number, number>(); // navIndex -> structuralCell
@@ -271,7 +300,6 @@ export class BlockScene {
     }
 
     const wallsGroup = new Group();
-    const upperGroup = new Group();
 
     // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
     const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
@@ -318,25 +346,34 @@ export class BlockScene {
           if (sc !== undefined) sectionObjs.push(base);
 
           if (upperGeo) {
-            const upper = new Mesh(upperGeo, sc !== undefined ? sectionMat : upperMat);
-            upper.position.set(wx, upperBottomY + upperH / 2, wz);
-            upper.castShadow = true;
             if (sc !== undefined) {
               // Destructible section: stays opaque + hideable on breach (does NOT fade with the cutaway).
+              const upper = new Mesh(upperGeo, sectionMat);
+              upper.position.set(wx, upperBottomY + upperH / 2, wz);
+              upper.castShadow = true;
               wallsGroup.add(upper);
               sectionObjs.push(upper);
             } else {
+              // Directional cutaway: route into the fade group for this panel's outward normal (T82/V58).
+              const fade = upperFadeGroup(this.upperWallOutwardNormal(along, faces, wx, wz, centerX, centerZ));
+              const upper = new Mesh(upperGeo, fade.material);
+              upper.position.set(wx, upperBottomY + upperH / 2, wz);
+              upper.castShadow = true;
               upper.renderOrder = upperOffset.renderOrder;
-              upperGroup.add(upper);
+              fade.group.add(upper);
             }
           }
         }
         if (sc !== undefined) this.sectionMeshes.push({ cell: sc, objects: sectionObjs });
       }
     }
-    this.scene.add(wallsGroup, upperGroup);
+    this.scene.add(wallsGroup);
     if (upperH > 0) {
-      this.fadeSurfaces.push({ object: upperGroup, material: upperMat, kind: 'upperWall', heightMeters: wallH, opacity: 1 });
+      // One fade surface per outward-normal direction — the per-frame cutaway fades each independently (V58).
+      for (const g of upperFadeGroups.values()) {
+        this.scene.add(g.group);
+        this.fadeSurfaces.push({ object: g.group, material: g.material, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, opacity: 1 });
+      }
     }
 
     // Roof over the building interior — the primary cutaway occluder (fades when the player is inside).
@@ -353,7 +390,66 @@ export class BlockScene {
     roof.renderOrder = roofOffset.renderOrder;
     roof.position.set((b.minCx + b.maxCx + 1) / 2 * this.navCellSize, wallH, (b.minCy + b.maxCy + 1) / 2 * this.navCellSize);
     this.scene.add(roof);
-    this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', heightMeters: wallH, opacity: 1 });
+    this.fadeSurfaces.push({ object: roof, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, opacity: 1 });
+  }
+
+  /**
+   * The cardinal OUTWARD horizontal normal of an upper-wall panel (T82/V58). For a panel running along X the
+   * normal is ±Z (the open/exterior side); along Z it is ±X. A perimeter wall has exactly one open side so
+   * the exposed-edge sign decides; a free-standing interior wall (open on both sides) falls back to pointing
+   * away from the building centre. Pure helper — feeds the directional cutaway's per-side fade buckets.
+   */
+  private upperWallOutwardNormal(
+    along: 'x' | 'z',
+    faces: { dx: number; dz: number; along: 'x' | 'z' }[],
+    wx: number,
+    wz: number,
+    centerX: number,
+    centerZ: number,
+  ): VecXZ {
+    if (along === 'x') {
+      const north = faces.some((f) => f.along === 'x' && f.dz < 0);
+      const south = faces.some((f) => f.along === 'x' && f.dz > 0);
+      const sz = north && !south ? -1 : south && !north ? 1 : wz < centerZ ? -1 : 1;
+      return { x: 0, z: sz };
+    }
+    const west = faces.some((f) => f.along === 'z' && f.dx < 0);
+    const east = faces.some((f) => f.along === 'z' && f.dx > 0);
+    const sx = west && !east ? -1 : east && !west ? 1 : wx < centerX ? -1 : 1;
+    return { x: sx, z: 0 };
+  }
+
+  /**
+   * Cheap contact-AO grounding disc (T45/V36): a soft dark radial gradient laid flat under the player that
+   * follows them each frame. Reads as ambient occlusion / contact darkening even when the sun shadow is faint
+   * (overcast / night / interior), so the diorama always feels grounded. Pure geometry (per-vertex alpha,
+   * NO texture binding → zero WebGPU validation cost); strength + radius are per-tier config (V4/V8).
+   */
+  private buildContactAo(): void {
+    const strength = this.lighting.ambientOcclusionStrength;
+    const radius = this.lighting.contactAoRadiusMeters;
+    if (strength <= 0 || radius <= 0) return; // disabled by tier/config — skip cleanly (no empty mesh)
+    const segments = 32;
+    const geo = this.geo('contactAo.geo', new CircleGeometry(radius, segments));
+    // Per-vertex RGBA: opaque-dark centre (alpha = strength) fading to fully transparent at the rim.
+    const count = geo.getAttribute('position').count;
+    const colors = new Float32Array(count * 4);
+    for (let i = 0; i < count; i++) {
+      const center = i === 0; // CircleGeometry vertex 0 is the centre; 1..n are the rim ring
+      colors[i * 4 + 3] = center ? strength : 0;
+    }
+    geo.setAttribute('color', new Float32BufferAttribute(colors, 4));
+    // Tracked for disposal (V24); not pushed into `mats` (that array is typed to the lit standard materials).
+    const mat = this.registry.track(
+      new MeshBasicMaterial({ color: 0x000000, transparent: true, vertexColors: true, depthWrite: false }),
+      'material',
+      'block.contactAo',
+    );
+    const disc = new Mesh(geo, mat);
+    disc.rotation.x = -Math.PI / 2; // lay flat on the ground plane
+    disc.renderOrder = 1; // draw after opaque ground/floor so the soft darkening composites cleanly
+    this.aoContact = disc;
+    this.scene.add(disc);
   }
 
   /**
@@ -499,6 +595,11 @@ export class BlockScene {
 
     const p = this.runtime.player();
     this.playerMesh.position.set(p.x, 0, p.z);
+    // T45/V36: keep the contact-AO grounding disc under the player, resting just above the local ground/floor.
+    if (this.aoContact) {
+      const groundY = this.isPlayerInsideBuilding() ? this.world.floorThicknessMeters : 0;
+      this.aoContact.position.set(p.x, groundY + this.lighting.contactAoGroundLiftMeters, p.z);
+    }
     // B8/V41: single-source the aim heading. playerAim() is atan2(dz,dx); the avatar's nose is local +x,
     // so the Y-rotation that points +x at world heading h is exactly -h (NO +π/2 offset — that bug left
     // the player facing 90° off the cursor).
@@ -551,7 +652,7 @@ export class BlockScene {
     const severity = this.runtime.weatherSeverity;
     const sky = computeSkyState(this.runtime.timeOfDay(), this.lighting, this.weatherCfg, severity);
 
-    const dist = 60;
+    const dist = this.shadows.shadowLightDistanceMeters;
     // B13: anchor the key + its shadow frustum to the player so cast shadows always cover the play area
     // (the frustum is capped for sharpness; pinning it to world origin produced a hard shadow cut-off as
     // the player walked away). Sun keeps its sky-driven direction, just translated onto the player.
@@ -602,11 +703,34 @@ export class BlockScene {
       : this.roofFadeSeconds > 0
         ? dtSeconds / this.roofFadeSeconds
         : 1;
+    // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the CameraRig's camera
+    // position. A wall fades only when its outward normal turns toward the camera (it sits between camera +
+    // player); the roof always occludes from above. The far walls keep their opacity so enclosure still reads.
+    let towardCamera: VecXZ | null = null;
+    if (camera) {
+      const p = this.runtime.player();
+      const dx = camera.position.x - p.x;
+      const dz = camera.position.z - p.z;
+      if (Math.hypot(dx, dz) > 1e-6) towardCamera = { x: dx, z: dz };
+    }
     for (const s of this.fadeSurfaces) {
+      let occludesPlayerView: boolean;
+      if (towardCamera === null) {
+        occludesPlayerView = false; // no camera (construction prime) or degenerate top-down → keep everything
+      } else if (s.kind === 'roof' || s.outwardNormal === null) {
+        occludesPlayerView = playerInside; // roof occludes from directly above whenever the player is inside
+      } else {
+        occludesPlayerView =
+          playerInside &&
+          wallFacesCamera({
+            outwardNormal: s.outwardNormal,
+            towardCamera,
+            facingDotThreshold: this.visibility.cameraFacingDotThreshold,
+          });
+      }
       const ctx: OcclusionContext = {
         playerInside,
-        // The top-down tactical camera looking into an enclosed room is occluded by its roof/upper walls.
-        occludesPlayerView: playerInside && camera !== undefined,
+        occludesPlayerView,
         roomEnclosed: true,
         portalOrLosToCamera: false,
         surfaceHeightMeters: s.heightMeters,
@@ -637,6 +761,7 @@ export class BlockScene {
     this.scene.clear();
     this.fadeSurfaces.length = 0;
     this.sectionMeshes.length = 0;
+    this.aoContact = null;
   }
 
   /** Test/diagnostics: number of fadeable cutaway surfaces + tracked GPU resources. */

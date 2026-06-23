@@ -37,6 +37,11 @@ export interface PackOptions {
   readonly variationCount: number;
   readonly scaleMin: number;
   readonly scaleMax: number;
+  /**
+   * Lowest simTier the box path draws (default 0 = all tiers). The limbed figure path (T72) handles the
+   * hero/active tiers, so the box is fed `minSimTier = limbedMaxSimTier + 1` to render only the horde (V13).
+   */
+  readonly minSimTier?: number;
 }
 
 export interface PackResult {
@@ -62,7 +67,7 @@ export function packCrowdInputs(
   outMeta: Float32Array,
   opts: PackOptions,
 ): PackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, minSimTier = 0 } = opts;
   if (count < 0 || count > capacity) throw new Error(`count ${count} exceeds capacity ${capacity}`);
   if (outPose.length < capacity * FLOATS_PER_POSE) {
     throw new Error(`outPose too small: need ${capacity * FLOATS_PER_POSE}, got ${outPose.length}`);
@@ -77,10 +82,12 @@ export function packCrowdInputs(
   const heading = requireView<Float32Array>(views, 'heading');
   const archetype = requireView<Uint16Array>(views, 'archetype');
   const animState = requireView<Uint8Array>(views, 'animState');
+  const simTier = minSimTier > 0 ? requireView<Uint8Array>(views, 'simTier') : undefined;
 
   let live = 0;
   for (let slot = 0; slot < count; slot++) {
     if (alive[slot]! === 0) continue;
+    if (simTier && simTier[slot]! < minSimTier) continue; // limbed tiers are drawn as figures (T72)
 
     const seed = variationSeed(slot, variationCount);
     const sc = variationScale(seed, variationCount, scaleMin, scaleMax);

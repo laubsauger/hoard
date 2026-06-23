@@ -9,7 +9,18 @@ export {
   type PackOptions,
   type PackResult,
 } from './packing';
-export { Crowd, resolveCrowdSettings, type CrowdSettings } from './crowd';
+export { Crowd, CrowdLimbs, resolveCrowdSettings, type CrowdSettings } from './crowd';
+export {
+  packLimbInputs,
+  composeLimbMatrix,
+  walkSwing,
+  walkBob,
+  FLOATS_PER_LIMB_POSE,
+  FLOATS_PER_MAT4,
+  type LimbPackOptions,
+  type LimbPackResult,
+  type LimbPartPlacement,
+} from './limbs';
 export {
   RENDER_PATHS,
   MATERIAL_FAMILIES,

@@ -30,6 +30,8 @@ export interface SurvivalState {
   hunger: number;
   thirst: number;
   fatigue: number;
+  /** Sprint pool 0..1 (escape lever). Sprinting drains it; not-sprinting regenerates it. Fatigue caps it. */
+  stamina: number;
   /** Active bleeding severity (acute — drains health fast until clotted/treated). */
   bleeding: number;
   pain: number;
@@ -71,7 +73,7 @@ export interface SleepResult {
 
 function defaultState(competence: number): SurvivalState {
   return {
-    health: 1, hunger: 0, thirst: 0, fatigue: 0, bleeding: 0, pain: 0,
+    health: 1, hunger: 0, thirst: 0, fatigue: 0, stamina: 1, bleeding: 0, pain: 0,
     infection: 0, stress: 0, encumbrance: 0, openWounds: 0, competence,
   };
 }
@@ -87,6 +89,8 @@ export class SurvivalSystem {
   readonly entity: EntityId;
   readonly settings: SurvivalSettings;
   private readonly s: SurvivalState;
+  /** Exhaustion lockout (hysteresis): true once stamina bottoms out, cleared above sprintMinStamina. */
+  private staminaLocked = false;
 
   constructor(opts: SurvivalOptions) {
     const competence = opts.competence ?? 0;
@@ -94,6 +98,8 @@ export class SurvivalSystem {
     this.entity = opts.entity;
     this.settings = resolveDomain(survivalConfig, opts.tier ?? REFERENCE_TIER);
     this.s = { ...defaultState(competence), ...opts.initial };
+    // Fatigue caps available stamina from the start (exhausted = little stamina).
+    this.s.stamina = Math.min(this.s.stamina, this.maxStamina);
   }
 
   get state(): Readonly<SurvivalState> {
@@ -112,6 +118,50 @@ export class SurvivalSystem {
   /** Panic flagged — degrades control/awareness elsewhere; never removes agency (V31). */
   get panicking(): boolean {
     return this.s.stress >= this.settings.panicStressThreshold;
+  }
+
+  /** Current stamina pool 0..1 (the sprint budget). */
+  get stamina(): number {
+    return this.s.stamina;
+  }
+
+  /** Max stamina the pool can hold right now — fatigue lowers it (exhausted = little stamina). */
+  get maxStamina(): number {
+    return clamp01(1 - this.s.fatigue * this.settings.staminaFatigueCapCoupling);
+  }
+
+  /** Whether the player may start/continue sprinting (not exhaustion-locked and has stamina left). */
+  get canSprint(): boolean {
+    return !this.staminaLocked && this.s.stamina > 0;
+  }
+
+  /**
+   * Sprint/stamina lever (T22): drains stamina while sprinting, regenerates while not. Fatigue caps the
+   * max pool and slows regen. Hysteresis: once stamina bottoms out the sprint is LOCKED until stamina
+   * recovers above sprintMinStamina (no per-frame flicker). Driven per-frame by movement, so the rates
+   * scale by `seconds` (the frame dt). Returns whether sprint is actually applied this step — the caller
+   * applies the speed multiplier only when true.
+   */
+  applyStamina(wantSprint: boolean, seconds: number): boolean {
+    if (seconds < 0 || Number.isNaN(seconds)) throw new Error(`stamina seconds must be >= 0, got ${seconds}`);
+    const cfg = this.settings;
+    const s = this.s;
+    const sprinting = wantSprint && !this.staminaLocked && s.stamina > 0;
+    if (sprinting) {
+      s.stamina = clamp01(s.stamina - cfg.staminaDrainPerSec * seconds);
+      if (s.stamina <= 0) {
+        s.stamina = 0;
+        this.staminaLocked = true; // exhausted — lock until recovered above the start threshold
+      }
+    } else {
+      const regen = Math.max(0, cfg.staminaRegenPerSec * (1 - s.fatigue * cfg.staminaFatigueRegenCoupling));
+      s.stamina = Math.min(this.maxStamina, s.stamina + regen * seconds);
+      // Clear the lockout once stamina recovers above the start threshold (capped by fatigue).
+      if (this.staminaLocked && s.stamina >= Math.min(cfg.sprintMinStamina, this.maxStamina)) {
+        this.staminaLocked = false;
+      }
+    }
+    return sprinting;
   }
 
   /** Competence reduces hunger/thirst/fatigue decay (reliability, not power). */
@@ -148,6 +198,17 @@ export class SurvivalSystem {
   heal(amount: number): void {
     assertUnit('heal amount', amount);
     this.s.health = clamp01(this.s.health + amount);
+  }
+
+  /**
+   * Take an immediate combat hit (a zombie attack reaching the player): direct, authoritative health
+   * loss. Health is the survival system's domain (T22) — combat routes player damage here, never to a
+   * detached health number. `amount` is a normalized fraction of max health (0..1). Health floors at 0;
+   * `alive` flips to false at 0, which the runtime reads as player death (game-over).
+   */
+  damage(amount: number): void {
+    assertUnit('damage amount', amount);
+    this.s.health = clamp01(this.s.health - amount);
   }
 
   setCompetence(v: number): void {

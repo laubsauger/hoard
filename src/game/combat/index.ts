@@ -14,7 +14,15 @@ export {
   type CombatDeps,
   type ShotOrigin,
   type ShotResult,
+  type AmmoStatus,
 } from './hitPath';
+export {
+  buildWeaponRegistry,
+  WEAPON_IDS,
+  type WeaponClass,
+  type WeaponId,
+  type WeaponKind,
+} from './weaponRegistry';
 export {
   Posture,
   buildSegments,

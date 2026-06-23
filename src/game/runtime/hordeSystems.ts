@@ -15,6 +15,7 @@ import {
   type SeparationAgent,
   type SpatialHash,
 } from '@/game/navigation/collision';
+import { limbConsequences, type ConsequenceConfig } from '@/game/combat';
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
@@ -68,6 +69,17 @@ export interface HordeSimulationDeps {
   readonly getTargetSlot: () => ZombieSlot;
   /** Tick of last damage per slot, owned by GameRuntime's combat callbacks; read here for tier recency. */
   readonly lastDamageTick: Map<ZombieSlot, number>;
+  /** Tick of each slot's last melee swing at the player (cooldown gate). Owned by GameRuntime so it is
+   *  cleared on despawn — a recycled slot must not inherit a stale cooldown (V26). */
+  readonly lastAttackTick: Map<ZombieSlot, number>;
+  /**
+   * Resolve a slot's attack parameters from its archetype (V14 — stimulus-driven, the runtime owns the
+   * slot<->archetype seam + the damage scale). `damageFraction` is a normalized fraction of player max
+   * health; `cooldownTicks` is the per-archetype cadence in fixed ticks; `rangeMeters` is melee reach.
+   */
+  readonly attackOf: (slot: ZombieSlot) => { damageFraction: number; cooldownTicks: number; rangeMeters: number };
+  /** Apply a melee hit to the player (routed through GameRuntime -> the player survival system, T22). */
+  readonly damagePlayer: (slot: ZombieSlot, damageFraction: number) => void;
 }
 
 /**
@@ -88,7 +100,17 @@ export class HordeSimulation {
   private readonly resolveBySlot = new Map<number, SeparationAgent>();
   private readonly resolveNeighbors: SeparationAgent[] = [];
 
-  constructor(private readonly d: HordeSimulationDeps) {}
+  /** Missing-limb consequence tunables (V17), read straight from the combat domain — no literals. */
+  private readonly consequence: ConsequenceConfig;
+
+  constructor(private readonly d: HordeSimulationDeps) {
+    this.consequence = {
+      armLossLocomotionPenalty: d.combatCfg.armLossLocomotionPenalty,
+      legLossLocomotionPenalty: d.combatCfg.legLossLocomotionPenalty,
+      armLossThreatPenalty: d.combatCfg.armLossThreatPenalty,
+      legsLostToCrawl: d.combatCfg.legsLostToCrawl,
+    };
+  }
 
   /** everyTick: shared-flow steering + movement integrate (V12/V15/V19). */
   stepMovement(): void {
@@ -108,6 +130,22 @@ export class HordeSimulation {
 
     zombies.forEachAlive((slot) => {
       if (zombies.getNavGroup(slot) < 0) return;
+
+      // V17/T57: a body in stagger is interrupted — it neither moves nor attacks until the timer expires.
+      // The stateTimer (seconds, written by combat) ticks DOWN here every tick; on expiry the body leaves
+      // stagger (-> Idle) so perception re-acquires it next pass. Nothing else clobbers the transient state.
+      if (zombies.getState(slot) === ZombieState.Stagger) {
+        const remaining = zombies.getStateTimer(slot) - dt;
+        if (remaining > 0) {
+          zombies.setStateTimer(slot, remaining);
+        } else {
+          zombies.setStateTimer(slot, 0);
+          zombies.setState(slot, ZombieState.Idle);
+        }
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+
       zombies.getPosition(slot, pos);
       const adx = target.x - pos[0];
       const adz = target.z - pos[2];
@@ -115,6 +153,20 @@ export class HordeSimulation {
         zombies.setVelocity(slot, 0, 0, 0); // arrived — hold position, let separation settle (no jiggle)
         return;
       }
+      // V17: missing limbs slow locomotion (legs dominate — a legless body crawls). The common case
+      // (flags === 0) skips the consequence math entirely so the steady-state hot path stays cheap.
+      let moveScale = 1;
+      const flags = zombies.getAnatomyFlags(slot);
+      if (flags !== 0) {
+        const cons = limbConsequences(flags, this.consequence);
+        moveScale = cons.locomotionScale;
+        zombies.setAnimState(slot, cons.posture); // posture is derived from sever state (V17) — surface for render
+        if (moveScale <= 0) {
+          zombies.setVelocity(slot, 0, 0, 0); // no functional legs/arms left to translate the body
+          return;
+        }
+      }
+      const effSpeed = speed * moveScale;
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);
@@ -125,8 +177,8 @@ export class HordeSimulation {
         zombies.setVelocity(slot, 0, 0, 0);
         return;
       }
-      const nx = pos[0] + dirX * speed * dt;
-      const nz = pos[2] + dirZ * speed * dt;
+      const nx = pos[0] + dirX * effSpeed * dt;
+      const nz = pos[2] + dirZ * effSpeed * dt;
       // T58/V42: radius-aware static collision + wall-slide so a body never clips half into a wall.
       let mx = pos[0];
       let mz = pos[2];
@@ -145,7 +197,7 @@ export class HordeSimulation {
       if (moved) {
         zombies.setPosition(slot, mx, pos[1], mz);
         zombies.setHeading(slot, Math.atan2(dirZ, dirX));
-        zombies.setVelocity(slot, dirX * speed, 0, dirZ * speed);
+        zombies.setVelocity(slot, dirX * effSpeed, 0, dirZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {
         zombies.setVelocity(slot, 0, 0, 0);
@@ -298,16 +350,50 @@ export class HordeSimulation {
       // V47: walls / closed doors block sight — no seeing the player through solid structure.
       if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
       zombies.setStimulus(slot, inSight ? playerEntityId : -1);
+      if (inSight) seen = true;
+      // V17/T57: never clobber a transient combat-set stagger — it ticks down in stepMovement and the
+      // body re-acquires its FSM state once it expires. Sensing (the stimulus column) still updates above.
+      if (zombies.getState(slot) === ZombieState.Stagger && zombies.getStateTimer(slot) > 0) return;
       // V20: drive the FSM state so behaviour + the debug indicator reflect what the zombie is doing.
       let state: number;
       if (inSight) state = dist <= attackRange ? ZombieState.Attack : ZombieState.Pursue;
       else if (lured) state = ZombieState.Wander; // searching/investigating a heard sound
       else state = ZombieState.Idle;
       zombies.setState(slot, state);
-      if (inSight) seen = true;
     });
     // B16/V14: cache whether the horde sees the player so flowTargetCell can let sight override a stale lure.
     this.playerVisibleToHorde = seen;
+  }
+
+  /**
+   * everyTick combat reach (V14/V16/V17): a zombie that has ACTUALLY reached the player bites it on a
+   * per-archetype cooldown, routing damage to the player through the runtime (T22 survival). It attacks
+   * ONLY the player it senses (its stimulus column = the player entity, set by perception) — never via an
+   * omniscient coordinate (V14). A staggered body is interrupted (its state is no longer Attack, so it is
+   * skipped). Missing arms scale the bite down (reduced reach/threat); both arms gone = no bite (V17).
+   */
+  stepAttacks(ctx: SystemContext): void {
+    const { zombies, playerEntityId, getPlayerPos, attackOf, damagePlayer, lastAttackTick } = this.d;
+    const p = getPlayerPos();
+    zombies.forEachAlive((slot) => {
+      if (zombies.getState(slot) !== ZombieState.Attack) return; // staggered/pursuing/idle do not bite
+      if (zombies.getStimulus(slot) !== playerEntityId) return; // only the player it actually senses (V14)
+      let threatScale = 1;
+      const flags = zombies.getAnatomyFlags(slot);
+      if (flags !== 0) {
+        const cons = limbConsequences(flags, this.consequence);
+        if (!cons.canAttack) return; // both arms severed — cannot land a standing melee (V17)
+        threatScale = cons.threatScale;
+      }
+      const profile = attackOf(slot);
+      // Re-verify the body is still within its melee reach NOW (it may have been pushed off the ring). This
+      // is the reached body's own distance — the same player read perception uses, not a cheat (V14).
+      if (planarDistanceToPlayer(zombies, slot, p.x, p.z) > profile.rangeMeters) return;
+      const last = lastAttackTick.get(slot);
+      if (last !== undefined && ctx.tick - last < profile.cooldownTicks) return; // still on cooldown
+      lastAttackTick.set(slot, ctx.tick);
+      damagePlayer(slot, profile.damageFraction * threatScale);
+    });
   }
 
   /** interval: tier assignment (V13), phase-offset so it never shares a tick with perception. */

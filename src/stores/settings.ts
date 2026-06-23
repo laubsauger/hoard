@@ -8,7 +8,7 @@ import { persist, subscribeWithSelector } from 'zustand/middleware';
 import { persistStorage, PERSIST_PREFIX } from './storage';
 import { resolveDomain } from '../config/registry';
 import { accessibilityConfig } from '../config/domains/accessibility';
-import type { QualityTier } from '../config/types';
+import { QUALITY_TIERS, type QualityTier } from '../config/types';
 
 // V29 defaults come from typed config (reference tier — these are user-facing defaults, not tier-scaled).
 const A11Y = resolveDomain(accessibilityConfig, 'desktop-high');
@@ -69,7 +69,15 @@ export function createSettingsStore() {
           audioCueIndicators: A11Y.audioCueIndicatorsDefault,
           subtitles: A11Y.subtitlesDefault,
           pauseForComplexActions: A11Y.pauseForComplexActionsDefault,
-          setQualityTierOverride: (qualityTierOverride) => set({ qualityTierOverride }),
+          // V25 — the store only accepts a KNOWN tier or null (auto). The hardware safe-limit guard that
+          // forbids requesting a MORE-demanding tier than the device supports lives in render/quality
+          // (evaluateTierOverride/applyTierOverride) and is applied when the engine resolves the tier.
+          setQualityTierOverride: (qualityTierOverride) => {
+            if (qualityTierOverride !== null && !QUALITY_TIERS.includes(qualityTierOverride)) {
+              throw new Error(`unknown quality tier override: ${String(qualityTierOverride)}`);
+            }
+            set({ qualityTierOverride });
+          },
           setMasterVolume: (v) => set({ masterVolume: clamp01(v) }),
           setGoreIntensity: (v) => set({ goreIntensity: clamp01(v) }),
           setOutlineStrength: (v) => set({ outlineStrength: clamp01(v) }),

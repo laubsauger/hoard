@@ -22,12 +22,17 @@ import {
 import { resolve } from '../config/spec';
 import { renderingConfig } from '../config/domains/rendering';
 import { combatConfig } from '../config/domains/combat';
+import { weaponsConfig } from '../config/domains/weapons';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
 import { BloodView, resolveBloodSettings } from '../render/effects/bloodView';
 import { RaycastSurfaceProjector } from '../render/effects/surfaceProjector';
+import { ImpactView, resolveImpactSettings, type ImpactIngestContext } from '../render/effects/impactView';
 import { GibView, resolveGibSettings } from '../render/effects/gibView';
+import { WeatherView, resolveRainSettings } from '../render/effects/weatherView';
+import { FireView, resolveFireSettings, type FireIgnition } from '../render/effects/fireView';
+import { CorpseField, resolveCorpseFieldSettings } from '../render/corpse';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
 import { createNoiseSnapshotGate, noiseViewStore } from '../stores/noiseView';
@@ -37,8 +42,10 @@ import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
 import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
 import type { WeatherProfile } from '../config/domains/weather';
-import { sessionStore } from '../stores/session';
+import { sessionStore, simStepDt } from '../stores/session';
+import { inputStore } from '../stores/input';
 import { settingsStore, type SettingsState } from '../stores/settings';
+import { GameAudio, resolveAudioOutTuning, type AudibleSound } from '../audio-out';
 
 /** Map the persisted accessibility settings onto the renderer's injected params (V29). */
 function accessibilityFromSettings(s: SettingsState): RenderAccessibility {
@@ -189,8 +196,40 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // Resources are tracked in the host registry so host.dispose() frees them on unmount (V24).
       const bloodView = new BloodView(resolveBloodSettings(tier), host.resources);
       const gibView = new GibView(resolveGibSettings(tier), host.resources);
+      // T80/T81 (V57): DISTINCT, clearly NON-RED structure-impact response — a spark burst + persistent
+      // bullet-hole decal on a WALL hit, and dark wound marks on struck BODIES — so a wall hit / clean miss
+      // never reads like "blood beyond range". Wired directly here (NOT via blockScene.fireFeedback) like
+      // blood/gib; the ShotResult branch in onClick decides wall (spark+hole) vs body (wound). Pooled+capped,
+      // tracked in the registry for disposal (V24).
+      const impactView = new ImpactView(resolveImpactSettings(tier), host.resources);
+      // Precipitation atmosphere (RENDER lane WeatherView): instanced rain streaks in a camera-following box,
+      // ramped in/out per the active weather profile (gated off in clear). Reads the runtime's weather each
+      // frame; the existing fog/grade (blockScene/lighting) is untouched. Resources tracked → freed on unmount.
+      const weatherView = new WeatherView(resolveRainSettings(tier), host.resources);
+      // FIRE visuals (RENDER lane FireView): additive billboard flame columns + a pooled flickering light set
+      // + faint smoke at the cells the sim reports burning. Pure visual mirror (V2) — fed the drained
+      // `fireIgnited` WorldEvents (mapped to world positions) + the runtime's live `isRouteBurning` truth each
+      // frame; never touches the sim. Resources tracked → freed on unmount (V24).
+      const fireView = new FireView(resolveFireSettings(tier), host.resources);
       bloodView.attachTo(scene.scene);
       gibView.attachTo(scene.scene);
+      impactView.attachTo(scene.scene);
+      weatherView.attachTo(scene.scene);
+      fireView.attachTo(scene.scene);
+
+      // Procedural WebAudio OUTPUT layer (NEW audio-out lane). Synthesized — no asset files. Created here
+      // but SILENT until a user gesture resumes its AudioContext (autoplay policy, wired in onClick/onKeyDown
+      // below). Master volume tracks the settings store live; volume 0 also mutes the master node. Disposed
+      // on unmount (V24). It only READS the drained event/stimulus stream — never feeds the sim (V2).
+      const gameAudio = new GameAudio(resolveAudioOutTuning(tier));
+      gameAudio.setMasterVolume(settingsStore.getState().masterVolume);
+      gameAudio.setMuted(settingsStore.getState().masterVolume <= 0);
+      const unsubVolume = settingsStore.subscribe((s) => {
+        gameAudio.setMasterVolume(s.masterVolume);
+        gameAudio.setMuted(s.masterVolume <= 0);
+      });
+      cleanups.push(unsubVolume);
+      cleanups.push(() => gameAudio.dispose());
 
       // Live-apply accessibility changes from the settings panel into the running scene (V29 end-to-end).
       const unsubAccessibility = settingsStore.subscribe((s) => {
@@ -223,10 +262,11 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // (scene.crowd.mesh), the player avatar (the scene's only CapsuleGeometry → its whole group), the
       // gizmo overlay, and every gore/effect mesh (blood./gib./combat. material names). Structure never
       // moves, so the list is built once. Read-only (V2); raycasts are bounded by the sim (per hit, pooled).
+      const structures: Object3D[] = [];
       {
         const sceneRoot = scene.scene;
         const exclude = new Set<Object3D>();
-        exclude.add(scene.crowd.mesh);
+        scene.crowd.mesh.traverse((o) => exclude.add(o)); // crowd box + its limbed-figure children (T72) are dynamic, not blood surfaces
         gizmos.group.traverse((o) => exclude.add(o));
         sceneRoot.traverse((o) => {
           const m = o as Mesh;
@@ -234,16 +274,28 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
             (m.parent ?? m).traverse((c) => exclude.add(c));
           }
         });
-        const structures: Object3D[] = [];
         sceneRoot.traverse((o) => {
           const m = o as Mesh;
           if (!m.isMesh || exclude.has(o)) return;
           const matName = (m.material as Material | undefined)?.name ?? '';
-          if (matName.startsWith('blood.') || matName.startsWith('gib.') || matName.startsWith('combat.')) return;
+          if (matName.startsWith('blood.') || matName.startsWith('gib.') || matName.startsWith('impact.') || matName.startsWith('combat.')) return;
           structures.push(o);
         });
-        bloodView.sim.setProjector(new RaycastSurfaceProjector(structures));
       }
+      // One read-only surface projector over the static structures, shared by the blood floor/wall projector
+      // (T77/V54) and the impact wall-finder (T80/V57). Structure never moves → built once (V2 read-only).
+      const surfaceProjector = new RaycastSurfaceProjector(structures);
+      bloodView.sim.setProjector(surfaceProjector);
+      // Firearm range = the clean-miss tracer length. stopDistance < range ⇒ the shot stopped on structure
+      // (a wall), not a clean miss to max range — that is the STRUCTURE-impact branch (V57). Range carries no
+      // tier overrides, so resolving at the render tier matches the sim's authoritative value.
+      const firearmRangeMeters = resolveDomain(weaponsConfig, tier).firearmRangeMeters;
+
+      // T55/B9: pooled instanced CORPSE field — mirrors the runtime's lingering corpses (killed bodies do not
+      // vanish). Attached AFTER the static-structure list is assembled so it is never treated as a blood
+      // projection surface. Resources tracked in the host registry → freed on unmount (V24).
+      const corpseField = new CorpseField(resolveCorpseFieldSettings(tier), host.resources);
+      corpseField.attachTo(scene.scene);
 
       const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
 
@@ -260,16 +312,22 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       // ---- input: WASD move, mouse aim, click fire, Q/E rotate, +/- zoom, B breach, R board ----
       const onKeyDown = (e: KeyboardEvent): void => {
+        gameAudio.resume(); // autoplay policy: lazily create/resume the AudioContext on a user gesture.
         keys.add(e.code);
-        if (e.code === 'KeyQ') camera.rotate(-1);
-        if (e.code === 'KeyE') camera.rotate(1);
-        if (e.code === 'Escape') {
-          // T49: ESC toggles an authoritative pause — the sim stops advancing (V12-safe), the pause menu
-          // shows. The session phase is the single source of truth (the menu's Resume reads/writes it too).
-          const phase = sessionStore.getState().phase;
-          if (phase === 'playing') sessionStore.getState().setPhase('paused');
-          else if (phase === 'paused') sessionStore.getState().setPhase('playing');
+        // T50/V29: read the rebindable keymap so remapped rotate/pause keys take effect live.
+        const b = inputStore.getState().bindings;
+        if (e.code === b.rotateCCW) camera.rotate(-1);
+        if (e.code === b.rotateCW) camera.rotate(1);
+        if (e.code === b.pause) {
+          // T49: the pause key toggles an authoritative pause — the sim HALTS in the frame loop (V12-safe)
+          // and the pause menu shows. The session `paused` flag is the single source of truth shared with
+          // the loop (the menu's Resume writes it too). Pausing leaves the lifecycle phase on 'playing'.
+          if (sessionStore.getState().phase === 'playing') sessionStore.getState().togglePause();
         }
+        // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
+        if (e.code === 'KeyR') runtime.reloadWeapon();
+        if (e.code === 'BracketRight') runtime.cycleWeapon(1);
+        if (e.code === 'BracketLeft') runtime.cycleWeapon(-1);
       };
       const onKeyUp = (e: KeyboardEvent): void => {
         keys.delete(e.code);
@@ -283,6 +341,8 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         return raycaster.ray.intersectPlane(groundPlane, aimPoint) ? aimPoint : null;
       };
       const onClick = (): void => {
+        gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio.
+        gameAudio.gunshot(); // procedural gunshot synthesized directly off the player-fire path.
         const hit = aimWorldPoint();
         const p = runtime.player();
         const dx = hit ? hit.x - p.x : Math.cos(runtime.playerAim());
@@ -293,6 +353,29 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
         // never draws through a wall on a miss into structure (V49/V53/B20).
         scene?.fireFeedback(dx, dz, shot.stopDistanceMeters); // B7: muzzle flash + tracer + report on fire
+        // T80/T81 (V57): DISTINCT surface response, branched off the authoritative ShotResult.
+        //   hit === true  → a zombie was struck → blood already fires (bloodView); add a WOUND mark at the
+        //                   struck body point. NO wall spark.
+        //   hit === false → clean miss / structure stop. When the shot stopped SHORT of weapon range it hit a
+        //                   WALL → raycast the structures along the aim to the real surface → SPARK burst
+        //                   (out of the wall) + bullet HOLE. A clean miss to max range hits nothing → no spark.
+        const impactCtx: ImpactIngestContext = { goreIntensity: access.goreIntensity, reduceFlashes: access.feedback.reduceFlashes };
+        const len = Math.hypot(dx, dz) || 1;
+        const ndx = dx / len;
+        const ndz = dz / len;
+        const stop = shot.stopDistanceMeters ?? firearmRangeMeters;
+        if (shot.hit) {
+          // Struck body point = muzzle origin + aim*travel (XZ); region->height lifts it; the wound faces back
+          // toward the shooter (-aim). Zombie base sits on the ground (y=0).
+          const wx = p.x + ndx * stop;
+          const wz = p.z + ndz * stop;
+          impactView.wound(wx, 0, wz, shot.region ?? 'torsoUpper', -ndx, -ndz, impactCtx);
+        } else if (stop < firearmRangeMeters) {
+          // Structure stop: find the real wall surface the nav-grid blocker corresponds to (raycast to range
+          // and take the first structure face), then spark + hole there oriented to its normal.
+          const wh = surfaceProjector.wallAlong(p.x, p.y, p.z, ndx, ndz, firearmRangeMeters);
+          if (wh) impactView.structureImpact(wh.x, wh.y, wh.z, wh.nx, wh.ny, wh.nz, impactCtx);
+        }
       };
       const onWheel = (e: WheelEvent): void => {
         e.preventDefault();
@@ -353,8 +436,10 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const rightZ = -Math.sin(yaw);
         let x = 0;
         let z = 0;
-        const f = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
-        const r = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
+        // T50/V29: movement reads the rebindable keymap (defaults to WASD).
+        const b = inputStore.getState().bindings;
+        const f = (keys.has(b.moveUp) ? 1 : 0) - (keys.has(b.moveDown) ? 1 : 0);
+        const r = (keys.has(b.moveRight) ? 1 : 0) - (keys.has(b.moveLeft) ? 1 : 0);
         x = fwdX * f + rightX * r;
         z = fwdZ * f + rightZ * r;
         return { x, z };
@@ -367,16 +452,21 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         const dt = Math.min(0.1, (nowMs - last) / 1000);
         last = nowMs;
 
-        const paused = sessionStore.getState().phase === 'paused';
-        if (!paused) {
+        // T49/V12: authoritative pause-gate + single-player slowdown. simStepDt returns 0 while paused (the
+        // sim HALTS — not just the UI) and otherwise scales the real frame dt by the time-scale.
+        const sess = sessionStore.getState();
+        const stepDt = simStepDt(dt, sess.paused, sess.timeScale);
+        if (stepDt > 0) {
           const mv = moveSpeedKeys();
-          if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, dt);
+          // Sprint lever (Shift by default): the runtime gates it on stamina + drains/regenerates the pool.
+          const sprint = keys.has(inputStore.getState().bindings.sprint);
+          if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint);
           const hit = aimWorldPoint();
           if (hit) {
             const pp = runtime.player();
             runtime.aim(hit.x - pp.x, hit.z - pp.z);
           }
-          runtime.update(dt);
+          runtime.update(stepDt);
         }
 
         const p = runtime.player();
@@ -408,6 +498,22 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         });
         bloodView.update(dt);
         gibView.update(dt);
+        impactView.update(dt); // T80/T81 — advance spark burst + age bullet-hole/wound decals (V57)
+        weatherView.update(dt, runtime.weather, p.x, p.z); // precipitation: ramp + recycle, box follows the player
+        // FIRE: map any new `fireIgnited` world facts (structural cell → nav cell → world centre, the same
+        // mapping blockScene uses) into flame ignitions, then mirror the live burning set. `isRouteBurning`
+        // is the sim's truth used to retire flames whose cell stopped burning. reduce-flashes damps flicker (V29).
+        const fireIgnitions: FireIgnition[] = [];
+        for (const ev of drained.world) {
+          if (ev.kind !== 'fireIgnited') continue;
+          const nav = runtime.scene.navCellForStructuralCell(ev.cell);
+          const c = runtime.scene.cellCenter(nav);
+          fireIgnitions.push({ cell: ev.cell, x: c.x, y: c.y, z: c.z });
+        }
+        // camPos = camera EYE (billboard facing); the player position is the LOD/light-selection focus (the
+        // near-ortho eye sits ~100m+ away, so using it for distance would cull every fire).
+        fireView.update(dt, fireIgnitions, (cell) => runtime.isRouteBurning(cell), camPos, { x: p.x, y: 0, z: p.z }, access.feedback.reduceFlashes);
+        corpseField.update(runtime.corpses.list); // T55/B9 — mirror lingering corpses onto the instanced field
         scene?.syncFrame(dt, camera.camera);
         gizmos.update(
           runtime.zombies,
@@ -425,10 +531,20 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         // decaying over ~1.5s. Throttled publish (V11) — the meter reads a narrow snapshot, not the field.
         selfNoise = Math.max(0, selfNoise - dt / 1.5);
         let ambient = 0;
+        // Single read-only query of the sound stimuli reaching the player (V2): drives BOTH the HUD noise
+        // meter AND the procedural audio layer — the stimulus carries the source class + attenuated level
+        // the audio-out lane needs to voice impacts/glass/alarms/groans (the soundEmitted VisualEvent only
+        // carries an id, so the field is the class-aware source of "what's audible").
+        const audible: AudibleSound[] = [];
         for (const h of runtime.stimulus.query(p.x, p.z, runtime.tick)) {
-          if (h.stimulus.kind === 'sound') ambient += h.intensity;
+          if (h.stimulus.kind !== 'sound') continue;
+          ambient += h.intensity;
+          audible.push({ id: h.stimulus.id as unknown as number, source: h.stimulus.source, x: h.stimulus.x, z: h.stimulus.z, reaching: h.intensity });
         }
         noiseGate.push({ ambient01: Math.min(1, ambient), self01: selfNoise });
+        // Feed the drained audible set + live nearby horde count to the procedural audio output (silent
+        // until a gesture resumes its context). Group bed + occasional groans scale with the count (V28).
+        gameAudio.frame({ playerX: p.x, audible, hordeCount: runtime.zombies.count, dtSeconds: dt });
         if (scene) {
           // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
           host?.setToneMapping(scene.toneMappingMode, scene.currentExposure);

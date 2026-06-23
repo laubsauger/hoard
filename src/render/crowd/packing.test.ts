@@ -23,6 +23,7 @@ function makeSoa() {
     heading: soa.views['heading'] as Float32Array,
     archetype: soa.views['archetype'] as Uint16Array,
     animState: soa.views['animState'] as Uint8Array,
+    simTier: soa.views['simTier'] as Uint8Array,
   };
 }
 
@@ -129,6 +130,46 @@ describe('packCrowdInputs (V2/V3)', () => {
         scaleMax: 0.8,
       }),
     ).toThrow();
+  });
+
+  it('with minSimTier set, the box packs ONLY the horde tiers (limbed tiers go to figures, T72)', () => {
+    const s = makeSoa();
+    // slots 0,1 = hero/active (limbed); slots 2,3 = horde/abstract (box).
+    for (let i = 0; i < 4; i++) {
+      s.alive[i] = 1;
+      s.simTier[i] = i as 0 | 1 | 2 | 3;
+      s.position[i * 3] = i;
+    }
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
+      count: 4,
+      capacity: CAP,
+      variationCount: 1,
+      scaleMin: 1,
+      scaleMax: 1,
+      minSimTier: 2, // limbedMaxSimTier (1) + 1
+    });
+    expect(res.liveCount).toBe(2);
+    // Compacted horde: instance 0 = slot 2 (x=2), instance 1 = slot 3 (x=3).
+    expect(pose[0]).toBeCloseTo(2, 6);
+    expect(pose[FLOATS_PER_POSE]).toBeCloseTo(3, 6);
+  });
+
+  it('without minSimTier the box packs all live slots (default, unchanged)', () => {
+    const s = makeSoa();
+    for (let i = 0; i < 3; i++) {
+      s.alive[i] = 1;
+      s.simTier[i] = i as 0 | 1 | 2;
+    }
+    const { pose, meta } = buffers();
+    const res = packCrowdInputs(s.soa.views, pose, meta, {
+      count: 3,
+      capacity: CAP,
+      variationCount: 1,
+      scaleMin: 1,
+      scaleMax: 1,
+    });
+    expect(res.liveCount).toBe(3);
   });
 
   it('variationSeed is deterministic and bounded', () => {

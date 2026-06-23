@@ -17,13 +17,52 @@ export interface VisibilitySettings {
   readonly baseHeightMeters: number;
   /** Wall height (m) above which sections may fade when occluding the camera. */
   readonly upperFadeStartMeters: number;
+  /**
+   * DIRECTIONAL cutaway threshold (V58): cosine above which an upper wall's outward normal is considered
+   * "turned toward the camera" (i.e. between camera + player → occluding). See `wallFacesCamera`.
+   */
+  readonly cameraFacingDotThreshold: number;
 }
 
 export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings {
   return {
     baseHeightMeters: resolve(renderingConfig.wallBasePreservedHeightMeters, tier),
     upperFadeStartMeters: resolve(renderingConfig.upperWallFadeStartHeightMeters, tier),
+    cameraFacingDotThreshold: resolve(renderingConfig.cutawayCameraFacingDotThreshold, tier),
   };
+}
+
+/** A horizontal (XZ-plane) direction/normal. */
+export interface VecXZ {
+  readonly x: number;
+  readonly z: number;
+}
+
+export interface WallFacingInput {
+  /** The wall's outward-facing horizontal normal (points from the enclosed space toward open space). */
+  readonly outwardNormal: VecXZ;
+  /** Unit horizontal vector pointing from the player/room toward the camera (cameraPos − playerPos, XZ). */
+  readonly towardCamera: VecXZ;
+  /** Cosine threshold above which the wall counts as camera-facing (occluding the camera→player view). */
+  readonly facingDotThreshold: number;
+}
+
+/**
+ * DIRECTIONAL cutaway decision (T82 / V58): a wall occludes the camera→player view ONLY when its outward
+ * face turns toward the camera — i.e. it sits between the camera and the player. We test the normalized
+ * horizontal dot of the wall's outward normal with the toward-camera direction: > threshold ⇒ camera-facing
+ * (the near/occluding wall → fade); the FAR walls (normal pointing away, dot ≤ threshold) stay opaque so the
+ * room still reads as enclosed. This is what makes the cutaway directional instead of a roofless open box.
+ * Pure, GPU-free. Defensive-normalizes both vectors; a degenerate (zero-length) input never occludes.
+ */
+export function wallFacesCamera(input: WallFacingInput): boolean {
+  const n = input.outwardNormal;
+  const c = input.towardCamera;
+  const nl = Math.hypot(n.x, n.z);
+  const cl = Math.hypot(c.x, c.z);
+  if (nl === 0 || cl === 0) return false;
+  const dot = (n.x * c.x + n.z * c.z) / (nl * cl);
+  return dot > input.facingDotThreshold;
 }
 
 export interface OcclusionContext {

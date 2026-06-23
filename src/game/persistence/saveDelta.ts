@@ -70,6 +70,14 @@ export interface CorpseRecord {
   readonly x: number;
   readonly z: number;
   readonly atTick: number;
+  // B9/T54 (additive): the toppled body's full transform + archetype + severed-region flags, so the corpse
+  // render reconstructs the body and its dismemberment (missing limbs) persist. Optional — saves authored
+  // before corpses carried a body shape omit these and default them on load (V23/V4, no invented state).
+  readonly y?: number;
+  readonly heading?: number;
+  readonly archetype?: number;
+  /** anatomyFlags sever bitfield at death (which regions were dismembered — V17 consequence persists). */
+  readonly severedFlags?: number;
 }
 
 /** A utility node's state (power/water/alarm circuit), addressed by its stable id (V26). */

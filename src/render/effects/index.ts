@@ -28,12 +28,34 @@ export {
 } from './bloodView';
 export { RaycastSurfaceProjector } from './surfaceProjector';
 export {
+  ImpactSim,
+  ImpactView,
+  resolveImpactSettings,
+  type ImpactSettings,
+  type ImpactIngestContext,
+} from './impactView';
+export {
   GibSim,
   GibView,
   resolveGibSettings,
   type GibSettings,
   type GibIngestContext,
 } from './gibView';
+export {
+  RainField,
+  WeatherView,
+  resolveRainSettings,
+  rainTargetFor,
+  type RainSettings,
+} from './weatherView';
+export {
+  FireField,
+  FireView,
+  resolveFireSettings,
+  type FireSettings,
+  type FireIgnition,
+  type FireLightPick,
+} from './fireView';
 export {
   SCALING_STAGES,
   INITIAL_SCALING_STATE,

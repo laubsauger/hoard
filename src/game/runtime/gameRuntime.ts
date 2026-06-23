@@ -27,6 +27,8 @@ import {
   SimTier,
   type ZombieSlot,
 } from '@/game/simulation';
+import { CorpseSystem, resolveCorpseSettings, buildArchetypeRegistry, type ArchetypeRegistry } from '@/game/zombie';
+import { SurvivalSystem } from '@/game/player';
 import { FlowFieldCache } from '@/game/navigation';
 import { CollisionLayer, layerMask, SpatialHash } from '@/game/navigation/collision';
 import { HordeSimulation, planarDistanceToPlayer } from './hordeSystems';
@@ -74,8 +76,10 @@ import {
   createMissionSnapshotGate,
   playerViewStore,
   mapViewStore,
+  sessionStore,
   type PlayerViewStore,
   type MapViewStore,
+  type SessionStore,
 } from '@/stores';
 import type { Now } from '@/stores';
 
@@ -107,6 +111,8 @@ export interface GameRuntimeOptions {
   /** Stores to publish snapshots into. Default = the app singletons the HUD reads (V1). */
   readonly playerStore?: PlayerViewStore;
   readonly mapStore?: MapViewStore;
+  /** Session store whose lifecycle phase is set to 'dead' on player death (game-over). Default singleton. */
+  readonly sessionStore?: SessionStore;
   /** Deterministic scatter seed for the initial horde spawn (V26). */
   readonly scatterSeed?: number;
   /** M2 district streaming sectors (T40). When present, the runtime streams abstract sector populations
@@ -130,6 +136,8 @@ export class GameRuntime {
   readonly flowCache: FlowFieldCache;
   readonly tierManager: TierManager;
   readonly combat: CombatSystem;
+  /** B9/T54: persistent corpses left by killed zombies (a death leaves a lingering body, not a vanish). */
+  readonly corpses: CorpseSystem;
   readonly playerEntity: EntityId;
   /** Shared stimulus field + audio model — firing emits a sound the horde perceives (sound attraction). */
   readonly stimulus: StimulusField;
@@ -160,6 +168,8 @@ export class GameRuntime {
   private readonly slotToEntity = new Map<ZombieSlot, EntityId>();
   private readonly entityToSlot = new Map<EntityId, ZombieSlot>();
   private readonly lastDamageTick = new Map<ZombieSlot, number>();
+  /** Tick of each slot's last melee swing at the player (attack-cooldown gate); cleared on despawn (V26). */
+  private readonly lastAttackTick = new Map<ZombieSlot, number>();
   /** Slots spawned by district streaming, tagged by sector so eviction despawns exactly those (V13). */
   private readonly slotToSector = new Map<ZombieSlot, number>();
   /** Structural cells currently on fire (a horde-event lever — fire reroutes/stalls the mass). */
@@ -177,8 +187,16 @@ export class GameRuntime {
   private readonly hordeGate: ReturnType<typeof createHordeSnapshotGate>;
   private readonly missionGate: ReturnType<typeof createMissionSnapshotGate>;
 
+  /** Authoritative player condition (T22) — owns player health/bleeding/pain; combat damage routes here. */
+  private readonly playerSurvival: SurvivalSystem;
+  /** Data-composed archetype stats (V7) — the source of per-archetype attack damage/cooldown/reach. */
+  private readonly archetypes: ArchetypeRegistry;
+  /** Session lifecycle store — set to 'dead' once when the player dies (game-over signal for the UI). */
+  private readonly session: SessionStore;
+  /** Latched so the death transition (set phase 'dead') fires exactly once. */
+  private playerDeathHandled = false;
+
   private playerPos: Vec3;
-  private playerHealth: number;
   private playerHeading = 0;
   private weatherProfile: WeatherProfile;
   /** Absolute-tick offset so time-of-day survives a save/reload (set from capturedAtTick on load). */
@@ -200,6 +218,7 @@ export class GameRuntime {
 
     this.ids = new IdFactory();
     this.zombies = new SimulationZombies(); // capacity from zombies config (V4)
+    this.corpses = new CorpseSystem(resolveCorpseSettings(this.tier)); // pool/lifetime from zombies config (V4)
     this.spatial = new SpatialHash({ tier: this.tier });
     // flow-field cache size lives in the navigation domain — reuse the NavGrid's resolved settings (V4).
     this.flowCache = new FlowFieldCache(this.scene.navGrid.settings.flowFieldCacheSize);
@@ -212,7 +231,22 @@ export class GameRuntime {
     this.playerEntity = this.ids.next<EntityId>('entity');
     const center = this.scene.cellCenter(this.scene.playerCell);
     this.playerPos = { x: center.x, y: this.playerCfg.aimOriginHeight, z: center.z };
-    this.playerHealth = this.playerCfg.startHealth;
+    // T22: the player's authoritative condition. Health is normalized 0..1 inside the survival system;
+    // it starts at startHealth/maxHealth and seeds the other meters from the player config initials so the
+    // published snapshot is unchanged at scenario start. Combat damage (zombie attacks) routes through it.
+    this.playerSurvival = new SurvivalSystem({
+      entity: this.playerEntity,
+      tier: this.tier,
+      initial: {
+        health: this.playerCfg.startHealth / this.playerCfg.maxHealth,
+        hunger: this.playerCfg.initialHunger,
+        thirst: this.playerCfg.initialThirst,
+        fatigue: this.playerCfg.initialFatigue,
+        stress: this.playerCfg.initialStress,
+      },
+    });
+    this.archetypes = buildArchetypeRegistry(this.tier);
+    this.session = opts.sessionStore ?? sessionStore;
     this.weatherProfile = this.weatherCfg.defaultProfile as WeatherProfile;
 
     // Shared stimulus field + audio model. Firing routes a sound into the field; the horde perceives it
@@ -235,6 +269,9 @@ export class GameRuntime {
       getPlayerPos: () => this.playerPos,
       getTargetSlot: () => this.targetSlot,
       lastDamageTick: this.lastDamageTick,
+      lastAttackTick: this.lastAttackTick,
+      attackOf: (slot) => this.attackProfileOf(slot),
+      damagePlayer: (slot, fraction) => this.damagePlayer(slot, fraction),
     });
 
     this.combat = new CombatSystem({
@@ -247,10 +284,12 @@ export class GameRuntime {
       worldEvents: this.worldEvents,
       visualEvents: this.visualEvents,
       onDamaged: (slot) => this.lastDamageTick.set(slot, this.clock.tick),
-      onEntityDied: (slot) => this.despawn(slot),
+      onEntityDied: (slot) => this.killZombie(slot),
       // V53/B20: a shot stops at the first projectile-blocking structure cell — never passes through walls.
       firstProjectileBlockerDistance: (origin, dirX, dirZ, range) =>
         this.firstProjectileBlockerDistance(origin, dirX, dirZ, range),
+      // Fixed-tick clock source so reload + weapon-swap timers advance deterministically (T74).
+      nowTick: () => this.clock.tick,
     });
 
     this.structuralHooks = {
@@ -288,6 +327,10 @@ export class GameRuntime {
       ids: this.ids,
       objective: this.objective,
       district: this.district,
+      corpses: {
+        capture: () => this.corpses.capture(),
+        restore: (records) => this.corpses.restore(records),
+      },
       entityOf: (slot) => this.entityOf(slot),
       placeZombie: (entity, e) => this.placeZombie(entity, e),
       openBreachedNav: (cell) => this.openBreachedNav(cell),
@@ -324,6 +367,22 @@ export class GameRuntime {
 
   player(): Readonly<Vec3> {
     return this.playerPos;
+  }
+
+  /** True once the player's health has reached 0 (lethal game-over). Player control is halted while dead. */
+  isPlayerDead(): boolean {
+    return !this.playerSurvival.alive;
+  }
+
+  /** Player health as a normalized 0..1 fraction (diagnostics/tests; the HUD reads the count via snapshot). */
+  playerHealthFraction(): number {
+    return this.playerSurvival.state.health;
+  }
+
+  /** Player sprint stamina as a 0..1 fraction (diagnostics/tests — kept internal this wave, not in the
+   *  frozen snapshot contract). Drains while sprinting, regenerates while walking; fatigue caps it. */
+  playerStaminaFraction(): number {
+    return this.playerSurvival.stamina;
   }
 
   /** Player facing in radians (atan2(dirZ, dirX)); drives the default fire direction + render heading. */
@@ -371,11 +430,18 @@ export class GameRuntime {
    * Move the player by a normalized intent over `dtSeconds` at the configured walk speed. The engine
    * validates against walkable nav cells (V1: UI issues intent, engine authorizes) and slides along walls
    * rather than sticking. Returns true if the player actually moved.
+   *
+   * `sprint` is the escape lever (outrun the horde): when requested AND stamina allows it, the move speed
+   * is scaled by `playerSprintSpeedMultiplier` and stamina drains this frame; otherwise normal speed and
+   * stamina regenerates (T22 owns the pool + fatigue coupling). A dead player never sprints (control is
+   * halted before this runs). Drain/regen scale by `dtSeconds` since this is driven per-frame.
    */
-  movePlayer(dirX: number, dirZ: number, dtSeconds: number): boolean {
+  movePlayer(dirX: number, dirZ: number, dtSeconds: number, sprint = false): boolean {
+    if (this.isPlayerDead()) return false; // game-over: player control is halted (V12-safe — sim keeps running)
     const len = Math.hypot(dirX, dirZ);
     if (len === 0 || dtSeconds <= 0) return false;
-    const speed = this.playerCfg.moveSpeedMetersPerSecond;
+    const sprinting = this.playerSurvival.applyStamina(sprint, dtSeconds);
+    const speed = this.playerCfg.moveSpeedMetersPerSecond * (sprinting ? this.playerCfg.playerSprintSpeedMultiplier : 1);
     const stepX = (dirX / len) * speed * dtSeconds;
     const stepZ = (dirZ / len) * speed * dtSeconds;
     const nx = this.playerPos.x + stepX;
@@ -517,6 +583,38 @@ export class GameRuntime {
     }
   }
 
+  /**
+   * Resolve a slot's melee parameters from its archetype (V7/V14). `damageFraction` normalizes the
+   * archetype's count damage by player max health so it composes with the survival system's 0..1 health;
+   * `cooldownTicks` converts the archetype's per-attack cadence (seconds) to fixed ticks (>= 1, V12).
+   */
+  private attackProfileOf(slot: ZombieSlot): { damageFraction: number; cooldownTicks: number; rangeMeters: number } {
+    const a = this.archetypes.byIndexOf(this.zombies.getArchetype(slot));
+    return {
+      damageFraction: a.attack.damage / this.playerCfg.maxHealth,
+      cooldownTicks: Math.max(1, Math.round(a.attack.cooldownSeconds / this.clock.tickSeconds)),
+      rangeMeters: a.attack.rangeMeters,
+    };
+  }
+
+  /**
+   * Apply a zombie melee hit to the player (called by the horde attack step). Damage routes through the
+   * player survival system (T22 — the single owner of player health). Crossing 0 health triggers the
+   * one-shot death transition. A hit on an already-dead player is a no-op (the body keeps milling).
+   */
+  private damagePlayer(_slot: ZombieSlot, damageFraction: number): void {
+    if (this.isPlayerDead()) return;
+    this.playerSurvival.damage(damageFraction);
+    if (this.isPlayerDead()) this.onPlayerDied();
+  }
+
+  /** One-shot lethal transition: publish the 'dead' lifecycle phase so the UI can show game-over (V1). */
+  private onPlayerDied(): void {
+    if (this.playerDeathHandled) return;
+    this.playerDeathHandled = true;
+    this.session.getState().setPhase('dead');
+  }
+
   /** Slot -> stable EntityId (the seam lane-S left to the integrator). Throws if the slot is unmapped. */
   entityOf(slot: ZombieSlot): EntityId {
     const e = this.slotToEntity.get(slot);
@@ -556,8 +654,27 @@ export class GameRuntime {
    *  gunshot emits a sound stimulus at the muzzle so the horde is drawn to the noise (sound attraction). */
   fire(dirX: number, dirZ: number, region: AnatomyRegion): ShotResult {
     const result = this.combat.fire(this.playerPos, dirX, dirZ, region);
-    this.emitGunfire();
+    // Only a round that actually fired makes noise — a dry click (empty mag) doesn't draw the horde (T74).
+    if (result.firedRounds === undefined || result.firedRounds > 0) this.emitGunfire();
     return result;
+  }
+
+  /** Reload the current weapon (T74) — refills the magazine from reserve over the weapon's reload time. */
+  reloadWeapon(): boolean {
+    return this.combat.reload();
+  }
+
+  /** Cycle the equipped weapon (T74). */
+  cycleWeapon(dir: 1 | -1): void {
+    this.combat.cycleWeapon(dir);
+  }
+
+  /** Current ammo + weapon for the HUD (T74). */
+  ammoStatus(): { magazine: number; reserve: number; reloading: boolean } {
+    return this.combat.currentAmmo();
+  }
+  currentWeaponId(): string {
+    return this.combat.currentWeaponId();
   }
 
   /**
@@ -617,17 +734,34 @@ export class GameRuntime {
     const c = this.scene.cellCenter(this.scene.spawnCenterCell);
     for (let i = 0; i < count; i++) {
       const { x, z } = this.scatterWalkable(c.x, c.z, spawnRadiusMeters);
-      out.push(this.spawnZombie({ x, y: 0, z }));
+      out.push(this.spawnZombie({ x, y: 0, z }, this.pickSpawnArchetype(i)));
     }
     return out;
   }
 
+  /**
+   * Deterministic weighted archetype pick (no RNG — hash of the spawn index, V26) so the horde is a MIX:
+   * mostly shamblers with rarer runners/crawlers/armored/decayed/burned/bloated. Spawn distribution is
+   * content tuning; clamped to the registered archetype count so it never indexes a missing archetype.
+   */
+  private pickSpawnArchetype(i: number): number {
+    // cumulative weights over archetype indices 0..6 (shambler common → bloated rare).
+    const CUM = [50, 64, 76, 84, 92, 97, 100];
+    const n = this.archetypes.count;
+    const h = (i * 2654435761) >>> 0; // Knuth multiplicative hash → spread
+    const r = h % 100;
+    for (let a = 0; a < CUM.length; a++) {
+      if (r < CUM[a]!) return Math.min(a, n - 1);
+    }
+    return 0;
+  }
+
   /** Spawn one zombie: mint an EntityId, reserve a SoA slot, register a collision agent, map the seam. */
-  spawnZombie(position: Vec3): EntityId {
+  spawnZombie(position: Vec3, archetypeId = 0): EntityId {
     const entity = this.ids.next<EntityId>('entity');
     this.placeZombie(entity, {
       entity: entity as number,
-      archetype: 0,
+      archetype: archetypeId,
       x: position.x,
       y: position.y,
       z: position.z,
@@ -691,8 +825,15 @@ export class GameRuntime {
     // interval: sound attraction — retire decayed stimuli + reroute the shared field toward the loudest
     // sound reaching the horde (V14/V15). Phase 2 so it never shares a tick with perception/tier.
     this.scheduler.register('sound', { bucket: 'interval', everyTicks: 4 }, (ctx) => this.horde.stepSound(ctx), 2);
+    // everyTick: zombie melee — a body that has reached the player bites it on its per-archetype cooldown
+    // (V14/V16/V17). Registered AFTER perception so on a perception tick the freshly-set Attack state +
+    // stimulus are visible to the swing this same tick. Damage routes to the player survival system (T22).
+    this.scheduler.register('zombie-attack', { bucket: 'everyTick' }, (ctx) => this.horde.stepAttacks(ctx));
     // interval (coarse): district streaming + objective maintenance + decisive-event resolution (T40).
     this.scheduler.register('district', { bucket: 'interval', everyTicks: DISTRICT_STEP_TICKS }, (ctx) => this.stepDistrict(ctx), 0);
+    // interval (coarse): clean up corpses past their configured lifetime (B9/T54). Phase 1 so it never
+    // shares a tick with the district step; lifetime is long, so coarse pruning is ample.
+    this.scheduler.register('corpses', { bucket: 'interval', everyTicks: DISTRICT_STEP_TICKS }, () => this.corpses.prune(this.absTick()), 1);
   }
 
   /**
@@ -761,16 +902,23 @@ export class GameRuntime {
   }
 
   private publishSnapshots(): void {
+    // Player condition comes from the survival system (T22). Health is scaled back to the count basis
+    // (× maxHealth) the HUD expects (0..max); the rest are the survival meters. When the player is dead
+    // health is published as 0 — the snapshot itself carries the lethal state (alongside isPlayerDead()).
+    const sv = this.playerSurvival.state;
     this.playerGate.push({
       entity: this.playerEntity,
-      health: this.playerHealth,
-      bleeding: 0,
-      pain: 0,
-      hunger: this.playerCfg.initialHunger,
-      thirst: this.playerCfg.initialThirst,
-      fatigue: this.playerCfg.initialFatigue,
-      stress: this.playerCfg.initialStress,
-      encumbrance: 0,
+      health: sv.health * this.playerCfg.maxHealth,
+      bleeding: sv.bleeding,
+      pain: sv.pain,
+      hunger: sv.hunger,
+      thirst: sv.thirst,
+      fatigue: sv.fatigue,
+      stress: sv.stress,
+      encumbrance: sv.encumbrance,
+      stamina: sv.stamina,
+      ammoMagazine: this.combat.currentAmmo().magazine,
+      ammoReserve: this.combat.currentAmmo().reserve,
     });
 
     let visibleCount = 0;
@@ -848,6 +996,32 @@ export class GameRuntime {
     });
   }
 
+  /**
+   * B9/T54 death TRANSITION (combat's onEntityDied): a killed zombie does NOT pop out of existence. Capture
+   * a compact CORPSE record from its last authoritative state — transform, archetype, and severed-region
+   * flags (dismemberment consequences persist, V17) — BEFORE the sim slot is freed, then recycle the slot
+   * (the corpse is cheap state, not an active sim entity). The slot data is still live here: combat writes
+   * health/anatomyFlags then calls onEntityDied before any free, so every field reads correctly.
+   */
+  private killZombie(slot: ZombieSlot): void {
+    const entity = this.slotToEntity.get(slot);
+    if (entity !== undefined) {
+      const pos: [number, number, number] = [0, 0, 0];
+      this.zombies.getPosition(slot, pos);
+      this.corpses.spawn({
+        entity: entity as number,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        heading: this.zombies.getHeading(slot),
+        archetype: this.zombies.getArchetype(slot),
+        severedFlags: this.zombies.getAnatomyFlags(slot),
+        bornTick: this.absTick(),
+      });
+    }
+    this.despawn(slot);
+  }
+
   /** Lifecycle teardown for a dead slot (called by combat on death) — keeps the seam consistent (V26). */
   private despawn(slot: ZombieSlot): void {
     const entity = this.slotToEntity.get(slot);
@@ -856,6 +1030,7 @@ export class GameRuntime {
     this.slotToEntity.delete(slot);
     if (entity !== undefined) this.entityToSlot.delete(entity);
     this.lastDamageTick.delete(slot);
+    this.lastAttackTick.delete(slot);
     this.slotToSector.delete(slot);
     if (this.targetSlot === slot) this.targetSlot = -1;
   }

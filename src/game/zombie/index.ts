@@ -5,6 +5,7 @@ export {
   ArchetypeRegistry,
   type ZombieArchetype,
   type BodyFamily,
+  type GoreType,
   type LocomotionKind,
   type LocomotionProfile,
   type PerceptionProfile,
@@ -36,3 +37,10 @@ export {
   type HordeSummary,
   type BarricadeSink,
 } from './horde';
+export {
+  CorpseSystem,
+  resolveCorpseSettings,
+  type Corpse,
+  type CorpseSpawn,
+  type CorpseSettings,
+} from './corpseSystem';

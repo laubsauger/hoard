@@ -90,6 +90,55 @@ describe('survival — bleeding / pain / infection / panic', () => {
   });
 });
 
+describe('survival — stamina / sprint (escape lever, T22)', () => {
+  it('sprinting drains stamina; not-sprinting regenerates it', () => {
+    const s = new SurvivalSystem({ entity: PLAYER });
+    expect(s.stamina).toBe(1);
+    const applied = s.applyStamina(true, 1); // one second of sprint
+    expect(applied).toBe(true);
+    expect(s.stamina).toBeLessThan(1);
+    const drained = s.stamina;
+    s.applyStamina(false, 1); // release: regenerate
+    expect(s.stamina).toBeGreaterThan(drained);
+  });
+
+  it('empty stamina disables sprint until it recovers above the start threshold (hysteresis)', () => {
+    const s = new SurvivalSystem({ entity: PLAYER });
+    // drain to empty (the loop stops the instant the pool bottoms out)
+    for (let i = 0; i < 20 && s.stamina > 0; i++) s.applyStamina(true, 1);
+    expect(s.stamina).toBe(0);
+    expect(s.canSprint).toBe(false);
+    // requesting sprint while exhausted does NOT sprint (locked) — it just recovers instead
+    expect(s.applyStamina(true, 0.001)).toBe(false);
+    // regenerate just below the threshold — still locked, still no sprint
+    const min = s.settings.sprintMinStamina;
+    while (s.stamina < min - 0.02) s.applyStamina(false, 0.1);
+    expect(s.canSprint).toBe(false);
+    expect(s.applyStamina(true, 0.001)).toBe(false);
+    // recover above the threshold — sprint re-enables
+    while (s.stamina < min + 0.02) s.applyStamina(false, 0.1);
+    expect(s.canSprint).toBe(true);
+    expect(s.applyStamina(true, 0.01)).toBe(true);
+  });
+
+  it('fatigue lowers available stamina (caps the pool + slows regen)', () => {
+    const fresh = new SurvivalSystem({ entity: PLAYER, initial: { fatigue: 0 } });
+    const tired = new SurvivalSystem({ entity: PLAYER, initial: { fatigue: 0.9 } });
+    // exhausted player's pool is capped below full from the start
+    expect(tired.maxStamina).toBeLessThan(fresh.maxStamina);
+    expect(tired.stamina).toBeLessThanOrEqual(tired.maxStamina);
+    expect(tired.stamina).toBeLessThan(1);
+    // and regenerates slower toward its (lower) cap
+    const tiredBefore = tired.stamina;
+    const freshDrained = new SurvivalSystem({ entity: PLAYER, initial: { fatigue: 0, stamina: 0.5 } });
+    const tiredDrained = new SurvivalSystem({ entity: PLAYER, initial: { fatigue: 0.9, stamina: 0.1 } });
+    freshDrained.applyStamina(false, 1);
+    tiredDrained.applyStamina(false, 1);
+    expect(freshDrained.stamina - 0.5).toBeGreaterThan(tiredDrained.stamina - 0.1);
+    expect(tired.stamina).toBe(tiredBefore); // untouched control
+  });
+});
+
 describe('survival — snapshot (V1)', () => {
   it('produces a PlayerViewSnapshot with every HUD field', () => {
     const s = new SurvivalSystem({ entity: PLAYER, initial: { hunger: 0.2, pain: 0.1 } });

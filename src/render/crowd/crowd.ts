@@ -12,7 +12,7 @@
 // We go further: the instance transform is no longer a CPU-built instanceMatrix at all. It is produced by a
 // compute shader into a storage buffer and consumed via material.positionNode (the canonical WebGPU/TSL path).
 
-import { BoxGeometry, Color, InstancedMesh } from 'three';
+import { BoxGeometry, Color, InstancedMesh, Matrix4, type Object3D } from 'three';
 import {
   MeshStandardNodeMaterial,
   type ComputeNode,
@@ -36,14 +36,32 @@ import {
   vec4,
 } from 'three/tsl';
 import type { FieldViews } from '../../game/core/contracts/soa';
+import type { AnatomyRegion } from '../../game/core/contracts';
+import { regionBit } from '../../game/combat/anatomy';
 import { resolve } from '../../config/spec';
-import { renderingConfig } from '../../config/domains/rendering';
+import {
+  renderingConfig,
+  CROWD_LIMB_PARTS,
+  type CrowdLimbId,
+  type CrowdLimbPart,
+} from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed } from './packing';
+import {
+  composeLimbMatrix,
+  packLimbInputs,
+  walkBob,
+  walkSwing,
+  FLOATS_PER_LIMB_POSE,
+  FLOATS_PER_MAT4,
+  type LimbPartPlacement,
+} from './limbs';
 
 /** Base crowd flesh/clothing tint; per-instance variation modulates its brightness in the shader (V2). */
 const CROWD_BASE_COLOR = 0x4a5a3a;
+/** Limbed-figure tint — a touch brighter than the horde box so hero/active figures read against the mass. */
+const CROWD_LIMB_COLOR = 0x52613f;
 const TAU = Math.PI * 2;
 
 export interface CrowdSettings {
@@ -54,6 +72,12 @@ export interface CrowdSettings {
   readonly phaseSpeedHz: number;
   readonly bobMeters: number;
   readonly brightnessSpread: number;
+  /** Limbed (figure) pool budget — hero+active-crowd zombies drawn as block-limbed figures (T72/V13). */
+  readonly limbedBudget: number;
+  /** Slots with simTier <= this are limbed figures; higher tiers stay the horde box. */
+  readonly limbedMaxSimTier: number;
+  readonly limbSwingRadians: number;
+  readonly limbBobMeters: number;
 }
 
 export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
@@ -65,7 +89,153 @@ export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
     phaseSpeedHz: resolve(renderingConfig.crowdAnimPhaseSpeed, tier),
     bobMeters: resolve(renderingConfig.crowdAnimBobMeters, tier),
     brightnessSpread: resolve(renderingConfig.crowdVariationBrightnessSpread, tier),
+    limbedBudget: resolve(renderingConfig.crowdLimbedBudget, tier),
+    limbedMaxSimTier: resolve(renderingConfig.crowdLimbedMaxSimTier, tier),
+    limbSwingRadians: resolve(renderingConfig.crowdLimbWalkSwingRadians, tier),
+    limbBobMeters: resolve(renderingConfig.crowdLimbBobMeters, tier),
   };
+}
+
+/** Render part -> SoA anatomy region for the sever-hide (V17). Torso is never severable → null. */
+const LIMB_REGION: Readonly<Record<CrowdLimbId, AnatomyRegion | null>> = {
+  torso: null,
+  head: 'head',
+  armLeft: 'armLeft',
+  armRight: 'armRight',
+  legLeft: 'legLeft',
+  legRight: 'legRight',
+};
+
+/**
+ * The block-limbed figure path (T72): ONE shared InstancedMesh PER BODY PART (head/torso/armL/armR/legL/
+ * legR), each instanced across the hero+active-tier (simTier <= limbedMaxSimTier) zombies and composed into
+ * a humanoid silhouette per instance from the SoA pose + a SoA-phase walk swing/bob. A severed region
+ * (its bit set in anatomyFlags) HIDES that part's instance (zero matrix) so dismemberment READS (V17). NO
+ * per-zombie object/mesh (V2); pooled to limbedBudget and tracked for disposal (V24). r184 binding-safe:
+ * solid box geo + pre-created instanceColor; CPU-built instanceMatrix (small budget, no compute needed).
+ * Construction is GPU-free (three core InstancedMesh/BoxGeometry); only frame submission needs a device.
+ */
+export class CrowdLimbs {
+  /** One InstancedMesh per body part, parented under the crowd group; same draw order as CROWD_LIMB_PARTS. */
+  readonly meshes: readonly InstancedMesh[];
+
+  private readonly material: MeshStandardNodeMaterial;
+  private readonly placements: readonly LimbPartPlacement[];
+  /** Per-part anatomy sever bit; 0 = never severable (torso). */
+  private readonly severBits: readonly number[];
+  private readonly budget: number;
+  private readonly maxSimTier: number;
+  private readonly swingRadians: number;
+  private readonly bobMeters: number;
+  private readonly variationCount: number;
+  private readonly scaleMin: number;
+  private readonly scaleMax: number;
+
+  // Per-frame limbed inputs (compacted to the front) + scratch for instance-matrix composition.
+  private readonly pose: Float32Array;
+  private readonly scaleArr: Float32Array;
+  private readonly anatomy: Uint32Array;
+  private readonly phase: Float32Array;
+  private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
+  private readonly posScratch = new Float32Array(3);
+  private readonly mat4 = new Matrix4();
+
+  constructor(settings: CrowdSettings, registry: ResourceRegistry, parent: Object3D) {
+    this.budget = settings.limbedBudget;
+    this.maxSimTier = settings.limbedMaxSimTier;
+    this.swingRadians = settings.limbSwingRadians;
+    this.bobMeters = settings.limbBobMeters;
+    this.variationCount = settings.variationCount;
+    this.scaleMin = settings.scaleMin;
+    this.scaleMax = settings.scaleMax;
+
+    // One shared material family across all parts (no per-zombie/per-part material, V2).
+    this.material = registry.track(
+      new MeshStandardNodeMaterial({ color: CROWD_LIMB_COLOR, name: 'crowd.limb' }),
+      'material',
+      'crowd.limbMaterial',
+    );
+
+    const baseColor = new Color(CROWD_LIMB_COLOR);
+    const meshes: InstancedMesh[] = [];
+    for (const part of CROWD_LIMB_PARTS as readonly CrowdLimbPart[]) {
+      const geo = registry.track(
+        new BoxGeometry(part.size[0], part.size[1], part.size[2]),
+        'geometry',
+        `crowd.limbGeo.${part.id}`,
+      );
+      const mesh = new InstancedMesh(geo, this.material, this.budget);
+      mesh.name = `crowd.limb.${part.id}`;
+      mesh.count = 0;
+      mesh.frustumCulled = false; // figures span the crowd bounds; cluster-cull later (T30)
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      // Pre-create instanceColor (r184 binding-safe) so the color attribute exists before first draw.
+      for (let i = 0; i < this.budget; i++) mesh.setColorAt(i, baseColor);
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      registry.track(mesh, 'buffer', `crowd.limbMesh.${part.id}`);
+      parent.add(mesh);
+      meshes.push(mesh);
+    }
+    this.meshes = meshes;
+    this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign }));
+    this.severBits = CROWD_LIMB_PARTS.map((p) => {
+      const region = LIMB_REGION[p.id];
+      return region ? regionBit(region) : 0;
+    });
+
+    this.pose = new Float32Array(this.budget * FLOATS_PER_LIMB_POSE);
+    this.scaleArr = new Float32Array(this.budget);
+    this.anatomy = new Uint32Array(this.budget);
+    this.phase = new Float32Array(this.budget);
+  }
+
+  /**
+   * Compact the limbed-tier zombies and rebuild every part's instance matrices for this frame. Returns the
+   * number of live limbed figures (also each part mesh's draw count). Severed parts get a zero (invisible)
+   * matrix but keep their instance slot so indices stay aligned across parts.
+   */
+  update(views: FieldViews, count: number): number {
+    const { liveCount } = packLimbInputs(views, this.pose, this.scaleArr, this.anatomy, this.phase, {
+      count,
+      capacity: this.budget,
+      variationCount: this.variationCount,
+      scaleMin: this.scaleMin,
+      scaleMax: this.scaleMax,
+      maxSimTier: this.maxSimTier,
+    });
+
+    for (let part = 0; part < this.meshes.length; part++) {
+      const mesh = this.meshes[part]!;
+      const placement = this.placements[part]!;
+      const bit = this.severBits[part]!;
+      for (let i = 0; i < liveCount; i++) {
+        const p = i * FLOATS_PER_LIMB_POSE;
+        this.posScratch[0] = this.pose[p]!;
+        this.posScratch[1] = this.pose[p + 1]!;
+        this.posScratch[2] = this.pose[p + 2]!;
+        const heading = this.pose[p + 3]!;
+        const ph = this.phase[i]!;
+        const visible = bit === 0 || (this.anatomy[i]! & bit) === 0;
+        composeLimbMatrix(
+          this.matScratch,
+          0,
+          this.posScratch,
+          heading,
+          this.scaleArr[i]!,
+          placement,
+          walkSwing(ph, this.swingRadians),
+          walkBob(ph, this.bobMeters),
+          visible,
+        );
+        this.mat4.fromArray(this.matScratch);
+        mesh.setMatrixAt(i, this.mat4);
+      }
+      mesh.count = liveCount;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    return liveCount;
+  }
 }
 
 /**
@@ -79,6 +249,12 @@ export class Crowd {
   readonly settings: CrowdSettings;
   /** The TSL compute node the frame loop runs (renderer.compute(crowd.computeNode)) before each render. */
   readonly computeNode: ComputeNode;
+  /**
+   * Hero+active-tier block-limbed figures (T72). Its per-part meshes are parented UNDER `mesh`, so the
+   * scene wiring is unchanged: scene.add(crowd.mesh) brings the figures along and crowd.update() drives
+   * them — no blockScene edit. The box `mesh` now draws ONLY the horde (simTier > limbedMaxSimTier).
+   */
+  readonly limbs: CrowdLimbs;
 
   private readonly geometry: BoxGeometry;
   private readonly material: MeshStandardNodeMaterial;
@@ -102,6 +278,10 @@ export class Crowd {
     this.mesh.count = 0;
     this.mesh.frustumCulled = false; // crowd spans large bounds; cull per-cluster later (T30)
     registry.track(this.mesh, 'buffer', 'crowd.instancedMesh');
+
+    // Block-limbed hero/active figures, parented under the box mesh so the existing scene wiring carries
+    // them (V2: shared per-part InstancedMeshes, no per-zombie mesh). The box mesh below draws the horde.
+    this.limbs = new CrowdLimbs(settings, registry, this.mesh);
 
     // ---- GPU storage buffers (V24-tracked; StorageBufferNode is a disposable three Node) ----
     // Inputs: pose [px,py,pz,heading] and meta [scale,seed,archetype,animState], compacted per frame.
@@ -173,13 +353,16 @@ export class Crowd {
    * live instances are drawn). The transform mat4 itself is assembled later by renderer.compute(computeNode).
    */
   update(views: FieldViews, count: number, dtSeconds: number): number {
+    // The box draws ONLY the horde (simTier above the limbed band); hero/active become limbed figures (T72).
     const { liveCount } = packCrowdInputs(views, this.poseInput, this.metaInput, {
       count,
       capacity: this.settings.capacity,
       variationCount: this.settings.variationCount,
       scaleMin: this.settings.scaleMin,
       scaleMax: this.settings.scaleMax,
+      minSimTier: this.settings.limbedMaxSimTier + 1,
     });
+    this.limbs.update(views, count);
     this.mesh.count = liveCount;
     // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
     // backend re-uploads the freshly compacted inputs this frame. The compute reads these next.

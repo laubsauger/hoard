@@ -1,9 +1,11 @@
-// T4 / V29 — input store. NOT persisted in Wave 1 (only settings+session persist). Holds the live key
-// bindings + sensitivities. Sensitivity defaults come from the input config domain (V4); the store keeps
-// the user's current values so the engine reads intent without React owning per-frame input state (V1).
+// T4 / T50 / V11 / V29 — input store. PERSISTED (V11 persists session + settings + input). Holds the live
+// rebindable keymap + sensitivities. Sensitivity defaults come from the input config domain (V4); the store
+// keeps the user's current values so the engine reads intent without React owning per-frame input state (V1).
+// The rebinding settings sub-panel writes here; the persisted bindings + sensitivities survive reloads.
 
 import { createStore } from 'zustand/vanilla';
-import { subscribeWithSelector } from 'zustand/middleware';
+import { persist, subscribeWithSelector } from 'zustand/middleware';
+import { persistStorage, PERSIST_PREFIX } from './storage';
 import { resolve } from '../config/spec';
 import { inputConfig } from '../config/domains/input';
 import type { QualityTier } from '../config/types';
@@ -14,6 +16,7 @@ export type InputAction =
   | 'moveDown'
   | 'moveLeft'
   | 'moveRight'
+  | 'sprint'
   | 'rotateCW'
   | 'rotateCCW'
   | 'zoomIn'
@@ -26,11 +29,63 @@ export type InputAction =
 
 export type Bindings = Readonly<Record<InputAction, string>>;
 
+/** Display order + grouping for the rebinding UI (movement, camera, then action keys). */
+export const INPUT_ACTIONS: readonly InputAction[] = [
+  'moveUp',
+  'moveDown',
+  'moveLeft',
+  'moveRight',
+  'sprint',
+  'rotateCW',
+  'rotateCCW',
+  'zoomIn',
+  'zoomOut',
+  'attack',
+  'interact',
+  'reload',
+  'inventory',
+  'pause',
+];
+
+/** Human-readable labels for the logical actions (rebinding UI). */
+export const INPUT_ACTION_LABELS: Readonly<Record<InputAction, string>> = {
+  moveUp: 'Move up',
+  moveDown: 'Move down',
+  moveLeft: 'Move left',
+  moveRight: 'Move right',
+  sprint: 'Sprint',
+  rotateCW: 'Rotate camera CW',
+  rotateCCW: 'Rotate camera CCW',
+  zoomIn: 'Zoom in',
+  zoomOut: 'Zoom out',
+  attack: 'Fire / attack',
+  interact: 'Interact',
+  reload: 'Reload',
+  inventory: 'Inventory',
+  pause: 'Pause',
+};
+
+/**
+ * Friendly label for a physical key/mouse code (`KeyboardEvent.code` or `Mouse<button>`), shown on the
+ * rebind buttons. Pure + presentation-only; no game state.
+ */
+export function formatKeyCode(code: string): string {
+  if (code === 'Mouse0') return 'LMB';
+  if (code === 'Mouse1') return 'MMB';
+  if (code === 'Mouse2') return 'RMB';
+  if (code.startsWith('Mouse')) return `Mouse${code.slice(5)}`;
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Arrow')) return `${code.slice(5)} ↑`;
+  return code;
+}
+
 const DEFAULT_BINDINGS: Bindings = {
   moveUp: 'KeyW',
   moveDown: 'KeyS',
   moveLeft: 'KeyA',
   moveRight: 'KeyD',
+  sprint: 'ShiftLeft',
   rotateCW: 'KeyE',
   rotateCCW: 'KeyQ',
   zoomIn: 'Equal',
@@ -56,17 +111,39 @@ export interface InputState {
 
 export function createInputStore(tier: QualityTier = 'desktop-high') {
   return createStore<InputState>()(
-    subscribeWithSelector((set) => ({
-      bindings: DEFAULT_BINDINGS,
-      zoomSensitivity: resolve(inputConfig.zoomSensitivity, tier),
-      invertZoom: resolve(inputConfig.invertZoom, tier),
-      pointerSensitivity: resolve(inputConfig.pointerSensitivity, tier),
-      rebind: (action, key) => set((s) => ({ bindings: { ...s.bindings, [action]: key } })),
-      setZoomSensitivity: (zoomSensitivity) => set({ zoomSensitivity }),
-      setInvertZoom: (invertZoom) => set({ invertZoom }),
-      setPointerSensitivity: (pointerSensitivity) => set({ pointerSensitivity }),
-      resetBindings: () => set({ bindings: DEFAULT_BINDINGS }),
-    })),
+    subscribeWithSelector(
+      persist(
+        (set) => ({
+          bindings: DEFAULT_BINDINGS,
+          zoomSensitivity: resolve(inputConfig.zoomSensitivity, tier),
+          invertZoom: resolve(inputConfig.invertZoom, tier),
+          pointerSensitivity: resolve(inputConfig.pointerSensitivity, tier),
+          rebind: (action, key) => set((s) => ({ bindings: { ...s.bindings, [action]: key } })),
+          setZoomSensitivity: (zoomSensitivity) => set({ zoomSensitivity }),
+          setInvertZoom: (invertZoom) => set({ invertZoom }),
+          setPointerSensitivity: (pointerSensitivity) => set({ pointerSensitivity }),
+          resetBindings: () => set({ bindings: DEFAULT_BINDINGS }),
+        }),
+        {
+          name: `${PERSIST_PREFIX}:input`,
+          version: 2,
+          storage: persistStorage(),
+          // V29: backfill any binding missing from older persisted state (e.g. the added `sprint` key) from
+          // the defaults so every logical action always resolves to a physical key (no undefined binding).
+          migrate: (persisted) => {
+            const st = (persisted ?? {}) as Partial<InputState>;
+            return { ...st, bindings: { ...DEFAULT_BINDINGS, ...(st.bindings ?? {}) } };
+          },
+          // V11 — persist user preferences only; action functions are re-supplied by the creator.
+          partialize: (s) => ({
+            bindings: s.bindings,
+            zoomSensitivity: s.zoomSensitivity,
+            invertZoom: s.invertZoom,
+            pointerSensitivity: s.pointerSensitivity,
+          }),
+        },
+      ),
+    ),
   );
 }
 

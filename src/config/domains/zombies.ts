@@ -79,6 +79,7 @@ export const zombiesConfig = registerDomain('zombies', {
   shamblerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler sight range.', default: 18, min: 1, max: 200 }),
   shamblerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler hearing range.', default: 36, min: 1, max: 500 }),
   shamblerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Shambler melee attack damage.', default: 8, min: 0, max: 10_000 }),
+  shamblerAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive shambler attacks on a reached target (V17 attack cadence).', default: 1.5, min: 0.05, max: 30 }),
   shamblerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler sever-threshold scale (anatomical damage variation).', default: 1, min: 0.1, max: 10 }),
 
   // runner — fast, fragile, agitated.
@@ -88,6 +89,7 @@ export const zombiesConfig = registerDomain('zombies', {
   runnerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner sight range.', default: 28, min: 1, max: 200 }),
   runnerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner hearing range.', default: 48, min: 1, max: 500 }),
   runnerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Runner melee attack damage.', default: 12, min: 0, max: 10_000 }),
+  runnerAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive runner attacks on a reached target (faster, agitated cadence).', default: 0.9, min: 0.05, max: 30 }),
   runnerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner sever-threshold scale (fragile — easier to sever).', default: 0.7, min: 0.1, max: 10 }),
 
   // crawler — already legless, low/ground posture, durable torso.
@@ -97,5 +99,70 @@ export const zombiesConfig = registerDomain('zombies', {
   crawlerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Crawler sight range (eyes near ground).', default: 10, min: 1, max: 200 }),
   crawlerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Crawler hearing range.', default: 30, min: 1, max: 500 }),
   crawlerAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Crawler melee attack damage (grab/bite).', default: 10, min: 0, max: 10_000 }),
+  crawlerAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive crawler attacks (low grab/bite cadence).', default: 1.2, min: 0.05, max: 30 }),
   crawlerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Crawler sever-threshold scale (tough torso/arms).', default: 1.4, min: 0.1, max: 10 }),
+
+  // armored (emergency-personnel) — slow, very tanky body + flat armor; head still fatal → forces headshots/penetration.
+  armoredMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Armored locomotion speed (weighed down by gear).', default: 1.0, min: 0.1, max: 12 }),
+  armoredHealth: num({ owner: 'zombies', unit: 'count', doc: 'Armored base health (high — tanky body).', default: 140, min: 1, max: 10_000 }),
+  armoredArmor: num({ owner: 'zombies', unit: 'count', doc: 'Armored flat armor (riot/EMS gear — heavily mitigates body hits).', default: 60, min: 0, max: 1000 }),
+  armoredSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Armored sight range.', default: 16, min: 1, max: 200 }),
+  armoredHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Armored hearing range.', default: 30, min: 1, max: 500 }),
+  armoredAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Armored melee attack damage.', default: 10, min: 0, max: 10_000 }),
+  armoredAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive armored attacks (slow, heavy cadence).', default: 1.8, min: 0.05, max: 30 }),
+  armoredSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Armored sever-threshold scale (body very hard to sever — gear protects limbs).', default: 2.2, min: 0.1, max: 10 }),
+
+  // decayed — far gone, low health, falls apart easily (very low sever threshold), shambling.
+  decayedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Decayed locomotion speed (frail shamble).', default: 1.0, min: 0.1, max: 12 }),
+  decayedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Decayed base health (low — rotted, fragile).', default: 45, min: 1, max: 10_000 }),
+  decayedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Decayed flat armor (none — flesh has rotted away).', default: 0, min: 0, max: 1000 }),
+  decayedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Decayed sight range (clouded eyes).', default: 12, min: 1, max: 200 }),
+  decayedHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Decayed hearing range.', default: 28, min: 1, max: 500 }),
+  decayedAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Decayed melee attack damage (weak).', default: 6, min: 0, max: 10_000 }),
+  decayedAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive decayed attacks (sluggish cadence).', default: 1.6, min: 0.05, max: 30 }),
+  decayedSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Decayed sever-threshold scale (very low — limbs come off easily).', default: 0.4, min: 0.1, max: 10 }),
+
+  // burned — charred; brittle flesh, emits ash not blood (gore type), moderate stats.
+  burnedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Burned locomotion speed.', default: 1.3, min: 0.1, max: 12 }),
+  burnedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Burned base health (moderate).', default: 80, min: 1, max: 10_000 }),
+  burnedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Burned flat armor (charred crust).', default: 6, min: 0, max: 1000 }),
+  burnedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Burned sight range.', default: 16, min: 1, max: 200 }),
+  burnedHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Burned hearing range.', default: 32, min: 1, max: 500 }),
+  burnedAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Burned melee attack damage.', default: 9, min: 0, max: 10_000 }),
+  burnedAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive burned attacks.', default: 1.4, min: 0.05, max: 30 }),
+  burnedSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Burned sever-threshold scale (brittle, charred — slightly easier to sever).', default: 0.9, min: 0.1, max: 10 }),
+
+  // bloated — slow, swollen; splits easily and bursts on death (death effect hook, render later).
+  bloatedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Bloated locomotion speed (very slow, swollen).', default: 0.9, min: 0.1, max: 12 }),
+  bloatedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Bloated base health (high — distended mass).', default: 110, min: 1, max: 10_000 }),
+  bloatedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Bloated flat armor (soft, none to speak of).', default: 2, min: 0, max: 1000 }),
+  bloatedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Bloated sight range.', default: 10, min: 1, max: 200 }),
+  bloatedHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Bloated hearing range.', default: 26, min: 1, max: 500 }),
+  bloatedAttackDamage: num({ owner: 'zombies', unit: 'count', doc: 'Bloated melee attack damage.', default: 7, min: 0, max: 10_000 }),
+  bloatedAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive bloated attacks (ponderous cadence).', default: 2.0, min: 0.05, max: 30 }),
+  bloatedSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Bloated sever-threshold scale (taut skin splits easily).', default: 0.6, min: 0.1, max: 10 }),
+
+  // ---- T54/T55 / B9 corpse persistence (a killed zombie leaves a lingering body, never popping out) ----
+  /** Max simultaneous corpse records held by the CorpseSystem (pooled + capped; oldest recycled). */
+  corpseCapacity: num({
+    owner: 'zombies',
+    unit: 'count',
+    doc: 'Maximum simultaneous corpse records (pooled, capped; the oldest is recycled when full).',
+    default: 512,
+    min: 1,
+    max: 50_000,
+    integer: true,
+    tiers: { 'mobile-webgpu': 192 },
+  }),
+  /** Ticks a corpse lingers before it is cleaned up (long — bodies persist, then fade out). */
+  corpseLifetimeTicks: num({
+    owner: 'zombies',
+    unit: 'ticks',
+    doc: 'Authoritative ticks a corpse lingers before cleanup (long-lived; bodies do not vanish on death).',
+    default: 9000, // ~5 min at the 30 Hz default tick rate
+    min: 1,
+    max: 1_080_000,
+    integer: true,
+    tiers: { 'mobile-webgpu': 5400 },
+  }),
 });

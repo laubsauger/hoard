@@ -20,6 +20,9 @@ export function Hud() {
   const bleeding = usePlayerView((s) => s.snapshot?.bleeding ?? null);
   const stress = usePlayerView((s) => s.snapshot?.stress ?? null);
   const hunger = usePlayerView((s) => s.snapshot?.hunger ?? null);
+  const stamina = usePlayerView((s) => s.snapshot?.stamina ?? null);
+  const ammoMag = usePlayerView((s) => s.snapshot?.ammoMagazine ?? null);
+  const ammoReserve = usePlayerView((s) => s.snapshot?.ammoReserve ?? null);
   // Coarse horde pressure counts — NOT entities (V1).
   const visibleZombies = useMapView((s) => s.horde?.visibleCount ?? null);
   const nearestThreat = useMapView((s) => s.horde?.nearestThreatMeters ?? null);
@@ -44,6 +47,13 @@ export function Hud() {
         <Vital label="Bleed" value={bleeding} />
         <Vital label="Stress" value={stress} />
         <Vital label="Hunger" value={hunger} />
+        <Vital label="Stam" value={stamina === null ? null : stamina * 100} />
+        <div className="hbn-vital">
+          <span className="hbn-vital__label">AMMO</span>
+          <span className="hbn-vital__value">
+            {ammoMag === null ? '--' : ammoMag === Infinity ? '∞' : `${Math.round(ammoMag)}/${Math.round(ammoReserve ?? 0)}`}
+          </span>
+        </div>
       </div>
       <div className="hbn-hud__threat">
         <Vital label="Visible Z" value={visibleZombies} />

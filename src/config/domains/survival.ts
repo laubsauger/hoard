@@ -88,6 +88,32 @@ export const survivalConfig = registerDomain('survival', {
     doc: 'Stress (0..1) above which panic is flagged (degrades control/awareness, never agency — V31).',
     default: 0.75, min: 0, max: 1,
   }),
+  // ---- stamina / sprint (escape lever: outrun the horde, but it costs stamina, tied to fatigue) ----
+  staminaDrainPerSec: num({
+    owner: 'survival', unit: 'ratio',
+    doc: 'Stamina (0..1) drained per second while sprinting (~2.9s from full to empty at default).',
+    default: 0.35, min: 0, max: 5,
+  }),
+  staminaRegenPerSec: num({
+    owner: 'survival', unit: 'ratio',
+    doc: 'Stamina (0..1) regenerated per second while not sprinting (before the fatigue slowdown).',
+    default: 0.15, min: 0, max: 5,
+  }),
+  sprintMinStamina: num({
+    owner: 'survival', unit: 'ratio',
+    doc: 'Hysteresis: once stamina bottoms out, sprint stays disabled until it recovers above this.',
+    default: 0.2, min: 0.01, max: 1,
+  }),
+  staminaFatigueCapCoupling: num({
+    owner: 'survival', unit: 'ratio',
+    doc: 'How much fatigue (0..1) lowers max stamina: maxStamina = 1 - fatigue * this (exhausted = little).',
+    default: 0.6, min: 0, max: 1,
+  }),
+  staminaFatigueRegenCoupling: num({
+    owner: 'survival', unit: 'ratio',
+    doc: 'How much fatigue (0..1) slows stamina regen: regen *= 1 - fatigue * this.',
+    default: 0.5, min: 0, max: 1,
+  }),
   // ---- sleep quality (V31: quality depends on security, pain, noise, temperature) ----
   sleepRecoveryPerHour: num({
     owner: 'survival', unit: 'ratio',

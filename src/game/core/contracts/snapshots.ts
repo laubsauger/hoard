@@ -15,6 +15,11 @@ export interface PlayerViewSnapshot {
   readonly fatigue: number;
   readonly stress: number;
   readonly encumbrance: number;
+  /** Sprint stamina 0..1 (T-sprint). Optional so older snapshot producers stay valid. */
+  readonly stamina?: number;
+  /** Current weapon ammo for the HUD (T74). magazine = Infinity for melee. */
+  readonly ammoMagazine?: number;
+  readonly ammoReserve?: number;
 }
 
 /** Detailed inspect of a single promoted (hero) zombie. */

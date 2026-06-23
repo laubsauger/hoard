@@ -3,6 +3,12 @@
 export {
   sessionStore,
   createSessionStore,
+  simStepDt,
+  clampTimeScale,
+  TIME_SCALE_REALTIME,
+  TIME_SCALE_MIN,
+  TIME_SCALE_MAX,
+  TIME_SCALE_PRESETS,
   type SessionState,
   type SessionPhase,
   type SessionStore,
@@ -57,6 +63,9 @@ export {
 export {
   inputStore,
   createInputStore,
+  formatKeyCode,
+  INPUT_ACTIONS,
+  INPUT_ACTION_LABELS,
   type InputState,
   type InputAction,
   type Bindings,

@@ -2,7 +2,7 @@
 // V4 — every firearm tunable is typed with unit+owner+default+range; no literals in the hit path.
 // V16 — firearm hit pipeline reads these to gather/order candidates and resolve region damage.
 
-import { num } from '../spec';
+import { num, bool } from '../spec';
 import { registerDomain } from '../registry';
 
 export const weaponsConfig = registerDomain('weapons', {
@@ -183,4 +183,85 @@ export const weaponsConfig = registerDomain('weapons', {
     min: 1,
     max: 500,
   }),
+
+  // ---- T73 per-weapon ballistics (V50) ----
+  // Each weapon CLASS (pistol / rifle / shotgun / melee) carries its own ballistic model: base damage,
+  // effective range, a penetration BUDGET (stopping power) consumed per body it passes through, an
+  // angular spread, a per-meter distance damage falloff, a pellet count (>1 = shotgun spread) and an
+  // armor-penetration fraction. `CombatSystem.fire` resolves the EQUIPPED class against this model and
+  // returns the true stop distance (V50). The pistol class defaults intentionally mirror the GATE-0
+  // single-body firearm subset (damage 60 / range 60 / 1-body budget / no spread / no falloff).
+
+  // pistol — moderate damage, stops at 1 body, no spread, no distance falloff (the default class).
+  pistolDamage: num({ owner: 'weapons', unit: 'count', doc: 'Pistol base damage per shot before region multiplier + armor (V50).', default: 60, min: 1, max: 100_000 }),
+  pistolRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Pistol maximum ray travel (V50).', default: 60, min: 1, max: 1000 }),
+  pistolStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Pistol penetration budget; consumed per body by its resistance — exhausted budget STOPS the shot (V50).', default: 1, min: 0.1, max: 1000 }),
+  pistolSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Pistol full angular spread across pellets (0 = perfectly accurate) (V50).', default: 0, min: 0, max: 90 }),
+  pistolDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Pistol fraction of damage lost per meter of travel (distance falloff) (V50).', default: 0, min: 0, max: 1 }),
+  pistolPellets: num({ owner: 'weapons', unit: 'count', doc: 'Pistol projectiles per shot (1 = single ball) (V50).', default: 1, min: 1, max: 64, integer: true }),
+  pistolArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a pistol shot ignores (V50).', default: 0.5, min: 0, max: 1 }),
+
+  // rifle — high damage + long range, pierces SEVERAL bodies, slow distance falloff.
+  rifleDamage: num({ owner: 'weapons', unit: 'count', doc: 'Rifle base damage per shot before region multiplier + armor (V50).', default: 85, min: 1, max: 100_000 }),
+  rifleRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Rifle maximum ray travel (V50).', default: 120, min: 1, max: 1000 }),
+  rifleStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Rifle penetration budget; a high budget pierces several bodies before the shot stops (V50).', default: 4, min: 0.1, max: 1000 }),
+  rifleSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Rifle full angular spread across pellets (V50).', default: 0.4, min: 0, max: 90 }),
+  rifleDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Rifle fraction of damage lost per meter of travel (V50).', default: 0.004, min: 0, max: 1 }),
+  riflePellets: num({ owner: 'weapons', unit: 'count', doc: 'Rifle projectiles per shot (1 = single bullet) (V50).', default: 1, min: 1, max: 64, integer: true }),
+  rifleArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a rifle shot ignores (V50).', default: 0.85, min: 0, max: 1 }),
+
+  // shotgun — many low-power pellets in a wide spread, short range, steep distance falloff.
+  shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50).', default: 20, min: 1, max: 100_000 }),
+  shotgunRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Shotgun maximum ray travel (V50).', default: 25, min: 1, max: 1000 }),
+  shotgunStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun PER-PELLET penetration budget; a pellet stops at one body (V50).', default: 1, min: 0.1, max: 1000 }),
+  shotgunSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Shotgun full angular spread across the pellet cone (V50).', default: 14, min: 0, max: 90 }),
+  shotgunDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Shotgun fraction of damage lost per meter of travel (steep) (V50).', default: 0.03, min: 0, max: 1 }),
+  shotgunPellets: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun pellets per shot (the spread cone) (V50).', default: 8, min: 1, max: 64, integer: true }),
+  shotgunArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a shotgun pellet ignores (V50).', default: 0.3, min: 0, max: 1 }),
+
+  // melee — close range, stops at the first body, mirrors the T18 melee damage/reach as a fire class.
+  meleeClassDamage: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class base damage per strike before region multiplier + armor (V50).', default: 45, min: 1, max: 100_000 }),
+  meleeClassRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Melee weapon-class reach (V50).', default: 1.8, min: 0.2, max: 12 }),
+  meleeClassStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class penetration budget; a strike connects with one body (V50).', default: 1, min: 0.1, max: 1000 }),
+  meleeClassSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Melee weapon-class spread (0 — a single directed strike via fire; the arc sweep lives in meleeArcDegrees) (V50).', default: 0, min: 0, max: 90 }),
+  meleeClassDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Melee weapon-class distance falloff (0 over its short reach) (V50).', default: 0, min: 0, max: 1 }),
+  meleeClassPellets: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class strikes per swing (1) (V50).', default: 1, min: 1, max: 64, integer: true }),
+  meleeClassArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a melee strike ignores (V50).', default: 0.25, min: 0, max: 1 }),
+
+  // ---- T74 ammo / reload / weapon-switch (extends the T73 per-weapon ballistics, V50) ----
+  // Each FIREARM class carries a magazine (rounds chambered) plus a finite reserve; one `fire` consumes
+  // exactly ONE round — a shotgun spends one SHELL for its whole pellet pattern (one fire = one shell).
+  // `reload` moves rounds reserve->magazine over reloadTicks; `fire` is blocked until the reload settles
+  // and out-of-reserve cannot reload. swapTicks is the ready delay after a `cycleWeapon` switch (fire is
+  // blocked until ready). Melee is UNLIMITED — it carries only a swap delay, no magazine/reserve/reload.
+  // Every timer is in fixed-clock ticks so reload/swap stay deterministic (V12). autoReloadWhenEmpty
+  // optionally kicks a reload when a `fire` is attempted on an empty magazine (default off).
+
+  /** When true, attempting to fire an empty magazine (with reserve available) auto-starts a reload. */
+  autoReloadWhenEmpty: bool({
+    owner: 'weapons',
+    doc: 'When firing an empty magazine, automatically begin a reload if reserve remains (default off).',
+    default: false,
+  }),
+
+  // pistol ammo — a full magazine of 12 with a few spare mags in reserve; quick reload + quick swap.
+  pistolMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Pistol magazine capacity in rounds (T74).', default: 12, min: 1, max: 1000, integer: true }),
+  pistolReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Pistol spare rounds held in reserve, fed into the magazine on reload (T74).', default: 48, min: 0, max: 100_000, integer: true }),
+  pistolReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a pistol reload takes; fire is blocked until it settles (T74).', default: 45, min: 1, max: 6000, integer: true }),
+  pistolSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the pistol via cycleWeapon; fire is blocked until ready (T74).', default: 9, min: 0, max: 6000, integer: true }),
+
+  // rifle ammo — large magazine, deep reserve, slower reload + slightly slower swap.
+  rifleMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Rifle magazine capacity in rounds (T74).', default: 30, min: 1, max: 1000, integer: true }),
+  rifleReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Rifle spare rounds held in reserve (T74).', default: 120, min: 0, max: 100_000, integer: true }),
+  rifleReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a rifle reload takes (T74).', default: 60, min: 1, max: 6000, integer: true }),
+  rifleSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the rifle (T74).', default: 12, min: 0, max: 6000, integer: true }),
+
+  // shotgun ammo — small shell magazine, modest reserve, long reload + slow swap.
+  shotgunMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun magazine capacity in SHELLS; one fire spends one shell = its pellet pattern (T74).', default: 6, min: 1, max: 1000, integer: true }),
+  shotgunReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun spare shells held in reserve (T74).', default: 24, min: 0, max: 100_000, integer: true }),
+  shotgunReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a shotgun reload takes (T74).', default: 75, min: 1, max: 6000, integer: true }),
+  shotgunSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the shotgun (T74).', default: 15, min: 0, max: 6000, integer: true }),
+
+  // melee — unlimited; only a (short) swap ready delay applies.
+  meleeClassSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the melee weapon; melee has no ammo/reload (T74).', default: 6, min: 0, max: 6000, integer: true }),
 });

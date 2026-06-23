@@ -410,6 +410,9 @@ export class CombatFeedbackView {
       this.muzzleLight.intensity = flash * this.settings.muzzleFlashIntensity;
       this.muzzleLight.visible = true;
       this.muzzleBead.position.set(m.x, m.y, m.z);
+      // Orient the flash along the aim (lie it flat on the fire plane, spin to the shot heading) so it tracks
+      // where the weapon points instead of a fixed static rotation (V55). Matches the tracer's heading.
+      this.muzzleBead.rotation.set(-Math.PI / 2, 0, -Math.atan2(-m.dirZ, m.dirX));
       (this.muzzleBead.material as MeshBasicMaterial).opacity = flash;
       this.muzzleBead.visible = true;
     } else {

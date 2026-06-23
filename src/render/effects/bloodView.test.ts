@@ -3,7 +3,7 @@
 // and recycle past the cap; gore-intensity 0 suppresses; reduce-flashes thins; pools never exceed caps.
 
 import { describe, it, expect } from 'vitest';
-import { BloodSim, resolveBloodSettings, type BloodIngestContext, type SurfaceHit, type SurfaceProjector } from './bloodView';
+import { BloodSim, resolveBloodSettings, dropletStreakDims, type BloodIngestContext, type SurfaceHit, type SurfaceProjector } from './bloodView';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import type { EntityId, EventId, StimulusId } from '../../game/core/contracts/ids';
 
@@ -163,20 +163,19 @@ describe('BloodSim — organic directional decals (T77/V54)', () => {
     expect(meanCos(-1, 0)).toBeLessThan(-0.3);
   });
 
-  it('keeps counts modest: a weak hit is a spritz, only a fraction of droplets stain (T77/V54)', () => {
+  it('keeps droplet counts modest but every visible hit GUARANTEES a floor splat (T79 juice)', () => {
     const weak = new BloodSim(settings);
     weak.consume([hitReaction(0.15, 1, 0), bloodSpray(0, 0, 0)], ctx);
-    expect(weak.dropletCount).toBeLessThanOrEqual(settings.dropletsPerHit); // skewed low
-    // Across many hits only a fraction of landed droplets leave a stain (calm floor).
+    expect(weak.dropletCount).toBeLessThanOrEqual(settings.dropletsPerHit); // droplet jet stays skewed low
+    // A single hit drops at least one floor splat the instant it sprays (blood never falls THROUGH the floor).
+    const one = new BloodSim(settings);
+    one.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0)], ctx);
+    expect(one.decalCount).toBeGreaterThanOrEqual(1);
+    // Many hits → at least one stain each, but pooled/capped (never unbounded).
     const s = new BloodSim(settings);
-    let sprayed = 0;
-    for (let k = 0; k < 12; k++) {
-      const before = s.dropletCount;
-      s.consume([hitReaction(1, 1, 0), bloodSpray(k * 0.3, 0, 0)], ctx);
-      sprayed += s.dropletCount - before;
-      for (let i = 0; i < 90; i++) s.update(1 / 60);
-    }
-    expect(s.decalCount).toBeLessThan(sprayed * 0.6); // most droplets evaporate, never stain
+    for (let k = 0; k < 12; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(k * 0.3, 0, 0)], ctx);
+    expect(s.decalCount).toBeGreaterThanOrEqual(12); // guaranteed stain per hit
+    expect(s.decalCount).toBeLessThanOrEqual(settings.decalPoolSize); // still capped (V24)
   });
 
   it('holds fresh briefly, DRIES to the dried-blood colour, then LINGERS dried (slow decay)', () => {
@@ -248,6 +247,107 @@ describe('BloodSim — surface projection (T77/V54)', () => {
       }
     }
     expect(wallDecals).toBeGreaterThan(0);
+  });
+});
+
+describe('Blood JUICE — airborne droplet streaks (T79)', () => {
+  it('stretches a droplet ALONG velocity: long axis > cross-section, scales with speed', () => {
+    const f = settings.dropletStreakLengthFactor;
+    const size = settings.dropletSizeMeters;
+    const slow = dropletStreakDims(2, size, f);
+    const fast = dropletStreakDims(10, size, f);
+    expect(slow.long).toBeGreaterThan(slow.cross); // a streak, not a ball
+    expect(fast.long).toBeGreaterThan(slow.long); // longer the faster it travels
+    // Cross-section stays small (= base size) regardless of speed → it reads as a thin streak.
+    expect(slow.cross).toBeCloseTo(size, 6);
+    expect(fast.cross).toBeCloseTo(size, 6);
+  });
+
+  it('a motionless droplet is not stretched (long == cross)', () => {
+    const d = dropletStreakDims(0, settings.dropletSizeMeters, settings.dropletStreakLengthFactor);
+    expect(d.long).toBeCloseTo(d.cross, 6);
+  });
+});
+
+describe('Blood JUICE — player BODY-gore coating (T79)', () => {
+  const atPlayer: BloodIngestContext = { ...ctx, playerX: 0, playerZ: 0 };
+
+  it('coats the player body with splats when a spray lands within coat range', () => {
+    const s = new BloodSim(settings);
+    s.consume([hitReaction(1, 1, 0), bloodSpray(0.5, 0, 0.5)], atPlayer);
+    expect(s.playerGoreCount).toBeGreaterThan(0);
+    // Offsets are BODY-LOCAL (around + up the body), NOT the world spray coordinate.
+    for (let i = 0; i < s.playerGoreCount; i++) {
+      const radial = Math.hypot(s.pgX[i]!, s.pgZ[i]!);
+      expect(radial).toBeCloseTo(settings.playerGoreBodyRadiusMeters, 5);
+      expect(s.pgY[i]!).toBeGreaterThanOrEqual(settings.playerGoreBodyHeightMinMeters - 1e-6);
+      expect(s.pgY[i]!).toBeLessThanOrEqual(settings.playerGoreBodyHeightMaxMeters + 1e-6);
+    }
+  });
+
+  it('does NOT coat the body when the spray is beyond coat range', () => {
+    const s = new BloodSim(settings);
+    s.consume([hitReaction(1, 1, 0), bloodSpray(settings.coatRangeMeters + 5, 0, 0)], atPlayer);
+    expect(s.playerGoreCount).toBe(0);
+  });
+
+  it('tracks the player world pos each frame so the body gore can follow it', () => {
+    const s = new BloodSim(settings);
+    s.consume([], { ...ctx, playerX: 5, playerZ: -3 });
+    expect(s.trackedPlayerX).toBe(5);
+    expect(s.trackedPlayerZ).toBe(-3);
+  });
+
+  it('body gore lingers far longer than floor decals, then dries + shrinks away', () => {
+    const s = new BloodSim(settings);
+    s.consume([hitReaction(1, 1, 0), bloodSpray(0.2, 0, 0)], atPlayer);
+    expect(s.playerGoreCount).toBeGreaterThan(0);
+    // Still fully visible after the floor decals would have long since dried out.
+    s.update(settings.decalDryTransitionSeconds + settings.decalFreshSeconds);
+    let visibleMid = 0;
+    for (let i = 0; i < s.playerGoreCount; i++) if (s.pgVis[i]! > 0.3) visibleMid++;
+    expect(visibleMid).toBeGreaterThan(0);
+    // After its own full life it has shrunk away (vis → 0).
+    s.update(settings.playerGoreLifeSeconds * 2);
+    for (let i = 0; i < s.playerGoreCount; i++) expect(s.pgVis[i]!).toBe(0);
+  });
+
+  it('gore-intensity 0 suppresses body coating (V29)', () => {
+    const s = new BloodSim(settings);
+    s.consume([hitReaction(1, 1, 0), bloodSpray(0.3, 0, 0)], { ...atPlayer, goreIntensity: 0 });
+    expect(s.playerGoreCount).toBe(0);
+  });
+
+  it('never exceeds the player-gore pool cap (ring reuse, V24)', () => {
+    const s = new BloodSim(settings);
+    for (let k = 0; k < 400; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(0.2, 0, 0)], atPlayer);
+    expect(s.playerGoreCount).toBeLessThanOrEqual(settings.playerGorePoolSize);
+  });
+});
+
+describe('Blood JUICE — wetness from coating + puddles (T79)', () => {
+  it('builds wetness past the footstep threshold after fighting close to the player', () => {
+    const s = new BloodSim(settings);
+    const atPlayer: BloodIngestContext = { ...ctx, playerX: 0, playerZ: 0 };
+    for (let k = 0; k < 4; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(0.3, 0, 0)], atPlayer);
+    expect(s.wetness01).toBeGreaterThan(settings.footstepWetnessThreshold);
+  });
+
+  it('picks up wetness from a fresh floor puddle → leaves a footprint trail (no proximity gain at distance)', () => {
+    const s = new BloodSim(settings);
+    // Spray FAR from the player (ctx player is at 1000,1000) so no proximity wetness is gained.
+    for (let k = 0; k < 8; k++) s.consume([hitReaction(1, 1, 0), bloodSpray(20 + k * 0.2, 0, 0)], ctx);
+    expect(s.wetness01).toBe(0); // gained nothing from the distant spray
+    for (let i = 0; i < 90; i++) s.update(1 / 60); // droplets land → fresh puddles near x≈20
+    expect(s.decalCount).toBeGreaterThan(0);
+    const before = s.decalCount;
+    // Walk the player across the fresh puddle: it soaks them → wetness → footprints.
+    for (let k = 0; k < 40; k++) {
+      s.consume([], { ...ctx, playerX: 20 + 0.05 * k, playerZ: 0 });
+      s.update(1 / 30);
+    }
+    expect(s.wetness01).toBeGreaterThan(0); // soaked up from the puddle
+    expect(s.decalCount).toBeGreaterThan(before); // left a bloody footprint trail
   });
 });
 

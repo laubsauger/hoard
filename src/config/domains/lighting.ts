@@ -65,11 +65,19 @@ export const lightingConfig = registerDomain('lighting', {
   ambientOcclusionStrength: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Strength of near-player ambient occlusion darkening (0 = off).',
+    doc: 'Strength of near-player ambient occlusion darkening (0 = off). Drives the centre alpha of the cheap contact-AO grounding disc (T45/V36).',
     default: 0.6,
     min: 0,
     max: 1,
     tiers: { 'desktop-high': 0.7, 'desktop-compat': 0.4, 'mobile-webgpu': 0.3 },
+  }),
+  contactAoGroundLiftMeters: num({
+    owner: 'lighting',
+    unit: 'meters',
+    doc: 'Height the contact-AO grounding disc sits above the ground/floor plane so it composites over it without z-fighting (T45/V36).',
+    default: 0.03,
+    min: 0,
+    max: 1,
   }),
 
   // ---- Atmospheric fog / weather extinction ----

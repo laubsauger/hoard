@@ -3,7 +3,7 @@
 // V25 — capability thresholds are expressed as per-tier minimum adapter limits: the tier-resolution
 // machinery (resolve(spec, tier)) gives the minimum a GPU must report to QUALIFY for that tier.
 
-import { num } from '../spec';
+import { num, bool } from '../spec';
 import { registerDomain } from '../registry';
 
 export const renderingConfig = registerDomain('rendering', {
@@ -264,6 +264,45 @@ export const renderingConfig = registerDomain('rendering', {
     integer: true,
   }),
 
+  // ---- Block-limbed crowd (T72 / V2 / V13 / V17): hero + active-crowd zombies read as FIGURES so
+  // dismemberment is VISIBLE. Composed from 6 shared per-part InstancedMeshes (NO per-zombie mesh, V2),
+  // pooled to a budget. Per-part box dims live in CROWD_LIMB_PARTS below (art-direction proportions). ----
+  crowdLimbedBudget: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Max simultaneously limbed (figure) zombies — the hero+active-crowd pool cap; extra figures fall through (T30 LOD).',
+    default: 64,
+    min: 0,
+    max: 512,
+    integer: true,
+    tiers: { 'desktop-high': 128, 'desktop-medium': 64, 'desktop-compat': 32, 'mobile-webgpu': 16 },
+  }),
+  crowdLimbedMaxSimTier: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'SoA simTier <= this is rendered as a limbed figure (0 hero, 1 active); higher tiers stay the instanced box (V13).',
+    default: 1,
+    min: 0,
+    max: 3,
+    integer: true,
+  }),
+  crowdLimbWalkSwingRadians: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Peak arm/leg swing about local X driven by the SoA walk phase on limbed figures (idle/walk read).',
+    default: 0.45,
+    min: 0,
+    max: 1.5,
+  }),
+  crowdLimbBobMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Peak vertical body bob applied to every part of a limbed figure from its SoA walk phase.',
+    default: 0.05,
+    min: 0,
+    max: 0.5,
+  }),
+
   // ---- Gore render (T19 / V8 / V29): pooled + capped; intensity multiplier injected from accessibility ----
   goreSprayPoolSize: num({
     owner: 'rendering',
@@ -475,6 +514,14 @@ export const renderingConfig = registerDomain('rendering', {
     min: 0.1,
     max: 10,
   }),
+  cutawayCameraFacingDotThreshold: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'DIRECTIONAL cutaway (T82/V58): an upper wall fades only when its outward normal turns toward the camera — dot(outwardNormal, towardCamera) > this threshold. Walls facing away (the FAR walls) stay opaque so enclosure still reads, so the room is never reduced to a roofless open box. Cosine in [-1,1]; ~0.2 fades the near walls between camera + player while keeping the far + grazing walls (V58).',
+    default: 0.2,
+    min: -1,
+    max: 1,
+  }),
 
   // ---- Pooled BLOOD system (T75 / V51): directional droplets that arc under gravity+drag and LAND as
   // drying directional floor decals; bloody footsteps while the player is freshly blood-soaked. Supersedes
@@ -559,8 +606,8 @@ export const renderingConfig = registerDomain('rendering', {
   bloodDecalStainChance: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Base probability (scaled by droplet size) that a landing droplet leaves a floor stain rather than evaporating — kept low so the floor stays calm, only a fraction of droplets stain (T77/V54).',
-    default: 0.22,
+    doc: 'Base probability (scaled by droplet size) that a landing droplet leaves a floor stain rather than evaporating. Raised for JUICE (T79) so most visible sprays paint the floor — combined with a GUARANTEED >=1 stain per hit, blood never appears to fall THROUGH the floor. Still capped + pooled by the decal ring buffer.',
+    default: 0.8,
     min: 0,
     max: 1,
   }),
@@ -710,8 +757,8 @@ export const renderingConfig = registerDomain('rendering', {
   bloodFootstepWetnessGainPerHit: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Wetness gained when a blood event lands right on the player (scaled down by distance) (T75/V51, lowered T77/V54 — slow soak, prints only after sustained close carnage).',
-    default: 0.28,
+    doc: 'Wetness gained when a blood event lands right on the player (scaled down by distance) (T75/V51). Raised for JUICE (T79) so fighting in a cluster soaks the player and footprints actually appear.',
+    default: 0.5,
     min: 0,
     max: 10,
   }),
@@ -726,10 +773,114 @@ export const renderingConfig = registerDomain('rendering', {
   bloodFootstepWetnessThreshold: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Minimum tracked wetness before the player leaves bloody footprints — raised T77/V54 so prints appear only once the player is HEAVILY soaked, not on the first nearby kill (T75/V51).',
-    default: 1.8,
+    doc: 'Minimum tracked wetness before the player leaves bloody footprints (T75/V51). Lowered for JUICE (T79) so prints appear once the player is soaked from a close fight or after walking through a fresh puddle — previously the threshold was so high it never triggered.',
+    default: 0.6,
     min: 0,
     max: 10,
+  }),
+
+  // ---- Blood JUICE upgrade (T79): airborne motion streaks, player-body gore coating, puddle-step pickup.
+  // All pooled + hard-capped (V24), render-local RNG only (V2/V3), no per-frame alloc, no magic numbers (V4).
+  bloodDropletStreakLengthFactor: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'How much an airborne droplet stretches ALONG its velocity per m/s of speed: long-axis = size*(1 + speed*factor), cross-section stays = size. Makes fast droplets read as motion STREAKS, not balls (T79).',
+    default: 0.12,
+    min: 0,
+    max: 2,
+  }),
+  bloodCoatRangeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'A blood spray within this distance of the player splatters gore onto the PLAYER BODY (the body-gore coating layer). Beyond it, only world decals are placed (T79).',
+    default: 4.4,
+    min: 0,
+    max: 30,
+  }),
+  bloodPlayerGorePoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hard cap on accumulated body-gore splats stuck on the player (T79). Ring buffer — oldest recycled past the cap (V24).',
+    default: 96,
+    min: 0,
+    max: 1024,
+    integer: true,
+    tiers: { 'desktop-high': 128, 'desktop-compat': 64, 'mobile-webgpu': 48 },
+  }),
+  bloodPlayerGoreLifeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'How long a body-gore splat lingers on the player before it dries + shrinks away — set FAR longer than the floor decal WET phase (~13s) so a sustained fight leaves the player visibly drenched (≈10× the wet phase, T79).',
+    default: 55,
+    min: 1,
+    max: 300,
+    tiers: { 'desktop-high': 75, 'mobile-webgpu': 35 },
+  }),
+  bloodPlayerGoreSizeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Base radius of one body-gore splat slapped onto the player (per-splat random scale on top); flattened against the body surface so it hugs, not pokes out (T79).',
+    default: 0.13,
+    min: 0.02,
+    max: 1,
+    tiers: { 'desktop-high': 0.15, 'mobile-webgpu': 0.11 },
+  }),
+  bloodPlayerGoreBrightness: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Brightness multiplier applied to body-gore splat colour so fresh coating reads on the dark body — brighter than the soaked-in floor decals (T79).',
+    default: 1.35,
+    min: 0.5,
+    max: 3,
+  }),
+  bloodPlayerGoreBodyRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Radial distance from the player body centre at which body-gore splats sit (on the body surface) — a BODY-LOCAL offset added to the tracked player world position each frame (T79).',
+    default: 0.5,
+    min: 0.05,
+    max: 3,
+  }),
+  bloodPlayerGoreBodyHeightMinMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Lowest body-local height a coating splat lands at, up the player body (T79).',
+    default: 0.4,
+    min: 0,
+    max: 5,
+  }),
+  bloodPlayerGoreBodyHeightMaxMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Highest body-local height a coating splat lands at, up the player body (T79).',
+    default: 2,
+    min: 0,
+    max: 5,
+  }),
+  bloodPlayerGoreSplatsPerCoat: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Max body-gore splats spawned by ONE point-blank spray (scaled down by distance + energy). Always >=1 within coat range. Pooled (V24) (T79).',
+    default: 6,
+    min: 1,
+    max: 32,
+    integer: true,
+  }),
+  bloodPuddlePickupRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Walking within this distance of a FRESH (still-wet) floor decal soaks the player → builds wetness → leaves a bloody footprint trail for a short while (T79). Own footprints are excluded so the trail naturally ends.',
+    default: 0.6,
+    min: 0.05,
+    max: 5,
+  }),
+  bloodPuddlePickupWetnessPerSecond: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Wetness gained per second while standing/walking in a fresh floor puddle (T79). Decays via bloodFootstepWetnessDecayPerSecond once the player leaves the blood.',
+    default: 1.6,
+    min: 0,
+    max: 20,
   }),
 
   // ---- Pooled GIB system (T76 / V52): flung faceted lit meat chunks that tumble, land, settle, then dry +
@@ -896,4 +1047,370 @@ export const renderingConfig = registerDomain('rendering', {
     min: 0.2,
     max: 20,
   }),
+
+  // ---- Surface-impact response (T80/T81 / V57): a DISTINCT, clearly NON-RED response to shooting a
+  // WALL / structure (a clean miss that stops on structure) so a miss never reads like "blood beyond
+  // range". A bright spark burst thrown OUT of the surface (opposite the bullet's travel) + a small
+  // persistent dark bullet-HOLE decal on the struck surface; plus dark WOUND marks on struck bodies
+  // (zombie + player). Blood is unchanged: it fires only on a real damage-hit (bloodView). Pooled +
+  // hard-capped (V24), render-local RNG (V2/V3), decals follow the V56 depth policy (depthTest ON,
+  // depthWrite OFF, polygon-offset; never depthTest:false). No magic numbers (V4).
+  impactSparkPoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hard cap on live impact-spark particles (T80/V57). Compacted swap-removed on expiry; spawn breaks at the cap (V24).',
+    default: 256,
+    min: 8,
+    max: 4096,
+    integer: true,
+    tiers: { 'desktop-high': 384, 'desktop-compat': 128, 'mobile-webgpu': 64 },
+  }),
+  impactSparkCount: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Sparks thrown per structure impact at full feedback before reduce-flashes thinning (T80/V57).',
+    default: 14,
+    min: 1,
+    max: 128,
+    integer: true,
+    tiers: { 'desktop-high': 20, 'desktop-compat': 8, 'mobile-webgpu': 6 },
+  }),
+  impactSparkSizeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Base radius of one impact-spark particle; per-spark random scales it down (T80/V57).',
+    default: 0.045,
+    min: 0.005,
+    max: 0.5,
+    tiers: { 'desktop-high': 0.05, 'mobile-webgpu': 0.035 },
+  }),
+  impactSparkLifeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'Lifetime of an impact spark before it fades out and is recycled — short-lived flash (T80/V57).',
+    default: 0.35,
+    min: 0.05,
+    max: 3,
+  }),
+  impactSparkSpeedMinMps: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Minimum launch speed of an impact spark out of the struck surface (T80/V57).',
+    default: 4,
+    min: 0,
+    max: 60,
+  }),
+  impactSparkSpeedMaxMps: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Maximum launch speed of an impact spark out of the struck surface (T80/V57).',
+    default: 11,
+    min: 0,
+    max: 80,
+  }),
+  impactSparkSpreadRad: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Cone half-angle around the surface normal within which sparks are scattered (T80/V57).',
+    default: 1.0,
+    min: 0,
+    max: 1.57,
+  }),
+  impactSparkGravityMps2: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Downward acceleration on airborne impact sparks so the burst arcs and falls (T80/V57).',
+    default: 14,
+    min: 0,
+    max: 60,
+  }),
+  impactSparkDragPerSecond: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Speed shed per second by airborne sparks so the burst decelerates (T80/V57).',
+    default: 6,
+    min: 0,
+    max: 30,
+  }),
+  impactSparkColorR: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Red channel of the bright impact-spark colour — a hot yellow-white, deliberately NON-RED so a wall hit never reads as blood (T80/V57).',
+    default: 1,
+    min: 0,
+    max: 1,
+  }),
+  impactSparkColorG: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Green channel of the bright impact-spark colour (yellow-white, NON-RED) (T80/V57).',
+    default: 0.82,
+    min: 0,
+    max: 1,
+  }),
+  impactSparkColorB: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Blue channel of the bright impact-spark colour (yellow-white, NON-RED) (T80/V57).',
+    default: 0.4,
+    min: 0,
+    max: 1,
+  }),
+  impactHolePoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hard cap on persistent bullet-hole decals on structures (T80/V57). Ring buffer — oldest recycled past the cap (V24).',
+    default: 192,
+    min: 8,
+    max: 2048,
+    integer: true,
+    tiers: { 'desktop-high': 288, 'desktop-compat': 96, 'mobile-webgpu': 48 },
+  }),
+  impactHoleSizeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Diameter of a bullet-hole decal disc projected on the struck surface (T80/V57).',
+    default: 0.13,
+    min: 0.02,
+    max: 1,
+    tiers: { 'desktop-high': 0.15, 'mobile-webgpu': 0.11 },
+  }),
+  impactHoleLifeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'How long a bullet hole persists before a gentle end-of-life fade and ring-buffer recycle — long-lived, far longer than a spark (T80/V57).',
+    default: 60,
+    min: 1,
+    max: 240,
+    tiers: { 'desktop-high': 90, 'mobile-webgpu': 35 },
+  }),
+  impactHoleFadeFraction: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Final fraction of a bullet-hole lifetime spent shrinking/fading out before the ring buffer recycles it (T80/V57).',
+    default: 0.15,
+    min: 0.01,
+    max: 1,
+  }),
+  impactWoundPoolSize: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'Hard cap on accumulated wound decals on bodies (zombie + player) (T81/V57). Ring buffer — oldest recycled past the cap (V24).',
+    default: 160,
+    min: 8,
+    max: 2048,
+    integer: true,
+    tiers: { 'desktop-high': 240, 'desktop-compat': 80, 'mobile-webgpu': 48 },
+  }),
+  impactWoundSizeMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Diameter of a dark wound mark stamped at the struck region of a body (T81/V57).',
+    default: 0.16,
+    min: 0.02,
+    max: 1,
+    tiers: { 'desktop-high': 0.18, 'mobile-webgpu': 0.13 },
+  }),
+  impactWoundLifeSeconds: num({
+    owner: 'rendering',
+    unit: 'seconds',
+    doc: 'How long a wound mark lingers on a body before fading out and recycling (T81/V57).',
+    default: 45,
+    min: 1,
+    max: 240,
+    tiers: { 'desktop-high': 60, 'mobile-webgpu': 30 },
+  }),
+  impactWoundFadeFraction: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Final fraction of a wound-mark lifetime spent fading out before the ring buffer recycles it (T81/V57).',
+    default: 0.25,
+    min: 0.01,
+    max: 1,
+  }),
+
+  // ---- FireView (RENDER lane): additive billboard FLAMES + pooled flickering point LIGHTS + faint SMOKE
+  // at burning cells. Pure visual mirror of the sim's burning-cell set (V2/V3). Pooled + capped (V24),
+  // distance-simplified (V8), light count capped (V8/V22), flicker damped on reduce-flashes (V29). No
+  // magic numbers in fireView.ts (V4) — every flame/light/smoke tunable lives here. ----
+  fireMaxCells: num({
+    owner: 'rendering', unit: 'count',
+    doc: 'Maximum simultaneously-tracked burning cells the FireView draws flames/lights for (pool cap, V24).',
+    default: 24, min: 1, max: 256, integer: true,
+    tiers: { 'desktop-high': 48, 'desktop-medium': 32, 'desktop-compat': 24, 'mobile-webgpu': 12 },
+  }),
+  fireQuadsPerCell: num({
+    owner: 'rendering', unit: 'count',
+    doc: 'Stacked/jittered additive billboard quads per burning cell at full intensity (volume).',
+    default: 4, min: 1, max: 12, integer: true,
+    tiers: { 'desktop-high': 6, 'desktop-medium': 4, 'desktop-compat': 3, 'mobile-webgpu': 2 },
+  }),
+  fireQuadCapacity: num({
+    owner: 'rendering', unit: 'count',
+    doc: 'Hard cap on total flame quad instances across all fires (instanced-mesh capacity, V24).',
+    default: 256, min: 4, max: 4096, integer: true,
+    tiers: { 'desktop-high': 512, 'desktop-medium': 256, 'desktop-compat': 128, 'mobile-webgpu': 64 },
+  }),
+  fireBaseSizeMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Base width/height (m) of a flame billboard quad at full intensity.',
+    default: 0.9, min: 0.05, max: 8,
+    tiers: { 'desktop-high': 1, 'mobile-webgpu': 0.8 },
+  }),
+  fireSizeJitter: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Per-quad random size variance (0 = uniform, 0.4 = +/-40%) so the flame body is not a uniform card.',
+    default: 0.4, min: 0, max: 1,
+  }),
+  fireQuadRiseMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Vertical offset (m) added per stacked quad index — builds the flame column upward.',
+    default: 0.45, min: 0, max: 4,
+  }),
+  fireQuadJitterMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Horizontal random jitter (m) of stacked quads around the cell centre so the column is not a flat sheet.',
+    default: 0.25, min: 0, max: 4,
+  }),
+  fireBaseHeightMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Height (m) above the cell floor where the flame column base sits.',
+    default: 0.4, min: 0, max: 8,
+  }),
+  fireBaseOpacity: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Base opacity of the additive flame material (additive, so this scales glow contribution).',
+    default: 0.85, min: 0.01, max: 1,
+  }),
+  fireGrowthPerSec: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Per-second rate a freshly-ignited flame ramps its visual intensity (0..1) toward full (catch-in).',
+    default: 1.5, min: 0.05, max: 20,
+  }),
+  fireFlickerHz: num({
+    owner: 'rendering', unit: 'hz',
+    doc: 'Flicker frequency (Hz) of the per-quad animated scale/opacity.',
+    default: 7, min: 0.1, max: 60,
+  }),
+  fireFlickerAmount: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Flicker amplitude (0..1) on flame scale + brightness — the animated liveliness of the fire.',
+    default: 0.35, min: 0, max: 1,
+  }),
+  fireReduceFlashesFlicker: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Multiplier applied to flame/light flicker amplitude when reduce-flashes is enabled (V29 damping).',
+    default: 0.2, min: 0, max: 1,
+  }),
+  fireColorHotR: num({ owner: 'rendering', unit: 'ratio', doc: 'Deep-orange flame BASE colour (linear) R component.', default: 0.95, min: 0, max: 1 }),
+  fireColorHotG: num({ owner: 'rendering', unit: 'ratio', doc: 'Deep-orange flame BASE colour (linear) G component.', default: 0.32, min: 0, max: 1 }),
+  fireColorHotB: num({ owner: 'rendering', unit: 'ratio', doc: 'Deep-orange flame BASE colour (linear) B component.', default: 0.05, min: 0, max: 1 }),
+  fireColorTipR: num({ owner: 'rendering', unit: 'ratio', doc: 'Yellow flame TIP colour (linear) R component.', default: 1, min: 0, max: 1 }),
+  fireColorTipG: num({ owner: 'rendering', unit: 'ratio', doc: 'Yellow flame TIP colour (linear) G component.', default: 0.85, min: 0, max: 1 }),
+  fireColorTipB: num({ owner: 'rendering', unit: 'ratio', doc: 'Yellow flame TIP colour (linear) B component.', default: 0.3, min: 0, max: 1 }),
+  // distance-simplify (V8): full quad count within START; linearly down to one quad by END; culled past CULL.
+  fireSimplifyStartMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Camera distance (m) within which a fire draws its full quad count; simplification begins beyond it (V8).',
+    default: 18, min: 1, max: 500,
+  }),
+  fireSimplifyEndMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Camera distance (m) beyond which a fire is simplified to a single quad (V8).',
+    default: 45, min: 2, max: 1000,
+  }),
+  fireCullDistanceMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Camera distance (m) beyond which a fire draws no flames and gets no light (V8 cull).',
+    default: 70, min: 4, max: 2000,
+  }),
+  // pooled flickering point lights (V8/V22): only the N strongest nearby fires light the scene.
+  fireLightCount: num({
+    owner: 'rendering', unit: 'count',
+    doc: 'Maximum simultaneous flickering point lights (only the N strongest nearby fires are lit, V8/V22).',
+    default: 3, min: 0, max: 16, integer: true,
+    tiers: { 'desktop-high': 4, 'desktop-medium': 3, 'desktop-compat': 2, 'mobile-webgpu': 1 },
+  }),
+  fireLightIntensity: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Base intensity of a fire point light at full burn intensity (scaled by intensity + flicker).',
+    default: 6, min: 0, max: 200,
+  }),
+  fireLightRangeMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Distance (m) over which a fire point light falls off to zero.',
+    default: 12, min: 0.5, max: 200,
+  }),
+  fireLightHeightMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Height (m) above the cell floor where a fire point light sits.',
+    default: 1.2, min: 0, max: 12,
+  }),
+  fireLightFlickerAmount: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Flicker amplitude (0..1) on a fire point-light intensity (damped by reduce-flashes, V29).',
+    default: 0.3, min: 0, max: 1,
+  }),
+  fireLightColorR: num({ owner: 'rendering', unit: 'ratio', doc: 'Warm fire point-light colour (linear) R component.', default: 1, min: 0, max: 1 }),
+  fireLightColorG: num({ owner: 'rendering', unit: 'ratio', doc: 'Warm fire point-light colour (linear) G component.', default: 0.55, min: 0, max: 1 }),
+  fireLightColorB: num({ owner: 'rendering', unit: 'ratio', doc: 'Warm fire point-light colour (linear) B component.', default: 0.2, min: 0, max: 1 }),
+  // faint drifting smoke above strong fires (V56 depth policy). Skippable per tier via fireSmokeEnabled.
+  fireSmokeEnabled: bool({
+    owner: 'rendering',
+    doc: 'Whether the FireView draws a faint drifting smoke billboard above strong fires (V56).',
+    default: true,
+    tiers: { 'mobile-webgpu': false },
+  }),
+  fireSmokeIntensityThreshold: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Minimum burn intensity (0..1) a fire needs before it grows a smoke billboard.',
+    default: 0.6, min: 0, max: 1,
+  }),
+  fireSmokeSizeMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Width/height (m) of the faint smoke billboard above a strong fire.',
+    default: 1.6, min: 0.1, max: 12,
+  }),
+  fireSmokeOpacity: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Opacity of the faint smoke billboard (kept low/tasteful so it never washes the scene out).',
+    default: 0.18, min: 0, max: 1,
+  }),
+  fireSmokeRiseMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Height (m) above the cell floor where the smoke billboard centres + drifts upward.',
+    default: 2, min: 0, max: 20,
+  }),
+  fireSmokeColorR: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) R component.', default: 0.06, min: 0, max: 1 }),
+  fireSmokeColorG: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) G component.', default: 0.06, min: 0, max: 1 }),
+  fireSmokeColorB: num({ owner: 'rendering', unit: 'ratio', doc: 'Dark smoke billboard colour (linear) B component.', default: 0.07, min: 0, max: 1 }),
 });
+
+// ---- Block-limbed figure layout (T72 / V2 / V13 / ART-DIRECTION) ----
+// Stable, identity-mapped set of body parts composing a humanoid silhouette (~1.8 m tall, origin at the
+// feet). Box dims + local offsets are art-direction proportions, not perf knobs, so they live as a typed
+// constant here (centralized + named — no literals in render code, V4) rather than per-field tier specs.
+// `region` ties a part to its SoA anatomyFlags sever bit so a severed limb HIDES (V17); a null region
+// (torso) is never severable. `swingSign` drives the counter-swinging walk gait. Order is the part order.
+
+/** Identity of a block-limb body part. Render-side only; maps to an AnatomyRegion for the sever-hide. */
+export type CrowdLimbId = 'torso' | 'head' | 'armLeft' | 'armRight' | 'legLeft' | 'legRight';
+
+export interface CrowdLimbPart {
+  readonly id: CrowdLimbId;
+  /** Box geometry size in meters [width, height, depth]. */
+  readonly size: readonly [number, number, number];
+  /** Local center offset from the feet origin (pre per-instance scale), meters [x, y, z]. */
+  readonly offset: readonly [number, number, number];
+  /** Walk-phase swing sign about local X (arms/legs counter-swing); 0 keeps the part rigid. */
+  readonly swingSign: number;
+}
+
+export const CROWD_LIMB_PARTS: readonly CrowdLimbPart[] = [
+  { id: 'legLeft', size: [0.18, 0.85, 0.2], offset: [-0.13, 0.42, 0], swingSign: 1 },
+  { id: 'legRight', size: [0.18, 0.85, 0.2], offset: [0.13, 0.42, 0], swingSign: -1 },
+  { id: 'torso', size: [0.5, 0.75, 0.32], offset: [0, 1.2, 0], swingSign: 0 },
+  { id: 'head', size: [0.3, 0.32, 0.3], offset: [0, 1.72, 0], swingSign: 0 },
+  { id: 'armLeft', size: [0.14, 0.62, 0.16], offset: [-0.34, 1.2, 0], swingSign: -1 },
+  { id: 'armRight', size: [0.14, 0.62, 0.16], offset: [0.34, 1.2, 0], swingSign: 1 },
+];

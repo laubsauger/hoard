@@ -6,9 +6,11 @@ import {
   resolveSurfaceVisibility,
   resolveCutawayDepthSettings,
   resolveCutawayDepthOffset,
+  wallFacesCamera,
   classifyThreat,
   threatMarkerStyle,
   type OcclusionContext,
+  type VecXZ,
 } from './visibility';
 
 const settings = resolveVisibilitySettings('desktop-high');
@@ -57,6 +59,61 @@ describe('resolveSurfaceVisibility (T28/V20)', () => {
   it('reveals an interior only via player presence or portal/LOS', () => {
     expect(resolveSurfaceVisibility('interior', ctx({ playerInside: true }), settings).visible).toBe(true);
     expect(resolveSurfaceVisibility('interior', ctx({ portalOrLosToCamera: true }), settings).visible).toBe(true);
+  });
+});
+
+describe('directional cutaway — wallFacesCamera (T82/V58)', () => {
+  const threshold = settings.cameraFacingDotThreshold;
+  // Axis-aligned room: each wall's outward normal points away from the interior.
+  const NORTH: VecXZ = { x: 0, z: -1 };
+  const SOUTH: VecXZ = { x: 0, z: 1 };
+  const EAST: VecXZ = { x: 1, z: 0 };
+  const WEST: VecXZ = { x: -1, z: 0 };
+  const faces = (outwardNormal: VecXZ, towardCamera: VecXZ): boolean =>
+    wallFacesCamera({ outwardNormal, towardCamera, facingDotThreshold: threshold });
+
+  it('resolves a sane cosine threshold (config, per tier)', () => {
+    expect(threshold).toBeGreaterThan(-1);
+    expect(threshold).toBeLessThan(1);
+  });
+
+  it('fades the wall the camera looks AT but not the opposite (far) wall — camera due east', () => {
+    const toCam: VecXZ = { x: 1, z: 0 }; // camera east of the player
+    expect(faces(EAST, toCam)).toBe(true); // near/camera-facing wall fades
+    expect(faces(WEST, toCam)).toBe(false); // opposite far wall stays opaque (reads enclosure)
+  });
+
+  it('fades exactly the two near sides on a diagonal (iso) view, never all four', () => {
+    const toCam: VecXZ = { x: 1, z: 1 }; // north-east-ish iso camera
+    const faded = [NORTH, SOUTH, EAST, WEST].filter((n) => faces(n, toCam));
+    expect(faded).toHaveLength(2); // the two camera-facing sides, NOT a roofless open box
+    expect(faces(EAST, toCam)).toBe(true);
+    expect(faces(SOUTH, toCam)).toBe(true);
+    expect(faces(NORTH, toCam)).toBe(false);
+    expect(faces(WEST, toCam)).toBe(false);
+  });
+
+  it('rotates the faded set with the camera (yaw) — camera due south fades the south wall', () => {
+    const toCam: VecXZ = { x: 0, z: 1 };
+    expect(faces(SOUTH, toCam)).toBe(true);
+    expect(faces(NORTH, toCam)).toBe(false);
+  });
+
+  it('a grazing/perpendicular wall (dot ~0) does NOT fade (below threshold)', () => {
+    expect(faces(NORTH, { x: 1, z: 0 })).toBe(false); // normal perpendicular to view → kept
+  });
+
+  it('a degenerate (zero-length) direction never occludes', () => {
+    expect(faces(EAST, { x: 0, z: 0 })).toBe(false);
+    expect(wallFacesCamera({ outwardNormal: { x: 0, z: 0 }, towardCamera: { x: 1, z: 0 }, facingDotThreshold: threshold })).toBe(false);
+  });
+
+  it('feeds the upperWall decision: a camera-facing wall fades, the far wall is kept', () => {
+    const toCam: VecXZ = { x: 1, z: 0 };
+    const near = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: faces(EAST, toCam) }), settings);
+    const far = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: faces(WEST, toCam) }), settings);
+    expect(near.visible).toBe(false);
+    expect(far.visible).toBe(true);
   });
 });
 

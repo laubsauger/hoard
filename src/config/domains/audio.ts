@@ -70,4 +70,41 @@ export const audioConfig = registerDomain('audio', {
     doc: 'Max simultaneously active stimuli in the shared StimulusField before the weakest is evicted.',
     default: 256, min: 16, max: 8192, integer: true,
   }),
+
+  // ============================================================================
+  // AUDIO OUTPUT (procedural WebAudio render layer — additive, owned by the audio-out lane).
+  // The SIM fields above shape the perception STIMULUS model; the `out*` fields below shape the
+  // actual SOUND a player HEARS. All synthesized (no asset files); driven by the event stream +
+  // the stimulus field reaching the player + the live horde count. Hard-capped so it never clips
+  // (V4 — no magic numbers; V28 — group bed + a few foreground groans, never one voice per zombie).
+  // ============================================================================
+  outMasterCeiling: num({
+    owner: 'audio', unit: 'ratio',
+    doc: 'Hard upper clamp applied to every resolved output gain so the mix can never clip.',
+    default: 0.85, min: 0, max: 1,
+  }),
+  // ---- player gunshot (direct, fired from the player-fire path) ----
+  outGunshotGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a player gunshot before master scaling.', default: 0.7, min: 0, max: 1 }),
+  outGunshotNoiseDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Exponential decay time of the gunshot noise crack.', default: 0.12, min: 0.01, max: 2 }),
+  outGunshotThumpFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the gunshot low thump.', default: 70, min: 20, max: 400 }),
+  outGunshotThumpDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Exponential decay time of the gunshot low thump.', default: 0.18, min: 0.01, max: 2 }),
+  // ---- zombie GROUP BED drone (one drone whose level scales with nearby horde count, V28) ----
+  outHordeBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the horde drone bed at full horde size, before master scaling.', default: 0.32, min: 0, max: 1 }),
+  outHordeBedFullCount: num({ owner: 'audio', unit: 'count', doc: 'Nearby horde size at which the group bed reaches full gain (linear ramp below).', default: 40, min: 1, max: 100000, integer: true }),
+  outHordeBedBaseFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the low horde drone.', default: 55, min: 20, max: 400 }),
+  outHordeBedLfoHz: num({ owner: 'audio', unit: 'hz', doc: 'Slow amplitude-modulation rate of the horde drone.', default: 0.2, min: 0.01, max: 8 }),
+  outHordeBedGlideSeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Time constant for the bed gain to glide toward its target level (no pops).', default: 0.6, min: 0.01, max: 10 }),
+  // ---- occasional foreground groans (a FEW selected voices over the bed, never per-member, V28) ----
+  outGroanGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a foreground groan before master scaling.', default: 0.4, min: 0, max: 1 }),
+  outGroanRatePerSecond: num({ owner: 'audio', unit: 'ratio', doc: 'Groan trigger probability per second at full horde size (scaled by horde fraction).', default: 0.7, min: 0, max: 20 }),
+  outGroanMinIntervalSeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Minimum spacing between consecutive foreground groans.', default: 0.7, min: 0, max: 30 }),
+  outGroanDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Amplitude envelope length of a foreground groan.', default: 0.8, min: 0.05, max: 5 }),
+  // ---- world one-shots (impacts / glass / alarms / footsteps) keyed off the reaching stimulus class ----
+  outImpactGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of an impact/breach one-shot before reach + master scaling.', default: 0.55, min: 0, max: 1 }),
+  outGlassGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a breaking-glass one-shot before reach + master scaling.', default: 0.5, min: 0, max: 1 }),
+  outAlarmGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of an alarm one-shot before reach + master scaling.', default: 0.45, min: 0, max: 1 }),
+  outFootstepGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a footstep one-shot before reach + master scaling.', default: 0.18, min: 0, max: 1 }),
+  // ---- spatialization + voice budget ----
+  outPanWidthMeters: num({ owner: 'audio', unit: 'meters', doc: 'World-x offset from the player mapped to full left/right stereo pan.', default: 18, min: 0.1, max: 1000 }),
+  outMaxVoices: num({ owner: 'audio', unit: 'count', doc: 'Hard cap on concurrent pooled world/groan one-shot voices (player gunshot is exempt).', default: 12, min: 1, max: 128, integer: true }),
 });

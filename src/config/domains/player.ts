@@ -42,6 +42,15 @@ export const playerConfig = registerDomain('player', {
     min: 0.1,
     max: 20,
   }),
+  /** Sprint speed multiplier applied to the walk speed while the player is sprinting (escape lever). */
+  playerSprintSpeedMultiplier: num({
+    owner: 'player',
+    unit: 'ratio',
+    doc: 'Multiplier on the walk speed while sprinting (outrun the horde — gated by stamina, T22).',
+    default: 1.6,
+    min: 1,
+    max: 4,
+  }),
   /** Rendered player body capsule height (m). */
   bodyHeightMeters: num({
     owner: 'player',

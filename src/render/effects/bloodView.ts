@@ -13,10 +13,15 @@
 // InstancedBufferAttribute; MeshBasicMaterial{toneMapped:false} so blood reads as matter, not a glow. No
 // lazy setColorAt on a mesh without a pre-allocated instanceColor.
 //
-// DEFERRED (needs T70 player mesh in blockScene + a positioned death VisualEvent — not ours to add): the
-// death-clutch gib burst and the player-BODY gore coating that parents to the player mesh. The footstep
-// system here is a lightweight stand-in driven by a tracked "wetness" accumulator from nearby blood, not by
-// an actual body-gore layer. Tie T54/T55.
+// JUICE upgrade (T79): airborne droplets now STRETCH along velocity (motion streaks, not balls); most hits
+// GUARANTEE >=1 floor splat (blood never falls THROUGH the floor); a spray within coatRange splatters gore
+// onto the PLAYER BODY — a body-gore ring buffer stores BODY-LOCAL offsets and the view repositions them to
+// playerWorldPos + localOffset each frame (NOT parented to the blockScene player mesh; the sim already tracks
+// the player world pos), lingering ~10× the floor wet phase then drying + shrinking. Wetness now also builds
+// from walking through FRESH floor puddles (own footprints excluded) → a bloody footprint trail.
+//
+// STILL DEFERRED (needs T70 player mesh hooks + a positioned death VisualEvent — not ours to add): the
+// death-clutch gib burst. Tie T54/T55.
 
 import {
   InstancedMesh,
@@ -112,6 +117,19 @@ export interface BloodSettings {
   readonly footstepWetnessGainPerHit: number;
   readonly footstepWetnessDecayPerSecond: number;
   readonly footstepWetnessThreshold: number;
+  // ---- JUICE upgrade (T79) ----
+  readonly dropletStreakLengthFactor: number;
+  readonly coatRangeMeters: number;
+  readonly playerGorePoolSize: number;
+  readonly playerGoreLifeSeconds: number;
+  readonly playerGoreSizeMeters: number;
+  readonly playerGoreBrightness: number;
+  readonly playerGoreBodyRadiusMeters: number;
+  readonly playerGoreBodyHeightMinMeters: number;
+  readonly playerGoreBodyHeightMaxMeters: number;
+  readonly playerGoreSplatsPerCoat: number;
+  readonly puddlePickupRadiusMeters: number;
+  readonly puddlePickupWetnessPerSecond: number;
   readonly regionHeights: RegionHeights;
 }
 
@@ -147,6 +165,18 @@ export function resolveBloodSettings(tier: QualityTier): BloodSettings {
     footstepWetnessGainPerHit: resolve(renderingConfig.bloodFootstepWetnessGainPerHit, tier),
     footstepWetnessDecayPerSecond: resolve(renderingConfig.bloodFootstepWetnessDecayPerSecond, tier),
     footstepWetnessThreshold: resolve(renderingConfig.bloodFootstepWetnessThreshold, tier),
+    dropletStreakLengthFactor: resolve(renderingConfig.bloodDropletStreakLengthFactor, tier),
+    coatRangeMeters: resolve(renderingConfig.bloodCoatRangeMeters, tier),
+    playerGorePoolSize: resolve(renderingConfig.bloodPlayerGorePoolSize, tier),
+    playerGoreLifeSeconds: resolve(renderingConfig.bloodPlayerGoreLifeSeconds, tier),
+    playerGoreSizeMeters: resolve(renderingConfig.bloodPlayerGoreSizeMeters, tier),
+    playerGoreBrightness: resolve(renderingConfig.bloodPlayerGoreBrightness, tier),
+    playerGoreBodyRadiusMeters: resolve(renderingConfig.bloodPlayerGoreBodyRadiusMeters, tier),
+    playerGoreBodyHeightMinMeters: resolve(renderingConfig.bloodPlayerGoreBodyHeightMinMeters, tier),
+    playerGoreBodyHeightMaxMeters: resolve(renderingConfig.bloodPlayerGoreBodyHeightMaxMeters, tier),
+    playerGoreSplatsPerCoat: resolve(renderingConfig.bloodPlayerGoreSplatsPerCoat, tier),
+    puddlePickupRadiusMeters: resolve(renderingConfig.bloodPuddlePickupRadiusMeters, tier),
+    puddlePickupWetnessPerSecond: resolve(renderingConfig.bloodPuddlePickupWetnessPerSecond, tier),
     regionHeights: {
       head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
       torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
@@ -228,8 +258,24 @@ export class BloodSim {
   private readonly cFreshG: Float32Array;
   private readonly cFreshB: Float32Array;
   private readonly cAge: Float32Array;
+  private readonly cFoot: Uint8Array; // 1 = a footprint decal — excluded from puddle pickup so a trail ends (T79)
   private cHead = 0;
   private cCount = 0;
+
+  // --- player BODY-gore SoA (ring buffer, T79). Offsets are BODY-LOCAL (around/up the body); the view adds
+  //     them to the tracked player world pos each frame, so gore FOLLOWS the player without being parented. ---
+  readonly pgX: Float32Array; // body-local X offset
+  readonly pgY: Float32Array; // body-local height up the body
+  readonly pgZ: Float32Array; // body-local Z offset
+  readonly pgSize: Float32Array;
+  readonly pgVis: Float32Array; // 0..1 visibility/shrink factor recomputed each update (1 fresh → 0 dried away)
+  readonly pgr: Float32Array; // fresh (bright) splat colour; the view darkens it by pgVis as it dries
+  readonly pgg: Float32Array;
+  readonly pgb: Float32Array;
+  private readonly pgAge: Float32Array;
+  private readonly pgLife: Float32Array;
+  private pgHead = 0;
+  private pgCount = 0;
 
   readonly dryTarget = DRY_TARGET;
 
@@ -282,6 +328,18 @@ export class BloodSim {
     this.cFreshG = new Float32Array(C);
     this.cFreshB = new Float32Array(C);
     this.cAge = new Float32Array(C);
+    this.cFoot = new Uint8Array(C);
+    const P = Math.max(0, settings.playerGorePoolSize);
+    this.pgX = new Float32Array(P);
+    this.pgY = new Float32Array(P);
+    this.pgZ = new Float32Array(P);
+    this.pgSize = new Float32Array(P);
+    this.pgVis = new Float32Array(P);
+    this.pgr = new Float32Array(P);
+    this.pgg = new Float32Array(P);
+    this.pgb = new Float32Array(P);
+    this.pgAge = new Float32Array(P);
+    this.pgLife = new Float32Array(P);
   }
 
   get dropletCount(): number {
@@ -292,6 +350,16 @@ export class BloodSim {
   }
   get wetness01(): number {
     return this.wetness;
+  }
+  get playerGoreCount(): number {
+    return this.pgCount;
+  }
+  /** Tracked player world position (the body-gore layer follows it; the sim never feeds the sim, V2). */
+  get trackedPlayerX(): number {
+    return this.playerX;
+  }
+  get trackedPlayerZ(): number {
+    return this.playerZ;
   }
 
   /** Inject the render-side surface projector (T77/V54). Called once by BloodView with the scene structures. */
@@ -332,6 +400,7 @@ export class BloodSim {
           this.spray(e.x, y, e.z, dirX, dirZ, goreColor('blood'), energy, dist, ctx, crit, landY);
           // Wall behind the struck body catches a vertical splat (the spray travels along the hit vector).
           this.spawnWallSplat(e.x, y, e.z, dirX, dirZ, goreColor('blood'), dist, ctx);
+          this.coatPlayer(e.x, e.z, goreColor('blood'), energy, ctx); // T79 — splatter gore onto the player body
           this.addWetness(e.x, e.z);
           this.lastImpact = { x: e.x, y, z: e.z, dirX, dirZ, fy: landY };
           this.pending = null;
@@ -356,6 +425,7 @@ export class BloodSim {
               1,
               at.fy,
             );
+            this.coatPlayer(at.x, at.z, goreColor('blood'), 1, ctx); // T79 — a sever near the player coats them
             this.addWetness(at.x, at.z);
           }
           break;
@@ -394,6 +464,16 @@ export class BloodSim {
     const gush = 0.7 + 0.6 * hash01(Math.round(x * 73.1 + z * 19.7));
     const base = Math.max(1, Math.round(this.settings.dropletsPerHit * skew * gush));
     this.sprayN(x, y, z, dirX, dirZ, color, base, dist, ctx, crit, energy, landY);
+    // GUARANTEE >=1 floor splat per visible hit (T79): a settled splat pooled under/just ahead of the struck
+    // body so blood never appears to fall THROUGH the floor. Streaks along travel, sized by energy. All offsets
+    // derive from existing tunables (no magic numbers); pooled by the decal ring buffer.
+    const s = this.settings;
+    const dlen = Math.hypot(dirX, dirZ);
+    const ux = dlen > 1e-6 ? dirX / dlen : 0;
+    const uz = dlen > 1e-6 ? dirZ / dlen : 0;
+    const splatSize = s.dropletSizeMeters * (3 + 3 * energy);
+    const ang = dlen > 1e-6 ? Math.atan2(dirZ, dirX) : rnd() * Math.PI * 2;
+    this.landDecal(x + ux * splatSize * 0.5, landY, z + uz * splatSize * 0.5, ang, s.dropletSpeedMinMps * 0.4, 0, 1, 0, color.r, color.g, color.b, splatSize, false, false);
   }
 
   private sprayN(
@@ -481,7 +561,46 @@ export class BloodSim {
         color.b,
         s.dropletSizeMeters * (1.4 + rnd() * 1.6),
         true,
+        false,
       );
+    }
+  }
+
+  /** Splatter gore onto the PLAYER BODY when a spray happens within coatRange (T79). Stores BODY-LOCAL offsets
+   *  (around + up the body, biased to the side facing the blood source) into a ring buffer; the view repositions
+   *  them to playerWorldPos + localOffset each frame (NOT parented to the player mesh). Pooled + capped (V24);
+   *  render-local RNG only (V2/V3). Brighter than floor blood so it reads on the dark body. */
+  private coatPlayer(srcX: number, srcZ: number, color: Color, energy: number, ctx: BloodIngestContext): void {
+    const s = this.settings;
+    if (!this.havePlayer || this.pgX.length === 0 || ctx.goreIntensity <= 0) return;
+    const dx = this.playerX - srcX;
+    const dz = this.playerZ - srcZ;
+    const dist = Math.hypot(dx, dz);
+    if (dist > s.coatRangeMeters) return;
+    const closeness = 1 - dist / s.coatRangeMeters; // 1 = right on top of the player
+    let count = Math.max(1, Math.round(closeness * closeness * s.playerGoreSplatsPerCoat * (0.4 + energy * 0.8)));
+    if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
+    count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
+    const srcAng = Math.atan2(-dz, -dx); // the body side facing the blood source
+    const R = s.playerGoreBodyRadiusMeters;
+    const hRange = s.playerGoreBodyHeightMaxMeters - s.playerGoreBodyHeightMinMeters;
+    const bright = s.playerGoreBrightness;
+    for (let k = 0; k < count; k++) {
+      if (this.pgX.length === 0) break;
+      const i = this.pgHead;
+      this.pgHead = (this.pgHead + 1) % this.pgX.length;
+      if (this.pgCount < this.pgX.length) this.pgCount++;
+      const ang = srcAng + (rnd() - 0.5) * 2.2; // biased to the near side
+      this.pgX[i] = Math.cos(ang) * R;
+      this.pgY[i] = s.playerGoreBodyHeightMinMeters + rnd() * hRange;
+      this.pgZ[i] = Math.sin(ang) * R;
+      this.pgSize[i] = s.playerGoreSizeMeters * (0.7 + rnd() * 0.9);
+      this.pgAge[i] = 0;
+      this.pgLife[i] = s.playerGoreLifeSeconds * (0.7 + rnd() * 0.6);
+      this.pgVis[i] = 1;
+      this.pgr[i] = Math.min(1, color.r * bright + 0.06);
+      this.pgg[i] = Math.min(1, color.g * bright);
+      this.pgb[i] = Math.min(1, color.b * bright);
     }
   }
 
@@ -502,6 +621,7 @@ export class BloodSim {
     b: number,
     size: number,
     isWall: boolean,
+    isFootprint: boolean,
   ): void {
     const speed = travelSpeed;
     const i = this.cHead;
@@ -514,6 +634,7 @@ export class BloodSim {
     this.cny[i] = ny;
     this.cnz[i] = nz;
     this.cAge[i] = 0;
+    this.cFoot[i] = isFootprint ? 1 : 0;
     // In-plane spin of the length axis: floor → along the travel angle; wall → vertical (gravity run). Jitter both.
     if (isWall) {
       this.cRot[i] = Math.PI / 2 + (rnd() - 0.5) * 0.5;
@@ -560,7 +681,7 @@ export class BloodSim {
         // Only a fraction of droplets stain (size-weighted) — keeps the floor calm (T77/V54). They land on
         // the projected floor/slab height (fy), so interior floors get visible decals (the indoors fix).
         if (rnd() < Math.min(1, (this.dsize[i]! / s.dropletSizeMeters) * s.decalStainChance)) {
-          this.landDecal(this.px[i]!, this.fy[i]!, this.pz[i]!, this.dang[i]!, Math.hypot(this.vx[i]!, this.vz[i]!), 0, 1, 0, this.dr[i]!, this.dg[i]!, this.db[i]!, this.dsize[i]!, false);
+          this.landDecal(this.px[i]!, this.fy[i]!, this.pz[i]!, this.dang[i]!, Math.hypot(this.vx[i]!, this.vz[i]!), 0, 1, 0, this.dr[i]!, this.dg[i]!, this.db[i]!, this.dsize[i]!, false, false);
         }
         const last = --this.dCount;
         if (i !== last) this.moveDroplet(last, i);
@@ -586,7 +707,36 @@ export class BloodSim {
       this.cg[i] = g;
       this.cb[i] = b;
     }
+    // Player body gore (T79): age slowly so it lingers ~10× the floor wet phase, then dry + shrink at the end.
+    // Expired splats collapse to zero visibility (the view scales them to nothing) until the ring buffer reuses
+    // them — no compaction needed.
+    for (let i = 0; i < this.pgCount; i++) {
+      this.pgAge[i]! += dt;
+      const t = this.pgAge[i]! / this.pgLife[i]!;
+      this.pgVis[i] = t >= 1 ? 0 : 1 - t * t * t; // hold fresh, dry/shrink late
+    }
+    this.pickUpFromPuddles(dt);
     this.footsteps(dt);
+  }
+
+  /** Puddle-step pickup (T79): walking over/near a FRESH (still-wet) floor decal soaks the player → builds
+   *  wetness → a bloody footprint trail. The player's OWN footprints are excluded so the trail naturally ends
+   *  once they step off real blood. Reads only the decal ring buffer (V2). */
+  private pickUpFromPuddles(dt: number): void {
+    if (!this.havePlayer) return;
+    const s = this.settings;
+    const r2 = s.puddlePickupRadiusMeters * s.puddlePickupRadiusMeters;
+    for (let i = 0; i < this.cCount; i++) {
+      if (this.cFoot[i]) continue; // never re-soak from our own prints
+      if (this.cny[i]! < 0.5) continue; // floor decals only (not wall splats)
+      if (this.cAge[i]! > s.decalFreshSeconds) continue; // only fresh/wet puddles soak in
+      const ddx = this.cx[i]! - this.playerX;
+      const ddz = this.cz[i]! - this.playerZ;
+      if (ddx * ddx + ddz * ddz <= r2) {
+        this.wetness = Math.min(4, this.wetness + s.puddlePickupWetnessPerSecond * dt);
+        return; // one fresh puddle underfoot is enough this frame
+      }
+    }
   }
 
   /** Bloody-footprint stand-in: while the player is wet enough and moving, drop alternating-foot floor
@@ -612,7 +762,7 @@ export class BloodSim {
     // Cast the footstep floor probe down from torso height (above any floor slab, below the roof).
     const fy = this.resolveFloorY(fx, fz, s.regionHeights.torso);
     // Small + subtle prints that grow only modestly with coverage (T77/V54 — not blobby puddles).
-    this.landDecal(fx, fy, fz, Math.atan2(mvz, mvx), moved, 0, 1, 0, BLOOD.r * 0.85, BLOOD.g, BLOOD.b, s.footstepPrintSizeMeters * (0.6 + cover * 0.8), false);
+    this.landDecal(fx, fy, fz, Math.atan2(mvz, mvx), moved, 0, 1, 0, BLOOD.r * 0.85, BLOOD.g, BLOOD.b, s.footstepPrintSizeMeters * (0.6 + cover * 0.8), false, true);
     this.footTimer = Math.max(0.04, s.footstepCadenceSeconds - cover * 0.08); // soaked → closer prints
   }
 
@@ -636,13 +786,15 @@ export class BloodSim {
  *  with a few harmonics (lobes) and the −X end tapers to a point while the +X end (the streak HEAD, aligned
  *  to travel by the per-decal rotation) stays rounded — so a stretched instance reads as a teardrop streak. */
 function makeBlobGeometry(): CircleGeometry {
-  const g = new CircleGeometry(0.5, 20);
+  const g = new CircleGeometry(0.5, 24);
   const pos = g.attributes.position!;
   for (let i = 1; i < pos.count; i++) {
     const x = pos.getX(i)!;
     const y = pos.getY(i)!;
     const ang = Math.atan2(y, x);
-    const lobe = 1 + 0.2 * Math.sin(ang * 3 + 0.6) + 0.12 * Math.sin(ang * 5 - 1.1) + 0.07 * Math.sin(ang * 8);
+    // Stronger harmonic rim wobble (T79) → a more irregular, splatty outline. Per-decal rotation + non-uniform
+    // length/width (cRot/cLen/cWid) then break the shared shape so no two instances read the same.
+    const lobe = 1 + 0.26 * Math.sin(ang * 3 + 0.6) + 0.15 * Math.sin(ang * 5 - 1.1) + 0.09 * Math.sin(ang * 8 + 0.3) + 0.05 * Math.sin(ang * 11);
     // Taper the tail (−X, ang≈±π) to a point; keep the head (+X, ang≈0) round → asymmetric teardrop.
     const taper = 0.55 + 0.45 * (0.5 + 0.5 * Math.cos(ang));
     const f = lobe * taper;
@@ -655,6 +807,18 @@ function makeBlobGeometry(): CircleGeometry {
 
 const DECAL_DEFAULT_NORMAL = new Vector3(0, 0, 1); // CircleGeometry faces +Z before orientation
 const DECAL_SURFACE_OFFSET = 0.02; // m — lift the decal a hair off the surface along its normal (no z-fight)
+const DROPLET_LONG_AXIS = new Vector3(1, 0, 0); // the sphere's +X is stretched ALONG the droplet velocity (streak)
+// Player-body gore is slapped flat AGAINST the body surface: spread it tangentially and thin it radially so a
+// splat hugs the body instead of poking out as a ball (mirrors the reference body-coating look, T79).
+const PLAYER_GORE_SPREAD = 1.15;
+const PLAYER_GORE_RADIAL_FLATTEN = 0.32;
+
+/** Pure helper (T79): the instance scale of one airborne droplet — its long axis stretches ALONG velocity with
+ *  speed (a motion streak) while the cross-section stays = size (a thin streak, never a ball). Unit-tested. */
+export function dropletStreakDims(speed: number, size: number, lengthFactor: number): { long: number; cross: number } {
+  const sp = speed > 0 ? speed : 0;
+  return { long: size * (1 + sp * lengthFactor), cross: size };
+}
 
 /**
  * Thin GPU view: owns the two InstancedMeshes (droplets + floor decals) and mirrors the pure BloodSim state
@@ -665,9 +829,11 @@ export class BloodView {
   readonly sim: BloodSim;
   private readonly dropMesh: InstancedMesh;
   private readonly decalMesh: InstancedMesh;
+  private readonly pgMesh: InstancedMesh; // player BODY-gore layer (T79)
   private readonly dummy = new Object3D();
   private readonly tmp = new Color();
   private readonly normalScratch = new Vector3();
+  private readonly velScratch = new Vector3();
 
   constructor(settings: BloodSettings, registry: ResourceRegistry) {
     this.sim = new BloodSim(settings);
@@ -677,15 +843,41 @@ export class BloodView {
     primeInstanced(this.dropMesh);
 
     const decalGeo = registry.track(makeBlobGeometry(), 'geometry', 'blood.decalGeo');
-    const decalMat = registry.track(new MeshBasicMaterial({ name: 'blood.decal', toneMapped: false }), 'material', 'blood.decalMat');
+    // Floor splats keep depth TEST on (so walls / units / the player correctly OCCLUDE them — no blood drawn
+    // over the player), but depthWrite OFF + a polygon-offset bias toward the camera so they win the coplanar
+    // fight with the floor surface without z-fighting. Visibility indoors is solved at the SOURCE: the
+    // cutaway-faded roof/upper-walls stop depth-writing (blockScene) so they don't occlude the interior.
+    const decalMat = registry.track(
+      new MeshBasicMaterial({
+        name: 'blood.decal',
+        toneMapped: false,
+        transparent: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+      'material',
+      'blood.decalMat',
+    );
     this.decalMesh = registry.track(new InstancedMesh(decalGeo, decalMat, Math.max(1, settings.decalPoolSize)), 'buffer', 'blood.decalMesh');
     primeInstanced(this.decalMesh);
-    this.decalMesh.renderOrder = 1; // over the floor, under airborne droplets
+    this.decalMesh.renderOrder = 1; // draw after the opaque floor, before airborne droplets
+
+    // Player BODY-gore layer (T79): solid faceted blobs slapped on the body. Opaque matter (fades by SHRINK, not
+    // alpha) so no transparency needed; depthTest stays ON (V56 — the body/world correctly occludes splats on the
+    // far side). Lives in WORLD space and is repositioned to playerWorldPos + body-local offset each frame (NOT
+    // parented to the player mesh). Brighter than floor blood so it reads on the dark body.
+    const pgGeo = registry.track(new SphereGeometry(1, 7, 6), 'geometry', 'blood.playerGoreGeo');
+    const pgMat = registry.track(new MeshBasicMaterial({ name: 'blood.playerGore', toneMapped: false }), 'material', 'blood.playerGoreMat');
+    this.pgMesh = registry.track(new InstancedMesh(pgGeo, pgMat, Math.max(1, settings.playerGorePoolSize)), 'buffer', 'blood.playerGoreMesh');
+    primeInstanced(this.pgMesh);
+    this.pgMesh.renderOrder = 2; // over the body + floor decals so the coating reads
   }
 
   /** Add the blood meshes to the scene graph (parent owns graph membership; registry owns disposal). */
   attachTo(scene: Scene | Object3D): void {
-    scene.add(this.dropMesh, this.decalMesh);
+    scene.add(this.dropMesh, this.decalMesh, this.pgMesh);
   }
 
   consume(events: readonly VisualEvent[], ctx: BloodIngestContext): void {
@@ -697,10 +889,24 @@ export class BloodView {
     this.sim.update(dt);
     const sim = this.sim;
     const nd = sim.dropletCount;
+    const streakFactor = sim.settings.dropletStreakLengthFactor;
     for (let i = 0; i < nd; i++) {
       this.dummy.position.set(sim.px[i]!, sim.py[i]!, sim.pz[i]!);
-      this.dummy.rotation.set(0, 0, 0);
-      this.dummy.scale.setScalar(sim.dsize[i]!);
+      // Stretch the droplet ALONG its velocity so a fast droplet reads as a motion STREAK, not a ball (T79):
+      // orient the sphere's long (+X) axis to the velocity vector and scale only that axis with speed.
+      const vx = sim.vx[i]!;
+      const vy = sim.vy[i]!;
+      const vz = sim.vz[i]!;
+      const speed = Math.hypot(vx, vy, vz);
+      const dims = dropletStreakDims(speed, sim.dsize[i]!, streakFactor);
+      if (speed > 1e-4) {
+        this.velScratch.set(vx / speed, vy / speed, vz / speed);
+        this.dummy.quaternion.setFromUnitVectors(DROPLET_LONG_AXIS, this.velScratch);
+        this.dummy.scale.set(dims.long, dims.cross, dims.cross);
+      } else {
+        this.dummy.quaternion.identity();
+        this.dummy.scale.setScalar(dims.cross);
+      }
       this.dummy.updateMatrix();
       this.dropMesh.setMatrixAt(i, this.dummy.matrix);
       this.dropMesh.setColorAt(i, this.tmp.setRGB(sim.dr[i]!, sim.dg[i]!, sim.db[i]!));
@@ -729,6 +935,28 @@ export class BloodView {
     this.decalMesh.count = nc;
     this.decalMesh.instanceMatrix.needsUpdate = true;
     if (this.decalMesh.instanceColor) this.decalMesh.instanceColor.needsUpdate = true;
+
+    // Player BODY-gore (T79): reposition each splat to the tracked player world pos + its body-local offset, slap
+    // it flat against the body surface (radial normal), shrink + darken as it dries. Expired splats (pgVis 0)
+    // collapse to zero scale → invisible until the ring buffer reuses them.
+    const np = sim.playerGoreCount;
+    const px = sim.trackedPlayerX;
+    const pz = sim.trackedPlayerZ;
+    for (let i = 0; i < np; i++) {
+      const vis = sim.pgVis[i]!;
+      const sc = sim.pgSize[i]! * vis;
+      this.dummy.position.set(px + sim.pgX[i]!, sim.pgY[i]!, pz + sim.pgZ[i]!);
+      this.dummy.quaternion.identity();
+      this.dummy.rotation.set(0, Math.atan2(sim.pgX[i]!, sim.pgZ[i]!), 0); // face the splat outward from the body
+      this.dummy.scale.set(sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_RADIAL_FLATTEN);
+      this.dummy.updateMatrix();
+      this.pgMesh.setMatrixAt(i, this.dummy.matrix);
+      const drk = 0.45 + 0.55 * vis; // darken as it dries
+      this.pgMesh.setColorAt(i, this.tmp.setRGB(sim.pgr[i]! * drk, sim.pgg[i]! * drk, sim.pgb[i]! * drk));
+    }
+    this.pgMesh.count = np;
+    this.pgMesh.instanceMatrix.needsUpdate = true;
+    if (this.pgMesh.instanceColor) this.pgMesh.instanceColor.needsUpdate = true;
   }
 }
 

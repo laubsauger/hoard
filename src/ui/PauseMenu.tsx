@@ -1,15 +1,24 @@
-// T49 / V1 / V29 — pause menu. Shown when the session phase is 'paused' (ESC toggles it; the sim stops
-// advancing in the viewport while paused). React owns this shell affordance only — it never touches
-// per-frame world state. The session phase is the single source of truth shared with the engine loop.
+// T49 / V1 / V12 — pause menu. Shown when session.paused is true (ESC toggles it; the sim HALTS in the
+// viewport loop while paused — not just the UI). React owns this shell affordance only — it never touches
+// per-frame world state. The session `paused` flag is the single source of truth shared with the engine
+// loop; the single-player time-scale (slowdown) is honoured by the same loop.
 
 import { useSession } from '../stores/react';
-import { sessionStore } from '../stores/session';
+import { sessionStore, TIME_SCALE_PRESETS } from '../stores/session';
+import { uiStore } from '../stores/ui';
 
 export function PauseMenu() {
-  const paused = useSession((s) => s.phase === 'paused');
+  const paused = useSession((s) => s.paused);
+  const timeScale = useSession((s) => s.timeScale);
   if (!paused) return null;
 
-  const resume = () => sessionStore.getState().setPhase('playing');
+  const sess = sessionStore.getState();
+  const resume = () => sess.setPaused(false);
+  const openSettings = () => uiStore.getState().openPanel('settings');
+  const quit = () => {
+    sess.setPaused(false);
+    sess.setPhase('menu');
+  };
 
   return (
     <div className="hbn-pause" role="dialog" aria-modal="true" aria-label="Game paused">
@@ -18,10 +27,31 @@ export function PauseMenu() {
         <button type="button" className="hbn-pause__btn hbn-pause__btn--primary" onClick={resume} autoFocus>
           Resume
         </button>
-        <button type="button" className="hbn-pause__btn" onClick={() => sessionStore.getState().setPhase('menu')}>
+        <button type="button" className="hbn-pause__btn" onClick={openSettings}>
+          Settings
+        </button>
+        <button type="button" className="hbn-pause__btn" onClick={quit}>
           Quit to menu
         </button>
-        <p className="hbn-pause__hint">Esc to resume · settings in the accessibility panel</p>
+
+        <div className="hbn-pause__speed" role="group" aria-label="Simulation speed">
+          <span className="hbn-pause__speed-label">Speed</span>
+          <div className="hbn-pause__speed-btns">
+            {TIME_SCALE_PRESETS.map((scale) => (
+              <button
+                key={scale}
+                type="button"
+                className={`hbn-pause__chip${timeScale === scale ? ' is-active' : ''}`}
+                aria-pressed={timeScale === scale}
+                onClick={() => sess.setTimeScale(scale)}
+              >
+                {scale}×
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <p className="hbn-pause__hint">Esc to resume · speed applies on resume</p>
       </div>
     </div>
   );

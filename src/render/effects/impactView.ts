@@ -1,0 +1,523 @@
+// T80 / T81 — V57 surface-impact response. Shooting a WALL / structure (or a clean miss that stops on
+// structure) used to read like blood beyond range, because the only marker was a reddish impact spark. This
+// module gives the world a DISTINCT, clearly NON-RED structure response that can never be mistaken for gore:
+//
+//   (a) SPARK BURST  — a short-lived clutch of bright yellow-white instances thrown OUT of the struck surface
+//                      (opposite the bullet's travel = along the surface normal, back toward the shooter),
+//                      arcing under gravity + drag and fading fast.
+//   (b) BULLET HOLE  — a small persistent DARK disc decal projected onto the struck surface, oriented to its
+//                      normal, long-lived, recycled oldest-first by a ring buffer.
+//   (c) WOUND        — a small DARK mark stamped at the struck region of a BODY (zombie OR player), oriented
+//                      to face the shooter, accumulating + capped (T81).
+//
+// Blood is UNCHANGED and orthogonal: bloodSpray fires only on a real zombie damage-hit (bloodView). The wiring
+// in GameViewport branches on the ShotResult so the wall response (spark + hole) NEVER fires on a body hit and
+// the wound NEVER fires on a structure hit (see GameViewport).
+//
+// Pure-sim/thin-view split mirrors bloodView/gibView so the spawn + ageing logic is unit-tested without a GPU.
+// Pooled + HARD-capped, no per-frame allocation (V24). Render-local RNG only (V2/V3). r184 binding-safe (V33):
+// solid geometry + a PRE-CREATED instanceColor InstancedBufferAttribute. Decals follow the V56 depth policy:
+// depthTest ON + depthWrite OFF + polygon-offset — NEVER depthTest:false.
+
+import {
+  InstancedMesh,
+  IcosahedronGeometry,
+  CircleGeometry,
+  MeshBasicMaterial,
+  AdditiveBlending,
+  Object3D,
+  Color,
+  Vector3,
+  DynamicDrawUsage,
+  InstancedBufferAttribute,
+  type Scene,
+} from 'three';
+import type { AnatomyRegion } from '../../game/core/contracts/events';
+import { resolve } from '../../config/spec';
+import { renderingConfig } from '../../config/domains/rendering';
+import type { QualityTier } from '../../config/types';
+import type { ResourceRegistry } from '../engine/resources';
+import { regionImpactHeight, type RegionHeights } from './combatFeedback';
+
+// Bullet hole on structure: a dark, soot-edged puncture — clearly inert matter, distinct from any red gore.
+const HOLE_COLOR = new Color(0.05, 0.05, 0.055);
+// Wound on a body: a dark maroon mark (much darker than fresh blood spray so it reads as a torn entry wound,
+// not a splatter). Still on the red axis but very dark — it sits ON the body, paired with the bright blood jet.
+const WOUND_COLOR = new Color(0.14, 0.018, 0.018);
+
+export interface ImpactSettings {
+  readonly sparkPoolSize: number;
+  readonly sparkCount: number;
+  readonly sparkSizeMeters: number;
+  readonly sparkLifeSeconds: number;
+  readonly sparkSpeedMinMps: number;
+  readonly sparkSpeedMaxMps: number;
+  readonly sparkSpreadRad: number;
+  readonly sparkGravityMps2: number;
+  readonly sparkDragPerSecond: number;
+  readonly sparkColor: { readonly r: number; readonly g: number; readonly b: number };
+  readonly holePoolSize: number;
+  readonly holeSizeMeters: number;
+  readonly holeLifeSeconds: number;
+  readonly holeFadeFraction: number;
+  readonly woundPoolSize: number;
+  readonly woundSizeMeters: number;
+  readonly woundLifeSeconds: number;
+  readonly woundFadeFraction: number;
+  readonly regionHeights: RegionHeights;
+}
+
+export function resolveImpactSettings(tier: QualityTier): ImpactSettings {
+  return {
+    sparkPoolSize: resolve(renderingConfig.impactSparkPoolSize, tier),
+    sparkCount: resolve(renderingConfig.impactSparkCount, tier),
+    sparkSizeMeters: resolve(renderingConfig.impactSparkSizeMeters, tier),
+    sparkLifeSeconds: resolve(renderingConfig.impactSparkLifeSeconds, tier),
+    sparkSpeedMinMps: resolve(renderingConfig.impactSparkSpeedMinMps, tier),
+    sparkSpeedMaxMps: resolve(renderingConfig.impactSparkSpeedMaxMps, tier),
+    sparkSpreadRad: resolve(renderingConfig.impactSparkSpreadRad, tier),
+    sparkGravityMps2: resolve(renderingConfig.impactSparkGravityMps2, tier),
+    sparkDragPerSecond: resolve(renderingConfig.impactSparkDragPerSecond, tier),
+    sparkColor: {
+      r: resolve(renderingConfig.impactSparkColorR, tier),
+      g: resolve(renderingConfig.impactSparkColorG, tier),
+      b: resolve(renderingConfig.impactSparkColorB, tier),
+    },
+    holePoolSize: resolve(renderingConfig.impactHolePoolSize, tier),
+    holeSizeMeters: resolve(renderingConfig.impactHoleSizeMeters, tier),
+    holeLifeSeconds: resolve(renderingConfig.impactHoleLifeSeconds, tier),
+    holeFadeFraction: resolve(renderingConfig.impactHoleFadeFraction, tier),
+    woundPoolSize: resolve(renderingConfig.impactWoundPoolSize, tier),
+    woundSizeMeters: resolve(renderingConfig.impactWoundSizeMeters, tier),
+    woundLifeSeconds: resolve(renderingConfig.impactWoundLifeSeconds, tier),
+    woundFadeFraction: resolve(renderingConfig.impactWoundFadeFraction, tier),
+    regionHeights: {
+      head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
+      torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
+      leg: resolve(renderingConfig.combatGoreHeightLegMeters, tier),
+    },
+  };
+}
+
+/** Accessibility context for one impact (V29). goreIntensity 0 suppresses WOUNDS (gore); reduceFlashes thins +
+ *  dims the bright SPARK burst (photosensitivity). Bullet HOLES are inert structure marks — never suppressed. */
+export interface ImpactIngestContext {
+  readonly goreIntensity: number;
+  readonly reduceFlashes: boolean;
+}
+
+// Cheap render-local PRNG — VISUAL only, never touches sim/determinism (V2/V3).
+let _seed = 0x2545f491 >>> 0;
+function rnd(): number {
+  _seed = (_seed * 1664525 + 1013904223) >>> 0;
+  return _seed / 0xffffffff;
+}
+
+/**
+ * Pure impact simulation (no GPU — unit-tested). Three pools:
+ *   - sparks: compacted SoA (live entries [0,sparkCount)), swap-removed on expiry, hard-capped.
+ *   - holes : ring buffer (persistent dark structure decals; oldest recycled past the cap).
+ *   - wounds: ring buffer (dark body marks; oldest recycled past the cap).
+ * The view reads the public SoA each frame to lay out the instanced batches; nothing here touches Three.js.
+ */
+export class ImpactSim {
+  // --- spark SoA (compacted: live entries are [0, sCount)) ---
+  readonly sx: Float32Array;
+  readonly sy: Float32Array;
+  readonly sz: Float32Array;
+  readonly svx: Float32Array;
+  readonly svy: Float32Array;
+  readonly svz: Float32Array;
+  readonly sSize: Float32Array;
+  readonly sFade: Float32Array; // 0..1 brightness/visibility, recomputed each update (1 fresh -> 0 expired)
+  private readonly sAge: Float32Array;
+  private readonly sLife: Float32Array;
+  private readonly sBright: Float32Array; // per-spark spawn brightness (reduce-flashes dims it)
+  private sCount = 0;
+
+  // --- bullet-hole SoA (ring buffer) ---
+  readonly hx: Float32Array;
+  readonly hy: Float32Array;
+  readonly hz: Float32Array;
+  readonly hnx: Float32Array; // surface normal the disc is oriented to
+  readonly hny: Float32Array;
+  readonly hnz: Float32Array;
+  readonly hRot: Float32Array;
+  readonly hVis: Float32Array; // 0..1 scale/visibility, recomputed each update
+  private readonly hAge: Float32Array;
+  private hHead = 0;
+  private hCount = 0;
+
+  // --- wound SoA (ring buffer) ---
+  readonly wx: Float32Array;
+  readonly wy: Float32Array;
+  readonly wz: Float32Array;
+  readonly wnx: Float32Array; // body-facing normal the disc is oriented to (toward the shooter)
+  readonly wny: Float32Array;
+  readonly wnz: Float32Array;
+  readonly wRot: Float32Array;
+  readonly wVis: Float32Array; // 0..1 scale/visibility, recomputed each update
+  private readonly wAge: Float32Array;
+  private wHead = 0;
+  private wCount = 0;
+
+  // scratch basis vectors for the spark cone (no per-spawn allocation)
+  private readonly _t = new Vector3();
+  private readonly _b = new Vector3();
+  private readonly _n = new Vector3();
+
+  constructor(readonly settings: ImpactSettings) {
+    const S = Math.max(1, settings.sparkPoolSize);
+    this.sx = new Float32Array(S);
+    this.sy = new Float32Array(S);
+    this.sz = new Float32Array(S);
+    this.svx = new Float32Array(S);
+    this.svy = new Float32Array(S);
+    this.svz = new Float32Array(S);
+    this.sSize = new Float32Array(S);
+    this.sFade = new Float32Array(S);
+    this.sAge = new Float32Array(S);
+    this.sLife = new Float32Array(S);
+    this.sBright = new Float32Array(S);
+    const H = Math.max(1, settings.holePoolSize);
+    this.hx = new Float32Array(H);
+    this.hy = new Float32Array(H);
+    this.hz = new Float32Array(H);
+    this.hnx = new Float32Array(H);
+    this.hny = new Float32Array(H);
+    this.hnz = new Float32Array(H);
+    this.hRot = new Float32Array(H);
+    this.hVis = new Float32Array(H);
+    this.hAge = new Float32Array(H);
+    const W = Math.max(1, settings.woundPoolSize);
+    this.wx = new Float32Array(W);
+    this.wy = new Float32Array(W);
+    this.wz = new Float32Array(W);
+    this.wnx = new Float32Array(W);
+    this.wny = new Float32Array(W);
+    this.wnz = new Float32Array(W);
+    this.wRot = new Float32Array(W);
+    this.wVis = new Float32Array(W);
+    this.wAge = new Float32Array(W);
+  }
+
+  get sparkCount(): number {
+    return this.sCount;
+  }
+  get holeCount(): number {
+    return this.hCount;
+  }
+  get woundCount(): number {
+    return this.wCount;
+  }
+
+  /**
+   * STRUCTURE hit (T80): a clean miss / shot that stopped on a wall. Stamps a persistent bullet HOLE at the
+   * struck surface point oriented to its normal, and throws a bright SPARK burst OUT of the surface (along the
+   * normal = opposite the bullet's inward travel). (nx,ny,nz) is the world-space surface normal pointing back
+   * toward the shooter. NOT gore — bullet holes are inert and always shown; reduceFlashes thins/dims sparks.
+   */
+  structureImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, ctx: ImpactIngestContext): void {
+    const nlen = Math.hypot(nx, ny, nz);
+    if (nlen < 1e-6) return;
+    const ux = nx / nlen;
+    const uy = ny / nlen;
+    const uz = nz / nlen;
+    this.addHole(x, y, z, ux, uy, uz);
+    this.burstSparks(x, y, z, ux, uy, uz, ctx);
+  }
+
+  /**
+   * BODY hit (T81): stamp a dark WOUND mark at the struck region of a body. `baseY` is the body base (ground);
+   * the region->height map lifts it to the struck band. (faceX,faceZ) points back toward the shooter so the
+   * disc faces the camera/shooter. Gore — suppressed when goreIntensity <= 0 (V29).
+   */
+  wound(x: number, baseY: number, z: number, region: AnatomyRegion, faceX: number, faceZ: number, ctx: ImpactIngestContext): void {
+    if (ctx.goreIntensity <= 0 || this.wx.length === 0) return;
+    const flen = Math.hypot(faceX, faceZ);
+    const fnx = flen > 1e-6 ? faceX / flen : 0;
+    const fnz = flen > 1e-6 ? faceZ / flen : 1;
+    const wy = baseY + regionImpactHeight(region, this.settings.regionHeights);
+    const i = this.wHead;
+    this.wHead = (this.wHead + 1) % this.wx.length; // ring buffer — oldest recycled (V24)
+    if (this.wCount < this.wx.length) this.wCount++;
+    this.wx[i] = x;
+    this.wy[i] = wy;
+    this.wz[i] = z;
+    this.wnx[i] = fnx;
+    this.wny[i] = 0;
+    this.wnz[i] = fnz;
+    this.wRot[i] = rnd() * Math.PI * 2;
+    this.wVis[i] = 1;
+    this.wAge[i] = 0;
+  }
+
+  private addHole(x: number, y: number, z: number, ux: number, uy: number, uz: number): void {
+    if (this.hx.length === 0) return;
+    const i = this.hHead;
+    this.hHead = (this.hHead + 1) % this.hx.length; // ring buffer — oldest recycled (V24)
+    if (this.hCount < this.hx.length) this.hCount++;
+    this.hx[i] = x;
+    this.hy[i] = y;
+    this.hz[i] = z;
+    this.hnx[i] = ux;
+    this.hny[i] = uy;
+    this.hnz[i] = uz;
+    this.hRot[i] = rnd() * Math.PI * 2;
+    this.hVis[i] = 1;
+    this.hAge[i] = 0;
+  }
+
+  /** Throw the spark clutch along the +normal within a cone, biased by speed. Compacted pool, hard-capped (V24). */
+  private burstSparks(x: number, y: number, z: number, ux: number, uy: number, uz: number, ctx: ImpactIngestContext): void {
+    const s = this.settings;
+    let n = s.sparkCount;
+    if (ctx.reduceFlashes) n = Math.max(1, Math.round(n * 0.5)); // V29 — thin the flash
+    const bright = ctx.reduceFlashes ? 0.5 : 1; // V29 — dim the flash for photosensitivity
+    // Build an orthonormal basis (t,b) spanning the plane perpendicular to the normal so the cone scatters
+    // evenly around it. Pick the world axis least aligned with the normal to avoid a degenerate cross.
+    this._n.set(ux, uy, uz);
+    if (Math.abs(uy) < 0.99) this._t.set(0, 1, 0);
+    else this._t.set(1, 0, 0);
+    this._t.cross(this._n).normalize();
+    this._b.copy(this._n).cross(this._t).normalize();
+    for (let k = 0; k < n; k++) {
+      if (this.sCount >= this.sx.length) break; // hard cap (V24) — never grows.
+      const i = this.sCount++;
+      const theta = rnd() * s.sparkSpreadRad; // angle off the normal
+      const phi = rnd() * Math.PI * 2; // around the normal
+      const ct = Math.cos(theta);
+      const st = Math.sin(theta);
+      const cp = Math.cos(phi);
+      const sp = Math.sin(phi);
+      // direction = n*cos(theta) + (t*cos(phi)+b*sin(phi))*sin(theta) — a unit vector inside the cone.
+      const dx = ux * ct + (this._t.x * cp + this._b.x * sp) * st;
+      const dy = uy * ct + (this._t.y * cp + this._b.y * sp) * st;
+      const dz = uz * ct + (this._t.z * cp + this._b.z * sp) * st;
+      const speed = s.sparkSpeedMinMps + rnd() * (s.sparkSpeedMaxMps - s.sparkSpeedMinMps);
+      this.sx[i] = x;
+      this.sy[i] = y;
+      this.sz[i] = z;
+      this.svx[i] = dx * speed;
+      this.svy[i] = dy * speed;
+      this.svz[i] = dz * speed;
+      this.sSize[i] = s.sparkSizeMeters * (0.5 + rnd() * 0.8);
+      this.sAge[i] = 0;
+      this.sLife[i] = s.sparkLifeSeconds * (0.6 + rnd() * 0.6); // stagger so the clutch doesn't vanish in lockstep
+      this.sBright[i] = bright;
+      this.sFade[i] = bright;
+    }
+  }
+
+  update(dt: number): void {
+    if (dt < 0) throw new Error(`dt must be non-negative, got ${dt}`);
+    const s = this.settings;
+    const drag = Math.max(0, 1 - s.sparkDragPerSecond * dt);
+    // Sparks: integrate (gravity + drag), age, fade; swap-remove on expiry (compacted pool).
+    for (let i = this.sCount - 1; i >= 0; i--) {
+      this.sAge[i]! += dt;
+      if (this.sAge[i]! >= this.sLife[i]!) {
+        const last = --this.sCount;
+        if (i !== last) this.moveSpark(last, i);
+        continue;
+      }
+      this.svy[i]! -= s.sparkGravityMps2 * dt;
+      this.svx[i]! *= drag;
+      this.svy[i]! *= drag;
+      this.svz[i]! *= drag;
+      this.sx[i]! += this.svx[i]! * dt;
+      this.sy[i]! += this.svy[i]! * dt;
+      this.sz[i]! += this.svz[i]! * dt;
+      // Fade brightness fast over the spark life (quadratic for a hot-then-gone flash).
+      const t = this.sAge[i]! / this.sLife[i]!;
+      this.sFade[i] = this.sBright[i]! * (1 - t) * (1 - t);
+    }
+    // Bullet holes: persist at full size, then a gentle end-of-life shrink/fade before the ring buffer recycles.
+    ageDecals(this.hAge, this.hVis, this.hCount, dt, s.holeLifeSeconds, s.holeFadeFraction);
+    // Wounds: same persistence + fade profile (their own life/fade tunables).
+    ageDecals(this.wAge, this.wVis, this.wCount, dt, s.woundLifeSeconds, s.woundFadeFraction);
+  }
+
+  private moveSpark(from: number, to: number): void {
+    this.sx[to] = this.sx[from]!;
+    this.sy[to] = this.sy[from]!;
+    this.sz[to] = this.sz[from]!;
+    this.svx[to] = this.svx[from]!;
+    this.svy[to] = this.svy[from]!;
+    this.svz[to] = this.svz[from]!;
+    this.sSize[to] = this.sSize[from]!;
+    this.sFade[to] = this.sFade[from]!;
+    this.sAge[to] = this.sAge[from]!;
+    this.sLife[to] = this.sLife[from]!;
+    this.sBright[to] = this.sBright[from]!;
+  }
+}
+
+/** Age a ring-buffer decal pool in place: hold full visibility, then linearly fade the final fadeFraction of
+ *  the lifetime to 0. Expired entries collapse to 0 visibility until the ring buffer reuses the slot (V24). */
+function ageDecals(age: Float32Array, vis: Float32Array, count: number, dt: number, life: number, fadeFraction: number): void {
+  const fadeStart = life * (1 - fadeFraction);
+  for (let i = 0; i < count; i++) {
+    age[i]! += dt;
+    const a = age[i]!;
+    if (a >= life) {
+      vis[i] = 0;
+    } else if (a > fadeStart) {
+      vis[i] = Math.max(0, (life - a) / (life * fadeFraction));
+    } else {
+      vis[i] = 1;
+    }
+  }
+}
+
+const DECAL_DEFAULT_NORMAL = new Vector3(0, 0, 1); // CircleGeometry faces +Z before orientation
+const DECAL_SURFACE_OFFSET = 0.02; // m — lift the decal a hair off the surface along its normal (no z-fight)
+
+/**
+ * Thin GPU view: owns three InstancedMeshes (sparks + bullet holes + wounds) and mirrors the pure ImpactSim
+ * state onto them each frame. r184 binding-safe — solid geometry + a PRE-CREATED instanceColor (V33). Sparks
+ * are an ADDITIVE bright bead; decals follow the V56 depth policy (depthTest ON, depthWrite OFF, polygon-offset).
+ * Every resource is tracked for disposal (V24).
+ */
+export class ImpactView {
+  readonly sim: ImpactSim;
+  private readonly sparkMesh: InstancedMesh;
+  private readonly holeMesh: InstancedMesh;
+  private readonly woundMesh: InstancedMesh;
+  private readonly dummy = new Object3D();
+  private readonly tmp = new Color();
+  private readonly normalScratch = new Vector3();
+
+  constructor(settings: ImpactSettings, registry: ResourceRegistry) {
+    this.sim = new ImpactSim(settings);
+
+    // ---- sparks: tiny faceted bright bead, additive so the burst pops as a hot flash (non-red) ----
+    const sparkGeo = registry.track(new IcosahedronGeometry(1, 0), 'geometry', 'impact.sparkGeo');
+    const sparkMat = registry.track(
+      new MeshBasicMaterial({ name: 'impact.spark', toneMapped: false, transparent: true, blending: AdditiveBlending, depthWrite: false }),
+      'material',
+      'impact.sparkMat',
+    );
+    this.sparkMesh = registry.track(new InstancedMesh(sparkGeo, sparkMat, Math.max(1, settings.sparkPoolSize)), 'buffer', 'impact.sparkMesh');
+    primeInstanced(this.sparkMesh);
+    this.sparkMesh.renderOrder = 3;
+
+    // ---- bullet holes: dark disc projected on the surface. V56 depth policy. ----
+    const holeGeo = registry.track(new CircleGeometry(0.5, 16), 'geometry', 'impact.holeGeo');
+    const holeMat = registry.track(
+      new MeshBasicMaterial({
+        name: 'impact.hole',
+        toneMapped: false,
+        transparent: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+      'material',
+      'impact.holeMat',
+    );
+    this.holeMesh = registry.track(new InstancedMesh(holeGeo, holeMat, Math.max(1, settings.holePoolSize)), 'buffer', 'impact.holeMesh');
+    primeInstanced(this.holeMesh);
+    this.holeMesh.renderOrder = 1;
+
+    // ---- wounds: dark maroon mark on the body. V56 depth policy. ----
+    const woundGeo = registry.track(new CircleGeometry(0.5, 16), 'geometry', 'impact.woundGeo');
+    const woundMat = registry.track(
+      new MeshBasicMaterial({
+        name: 'impact.wound',
+        toneMapped: false,
+        transparent: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
+      }),
+      'material',
+      'impact.woundMat',
+    );
+    this.woundMesh = registry.track(new InstancedMesh(woundGeo, woundMat, Math.max(1, settings.woundPoolSize)), 'buffer', 'impact.woundMesh');
+    primeInstanced(this.woundMesh);
+    this.woundMesh.renderOrder = 2;
+  }
+
+  /** Add the impact meshes to the scene graph (parent owns graph membership; registry owns disposal). */
+  attachTo(scene: Scene | Object3D): void {
+    scene.add(this.sparkMesh, this.holeMesh, this.woundMesh);
+  }
+
+  /** STRUCTURE hit — bullet hole + spark burst (T80). */
+  structureImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, ctx: ImpactIngestContext): void {
+    this.sim.structureImpact(x, y, z, nx, ny, nz, ctx);
+  }
+
+  /** BODY hit — dark wound mark (T81). */
+  wound(x: number, baseY: number, z: number, region: AnatomyRegion, faceX: number, faceZ: number, ctx: ImpactIngestContext): void {
+    this.sim.wound(x, baseY, z, region, faceX, faceZ, ctx);
+  }
+
+  /** Advance the sim then mirror its SoA onto the instanced batches. */
+  update(dt: number): void {
+    this.sim.update(dt);
+    const sim = this.sim;
+    const sparkColor = sim.settings.sparkColor;
+
+    // ---- sparks ----
+    const ns = sim.sparkCount;
+    for (let i = 0; i < ns; i++) {
+      const f = sim.sFade[i]!;
+      this.dummy.position.set(sim.sx[i]!, sim.sy[i]!, sim.sz[i]!);
+      this.dummy.quaternion.identity();
+      this.dummy.scale.setScalar(sim.sSize[i]! * Math.max(0.0001, f)); // shrink as it fades
+      this.dummy.updateMatrix();
+      this.sparkMesh.setMatrixAt(i, this.dummy.matrix);
+      this.sparkMesh.setColorAt(i, this.tmp.setRGB(sparkColor.r * f, sparkColor.g * f, sparkColor.b * f));
+    }
+    this.sparkMesh.count = ns;
+    this.sparkMesh.instanceMatrix.needsUpdate = true;
+    if (this.sparkMesh.instanceColor) this.sparkMesh.instanceColor.needsUpdate = true;
+
+    // ---- bullet holes ----
+    const nh = sim.holeCount;
+    for (let i = 0; i < nh; i++) {
+      const vis = sim.hVis[i]!;
+      this.orientDecal(this.holeMesh, i, sim.hx[i]!, sim.hy[i]!, sim.hz[i]!, sim.hnx[i]!, sim.hny[i]!, sim.hnz[i]!, sim.hRot[i]!, sim.settings.holeSizeMeters * vis);
+      this.holeMesh.setColorAt(i, this.tmp.setRGB(HOLE_COLOR.r, HOLE_COLOR.g, HOLE_COLOR.b));
+    }
+    this.holeMesh.count = nh;
+    this.holeMesh.instanceMatrix.needsUpdate = true;
+    if (this.holeMesh.instanceColor) this.holeMesh.instanceColor.needsUpdate = true;
+
+    // ---- wounds ----
+    const nw = sim.woundCount;
+    for (let i = 0; i < nw; i++) {
+      const vis = sim.wVis[i]!;
+      this.orientDecal(this.woundMesh, i, sim.wx[i]!, sim.wy[i]!, sim.wz[i]!, sim.wnx[i]!, sim.wny[i]!, sim.wnz[i]!, sim.wRot[i]!, sim.settings.woundSizeMeters * vis);
+      this.woundMesh.setColorAt(i, this.tmp.setRGB(WOUND_COLOR.r, WOUND_COLOR.g, WOUND_COLOR.b));
+    }
+    this.woundMesh.count = nw;
+    this.woundMesh.instanceMatrix.needsUpdate = true;
+    if (this.woundMesh.instanceColor) this.woundMesh.instanceColor.needsUpdate = true;
+  }
+
+  /** Orient one decal instance to its surface normal, lift it a hair off the surface, spin in-plane, scale. */
+  private orientDecal(mesh: InstancedMesh, i: number, x: number, y: number, z: number, nx: number, ny: number, nz: number, rot: number, diameter: number): void {
+    this.normalScratch.set(nx, ny, nz);
+    this.dummy.position.set(x + nx * DECAL_SURFACE_OFFSET, y + ny * DECAL_SURFACE_OFFSET, z + nz * DECAL_SURFACE_OFFSET);
+    this.dummy.quaternion.setFromUnitVectors(DECAL_DEFAULT_NORMAL, this.normalScratch);
+    this.dummy.rotateZ(rot);
+    this.dummy.scale.set(Math.max(0.0001, diameter), Math.max(0.0001, diameter), 1);
+    this.dummy.updateMatrix();
+    mesh.setMatrixAt(i, this.dummy.matrix);
+  }
+}
+
+/** r184 binding-safe instanced prep: pre-create the instanceColor attribute, dynamic usage, no culling. */
+function primeInstanced(mesh: InstancedMesh): void {
+  mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+  const buf = new Float32Array(mesh.count * 3).fill(1);
+  mesh.instanceColor = new InstancedBufferAttribute(buf, 3);
+  mesh.instanceColor.setUsage(DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  mesh.count = 0;
+}
