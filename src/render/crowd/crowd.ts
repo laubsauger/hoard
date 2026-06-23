@@ -12,7 +12,7 @@
 // We go further: the instance transform is no longer a CPU-built instanceMatrix at all. It is produced by a
 // compute shader into a storage buffer and consumed via material.positionNode (the canonical WebGPU/TSL path).
 
-import { BoxGeometry, Color, InstancedMesh, Matrix4, type Object3D } from 'three';
+import { BoxGeometry, Color, DynamicDrawUsage, InstancedBufferAttribute, InstancedMesh, Matrix4, type Object3D } from 'three';
 import {
   MeshStandardNodeMaterial,
   type ComputeNode,
@@ -21,6 +21,7 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  attribute,
   cos,
   float,
   fract,
@@ -135,6 +136,10 @@ export class CrowdLimbs {
   // Per-frame limbed inputs (compacted to the front) + scratch for instance-matrix composition.
   private readonly pose: Float32Array;
   private readonly scaleArr: Float32Array;
+  /** Per-figure reveal alpha (V65) — copied into every part's `instFade` attribute so figures blend, not shrink. */
+  private readonly fadeArr: Float32Array;
+  /** Per-part `instFade` InstancedBufferAttribute (one per body-part geometry); refilled from fadeArr each frame. */
+  private readonly fadeAttrs: InstancedBufferAttribute[] = [];
   private readonly anatomy: Uint32Array;
   private readonly phase: Float32Array;
   private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
@@ -174,11 +179,20 @@ export class CrowdLimbs {
       // Pre-create instanceColor (r184 binding-safe) so the color attribute exists before first draw.
       for (let i = 0; i < this.budget; i++) mesh.setColorAt(i, baseColor);
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      // V65: per-instance reveal alpha as an instanced attribute the shared material reads (opacityNode below).
+      const fadeAttr = new InstancedBufferAttribute(new Float32Array(this.budget).fill(1), 1);
+      fadeAttr.setUsage(DynamicDrawUsage);
+      geo.setAttribute('instFade', fadeAttr);
+      this.fadeAttrs.push(fadeAttr);
       registry.track(mesh, 'buffer', `crowd.limbMesh.${part.id}`);
       parent.add(mesh);
       meshes.push(mesh);
     }
     this.meshes = meshes;
+    // V65: limbed figures blend in/out via ALPHA (matching the box crowd) instead of shrinking. The shared
+    // material reads each part geometry's per-instance `instFade` attribute as opacity; transparent to composite.
+    this.material.transparent = true;
+    this.material.opacityNode = attribute('instFade', 'float');
     this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign }));
     this.severBits = CROWD_LIMB_PARTS.map((p) => {
       const region = LIMB_REGION[p.id];
@@ -187,6 +201,7 @@ export class CrowdLimbs {
 
     this.pose = new Float32Array(this.budget * FLOATS_PER_LIMB_POSE);
     this.scaleArr = new Float32Array(this.budget);
+    this.fadeArr = new Float32Array(this.budget).fill(1);
     this.anatomy = new Uint32Array(this.budget);
     this.phase = new Float32Array(this.budget);
   }
@@ -205,6 +220,7 @@ export class CrowdLimbs {
       scaleMax: this.scaleMax,
       maxSimTier: this.maxSimTier,
       visibility,
+      outFade: this.fadeArr,
     });
 
     for (let part = 0; part < this.meshes.length; part++) {
@@ -233,6 +249,10 @@ export class CrowdLimbs {
         this.mat4.fromArray(this.matScratch);
         mesh.setMatrixAt(i, this.mat4);
       }
+      // V65: copy this frame's per-figure reveal alpha into the part's instanced opacity attribute.
+      const fa = this.fadeAttrs[part]!;
+      (fa.array as Float32Array).set(this.fadeArr.subarray(0, liveCount));
+      fa.needsUpdate = true;
       mesh.count = liveCount;
       mesh.instanceMatrix.needsUpdate = true;
     }
