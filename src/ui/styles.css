@@ -405,3 +405,21 @@ body,
 .hbn-inv__item.cat-medical { border-left-color: #ec4899; }
 .hbn-inv__item.cat-tool, .hbn-inv__item.cat-material { border-left-color: #38bdf8; }
 .hbn-inv__hint { margin-top: 12px; font: 10px ui-monospace, Menlo; color: #7e8da9; }
+
+/* ---- CharacterPanel: condition / needs ---- */
+.hbn-char {
+  position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+  background: rgba(6,9,12,0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+}
+.hbn-char__frame {
+  width: 320px; padding: 20px 22px; background: rgba(16,20,27,0.94);
+  border: 1px solid rgba(130,160,210,0.22); border-radius: 12px; box-shadow: 0 16px 44px rgba(0,0,0,0.5);
+}
+.hbn-char__title { margin: 0 0 12px; font: 600 13px ui-sans-serif, system-ui; letter-spacing: 0.12em; text-transform: uppercase; color: #e8eefb; }
+.hbn-char__group { margin: 12px 0 6px; font: 9px ui-monospace, Menlo; letter-spacing: 0.14em; text-transform: uppercase; color: #5e6f92; }
+.hbn-char__row { display: flex; align-items: center; gap: 9px; padding: 3px 0; }
+.hbn-char__label { width: 92px; font: 11px ui-sans-serif, system-ui; color: #cdd8ee; }
+.hbn-char__track { flex: 1; height: 8px; border-radius: 999px; background: rgba(120,140,175,0.2); overflow: hidden; }
+.hbn-char__fill { display: block; height: 100%; border-radius: 999px; transition: width 0.2s ease, background 0.2s ease; }
+.hbn-char__num { width: 26px; text-align: right; font: 10px ui-monospace, Menlo; color: #9fb0cc; }
+.hbn-char__hint { margin: 14px 0 0; font: 10px ui-monospace, Menlo; color: #7e8da9; text-align: center; }

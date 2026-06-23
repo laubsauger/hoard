@@ -12,6 +12,7 @@ import { Controls } from '../ui/Controls';
 import { AccessibilityPanel } from '../ui/AccessibilityPanel';
 import { PauseMenu } from '../ui/PauseMenu';
 import { InventoryMenu } from '../ui/InventoryMenu';
+import { CharacterPanel } from '../ui/CharacterPanel';
 import { LoadingScreen } from '../ui/LoadingScreen';
 import { DevToolsPanel } from '../ui/debug';
 import '../ui/styles.css';
@@ -34,6 +35,7 @@ export function App() {
           <AccessibilityPanel />
           <PauseMenu />
           <InventoryMenu />
+          <CharacterPanel />
           {import.meta.env.DEV && <DevToolsPanel />}
           {error && (
             <div className="hbn-error" role="alert">

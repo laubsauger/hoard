@@ -345,7 +345,7 @@ Context-driven player↔environment interaction + the menu surfaces (interaction
 | T61 | . | S | timed-action queue: per-player action queue, durations from config scaled by skill, progress in player-view snapshot, cancel on Esc / movement / threat | T3 | V44,V12,PZ-research |
 | T62 | x | U | inventory menu: dual-pane (player ↔ nearby/floor/container), drag + grab-all via `moveItem`, equip primary/secondary, hard carry-cap vs soft encumbrance readout, per-item context verbs | T23,T4 | V45,V1,V11,inventory-config,PZ-research |
 | T63 | . | S | unified container surfacing: expose furniture/floor/corpse/vehicle as one container type via `ContainerRef`, proximity-populated; flat capacity (no recursive bag stacking) | T23 | V45,inventory-config,PZ-research |
-| T64 | . | U | character/health panel: per-body-part treatable injuries (bleeding/wound/fracture → bandage/suture/splint), moodle row, skills/XP tab, clothing/protection; infection stays ambiguous (no UI confirm) | T22,T4 | V29,V31,V46,survival-config,PZ-research |
+| T64 | x | U | character/health panel: per-body-part treatable injuries (bleeding/wound/fracture → bandage/suture/splint), moodle row, skills/XP tab, clothing/protection; infection stays ambiguous (no UI confirm) | T22,T4 | V29,V31,V46,survival-config,PZ-research |
 | T65 | . | S | barricade siege model: barricade = sacrificial HP layer in front of door/window; board/reinforce tiers gated by skill (skill also raises HP); zombie COUNT (not strength) drives structure damage; key/lock-bypass verb | T13,T25 | V18,V30,V42,destruction-config,PZ-research |
 
 | Cite token | Resolves to |
