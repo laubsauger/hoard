@@ -53,6 +53,8 @@ import type { ResourceRegistry } from '../engine/resources';
 import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
 import type { VisionCull } from '../crowd/visionCull';
+import { instantaneousReveal, PerceptionMemory, type RevealParams } from '../crowd/perceptionMemory';
+import { ZombieState } from '../../game/simulation';
 import type { DebugFlags } from '../../diagnostics/flags';
 import {
   resolveSurfaceVisibility,
@@ -60,6 +62,7 @@ import {
   resolveCutawayDepthSettings,
   resolveCutawayDepthOffset,
   wallFacesCamera,
+  exteriorWallOccludesPlayer,
   type OcclusionContext,
   type CutawayDepthSettings,
   type VecXZ,
@@ -76,6 +79,7 @@ import { resolveRenderAccessibility, type RenderAccessibility } from '../accessi
 import type { GameRuntime } from '../../game/runtime';
 import {
   buildingsOf,
+  lootableContainerCells,
   authorHouseStyle,
   resolveHouseVariation,
   windowState,
@@ -115,6 +119,9 @@ interface FadeSurface {
   readonly outwardNormal: VecXZ | null;
   readonly heightMeters: number;
   readonly buildingIndex: number;
+  /** World-XZ centre of the surface (on the wall plane) — used by the OUTSIDE-WALL cutaway (V62). */
+  readonly centerX: number;
+  readonly centerZ: number;
   opacity: number;
 }
 
@@ -179,6 +186,11 @@ export class BlockScene {
   /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
   private aoContact: Mesh | null = null;
   private readonly fadeSurfaces: FadeSurface[] = [];
+  /** PLAYER PERCEPTION v2 (V62): RENDER-side recently-seen memory + a per-slot reveal scratch buffer. Both are
+   *  view state only (fed by frame dt) and NEVER read back into the deterministic sim (V26). Sized to the SoA
+   *  capacity so a reveal exists for every possible zombie slot with no per-frame allocation (V24). */
+  private readonly perceptionMemory: PerceptionMemory;
+  private readonly perceptionReveal: Float32Array;
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
   /** T46 door leaves: each leaf hangs off a hinge PIVOT group; syncDoors rotates the pivot toward the door's
@@ -210,6 +222,9 @@ export class BlockScene {
     this.accessibility = opts.accessibility ?? DEFAULT_ACCESSIBILITY;
     this.basePlayerEmissive = PLAYER_BASE_EMISSIVE;
     this.navCellSize = this.runtime.scene.navGrid.settings.navCellSize;
+    const zombieCapacity = this.runtime.zombies.capacity;
+    this.perceptionMemory = new PerceptionMemory(zombieCapacity);
+    this.perceptionReveal = new Float32Array(zombieCapacity);
 
     this.scene.background = new Color(0x0b0d0a);
     this.fog = new Fog(0x0b0d0a, 1, 400);
@@ -263,6 +278,7 @@ export class BlockScene {
     this.buildWallsAndRoof();
     this.buildDoorsAndWindows();
     this.buildProps();
+    this.buildContainers();
     this.playerMesh = this.buildPlayer();
     this.scene.add(this.playerMesh);
     this.buildContactAo();
@@ -551,7 +567,13 @@ export class BlockScene {
           upperWall.castShadow = true;
           upperWall.renderOrder = upperOffset.renderOrder;
           this.scene.add(upperWall);
-          this.fadeSurfaces.push({ object: upperWall, material: upperMat, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+          // World-XZ centre of this side's merged upper wall (its geometry is already in world coords) — the
+          // OUTSIDE-WALL cutaway projects player + camera onto the wall plane through this point (V62).
+          upperGeoMerged.computeBoundingBox();
+          const bb = upperGeoMerged.boundingBox;
+          const sideCenterX = bb ? (bb.min.x + bb.max.x) / 2 : 0;
+          const sideCenterZ = bb ? (bb.min.z + bb.max.z) / 2 : 0;
+          this.fadeSurfaces.push({ object: upperWall, material: upperMat, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, buildingIndex: bi, centerX: sideCenterX, centerZ: sideCenterZ, opacity: 1 });
         }
       }
 
@@ -694,7 +716,7 @@ export class BlockScene {
     group.position.set(cxw, wallH, czw);
     if (style.collapsed) group.rotation.z = (hash01(style.seed, 80) < 0.5 ? 1 : -1) * 0.14; // sagging caved roof
     this.scene.add(group);
-    this.fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, opacity: 1 });
+    this.fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, opacity: 1 });
   }
 
   /** A covered front porch at the house's street door: deck + posts + a low shed roof. Always visible (it sits
@@ -948,6 +970,57 @@ export class BlockScene {
     flush('carBody', carBodyGeo, this.mat('prop.carBody', { color: 0x5a5247, roughness: 0.7, metalness: 0.2 }), B.carBody);
     flush('carCabin', carCabinGeo, this.mat('prop.carCabin', { color: 0x2b3036, roughness: 0.5, metalness: 0.2 }), B.carCabin);
 
+    this.scene.add(group);
+  }
+
+  /**
+   * Lootable kitchen cupboard meshes (T85): a simple wood-toned cabinet box at EACH authored container cell
+   * (the same `lootableContainerCells` source the runtime anchors the container interactable to, so the visible
+   * cabinet and the interactable hotspot coincide). Data-driven — one cabinet per container cell. Cast shadows
+   * + tracked in the ResourceRegistry for disposal (V24). Dims come from typed structures config (V4), shared
+   * with the container's highlight box so the outline hugs the cabinet.
+   */
+  private buildContainers(): void {
+    const placements = lootableContainerCells(this.runtime.scene);
+    if (placements.length === 0) return;
+    const w = this.structures.cupboardWidthMeters;
+    const h = this.structures.cupboardHeightMeters;
+    const d = this.structures.cupboardDepthMeters;
+    const floorY = this.world.floorThicknessMeters; // cabinets stand on the interior floor slab
+    // Shared materials + geometries across every cabinet (one wood body tone + a darker door/face + brass pulls).
+    const bodyMat = this.mat('cupboard.body', { color: 0x6b4a2e, roughness: 0.78 });
+    const faceMat = this.mat('cupboard.face', { color: 0x573a23, roughness: 0.7 });
+    const topMat = this.mat('cupboard.top', { color: 0x8a8378, roughness: 0.55 });
+    const pullMat = this.mat('cupboard.pull', { color: 0xb9a05a, roughness: 0.4, metalness: 0.6 });
+    const topThick = Math.min(0.06, h * 0.1);
+    const bodyGeo = this.geo('cupboard.body.geo', new BoxGeometry(w, h - topThick, d));
+    const topGeo = this.geo('cupboard.top.geo', new BoxGeometry(w + 0.06, topThick, d + 0.06));
+    const doorGeo = this.geo('cupboard.door.geo', new BoxGeometry(w * 0.46, (h - topThick) * 0.86, 0.03));
+    const pullGeo = this.geo('cupboard.pull.geo', new BoxGeometry(0.03, 0.12, 0.04));
+    const group = new Group();
+    for (const placement of placements) {
+      const c = this.runtime.scene.cellCenter(placement.cell);
+      const bodyCy = floorY + (h - topThick) / 2;
+      const body = new Mesh(bodyGeo, bodyMat);
+      body.position.set(c.x, bodyCy, c.z);
+      body.castShadow = true;
+      body.receiveShadow = true;
+      group.add(body);
+      const top = new Mesh(topGeo, topMat);
+      top.position.set(c.x, floorY + h - topThick / 2, c.z);
+      top.castShadow = true;
+      group.add(top);
+      // two front door panels (toward +Z) with a centre reveal + a brass pull on each.
+      const faceZ = c.z + d / 2 + 0.015;
+      for (const sx of [-1, 1] as const) {
+        const door = new Mesh(doorGeo, faceMat);
+        door.position.set(c.x + sx * w * 0.24, bodyCy, faceZ);
+        group.add(door);
+        const pull = new Mesh(pullGeo, pullMat);
+        pull.position.set(c.x + sx * w * 0.04, bodyCy, faceZ + 0.02);
+        group.add(pull);
+      }
+    }
     this.scene.add(group);
   }
 
@@ -1231,7 +1304,7 @@ export class BlockScene {
     // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport). When the
     // vision-cone fog-of-war is on, only members inside the player's wedge (cone+range+LOS) are packed (T98).
     // The construction-time prime / rebind (no flags) packs the FULL crowd — the cull is a live-loop concern.
-    const visibility = flags && this.visionConeCullOn ? this.buildVisionCull() : undefined;
+    const visibility = flags && this.visionConeCullOn ? this.buildVisionCull(dtSeconds) : undefined;
     this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, visibility);
 
     const p = this.runtime.player();
@@ -1288,10 +1361,14 @@ export class BlockScene {
    * + reveal range + a wall line-of-sight test, all from typed config + the live player pose. Reuses the
    * canonical V14 cone predicate (via visionCullFade) + the scene LOS walk so it matches the dev overlay cone.
    */
-  private buildVisionCull(): VisionCull {
+  private buildVisionCull(dtSeconds: number): VisionCull {
     const p = this.runtime.player();
     const scene = this.runtime.scene;
-    return {
+    const los = (x0: number, z0: number, x1: number, z1: number): boolean => hasLineOfSight(scene, x0, z0, x1, z1);
+    // PLAYER PERCEPTION v2 (V62): the cone wedge PLUS the near/noise reveal params. The combined per-slot reveal
+    // is max(cone, near, memory, noise) — see perceptionMemory.ts. LOS routes through the STRUCTURAL hasLineOfSight
+    // (nav grid), never mesh opacity, so a faded cutaway wall can't reveal the zombies behind it (V63).
+    const params: RevealParams = {
       px: p.x,
       pz: p.z,
       heading: this.runtime.playerAim(),
@@ -1299,7 +1376,45 @@ export class BlockScene {
       range: this.perception.playerVisionRange,
       edgeBandMeters: this.perception.playerVisionRangeFadeMeters,
       edgeBandRadians: (this.perception.playerVisionConeFadeDegrees * Math.PI) / 180,
-      lineOfSight: (x0, z0, x1, z1) => hasLineOfSight(scene, x0, z0, x1, z1),
+      nearRadiusMeters: this.perception.playerNearAwarenessRadiusMeters,
+      hearingRange: this.perception.hearingRange,
+      soundWallOcclusion: this.perception.soundWallOcclusion,
+      lineOfSight: los,
+    };
+
+    // Precompute the per-slot reveal once per frame (read by BOTH packing paths so they always agree), folding in
+    // the stateful recently-seen memory. RENDER-side only — no sim state touched (V26). Matches packing's slot
+    // iteration (0..count) exactly so reveal[slot] aligns with the slot each packer reads.
+    const zombies = this.runtime.zombies;
+    const count = zombies.count;
+    const views = zombies.views;
+    const position = views.position as Float32Array;
+    const alive = views.alive as Uint8Array;
+    const state = views.state as Uint8Array;
+    const memSec = this.perception.playerSightMemorySeconds;
+    const reveal = this.perceptionReveal;
+    for (let slot = 0; slot < count; slot++) {
+      let inst = 0;
+      if (alive[slot] === 1) {
+        const x = position[slot * 3]!;
+        const z = position[slot * 3 + 2]!;
+        const st = state[slot]!;
+        const loud = st === ZombieState.Pursue || st === ZombieState.Attack;
+        inst = instantaneousReveal(x, z, loud, params);
+      }
+      reveal[slot] = this.perceptionMemory.step(slot, inst, dtSeconds, memSec);
+    }
+
+    return {
+      px: params.px,
+      pz: params.pz,
+      heading: params.heading,
+      fovHalf: params.fovHalf,
+      range: params.range,
+      edgeBandMeters: params.edgeBandMeters,
+      edgeBandRadians: params.edgeBandRadians,
+      lineOfSight: los,
+      reveal,
     };
   }
 
@@ -1417,26 +1532,40 @@ export class BlockScene {
         : 1;
     // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the camera position. A
     // wall fades only when its outward normal turns toward the camera; the roof always occludes from above.
+    const player = this.runtime.player();
     let towardCamera: VecXZ | null = null;
     if (camera) {
-      const p = this.runtime.player();
-      const dx = camera.position.x - p.x;
-      const dz = camera.position.z - p.z;
+      const dx = camera.position.x - player.x;
+      const dz = camera.position.z - player.z;
       if (Math.hypot(dx, dz) > 1e-6) towardCamera = { x: dx, z: dz };
     }
     for (const s of this.fadeSurfaces) {
       const playerInside = insideIndex >= 0 && s.buildingIndex === insideIndex;
       let occludesPlayerView: boolean;
-      if (!playerInside || towardCamera === null) {
-        occludesPlayerView = false; // not the occupied building, or no camera (construction prime) → stay opaque
-      } else if (s.kind === 'roof' || s.outwardNormal === null) {
-        occludesPlayerView = true; // roof occludes from directly above whenever the player is inside this house
-      } else {
-        occludesPlayerView = wallFacesCamera({
+      if (towardCamera === null || camera === undefined) {
+        occludesPlayerView = false; // no camera (construction prime) → stay opaque
+      } else if (playerInside) {
+        // Occupied building (V58/V59): roof always occludes from above; a wall fades when it turns toward camera.
+        occludesPlayerView = s.kind === 'roof' || s.outwardNormal === null
+          ? true
+          : wallFacesCamera({
+              outwardNormal: s.outwardNormal,
+              towardCamera,
+              facingDotThreshold: this.visibility.cameraFacingDotThreshold,
+            });
+      } else if (s.kind === 'upperWall' && s.outwardNormal !== null) {
+        // OUTSIDE-WALL cutaway (V62): the player is OUTSIDE this building — fade an exterior wall only when the
+        // player hugs it AND it lies between the camera and the player, so it never hides the player. Roofs of
+        // un-occupied buildings stay opaque (the player isn't under them). VIEW-only — structural LOS unchanged.
+        occludesPlayerView = exteriorWallOccludesPlayer({
           outwardNormal: s.outwardNormal,
-          towardCamera,
-          facingDotThreshold: this.visibility.cameraFacingDotThreshold,
+          wallCenter: { x: s.centerX, z: s.centerZ },
+          player: { x: player.x, z: player.z },
+          camera: { x: camera.position.x, z: camera.position.z },
+          adjacencyMeters: this.visibility.exteriorCutawayAdjacencyMeters,
         });
+      } else {
+        occludesPlayerView = false;
       }
       const ctx: OcclusionContext = {
         playerInside,

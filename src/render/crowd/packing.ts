@@ -123,10 +123,12 @@ export function packCrowdInputs(
       // else: over-budget figure → it FALLS THROUGH to the box below (no vanish).
     }
 
-    // Vision-cone fog-of-war (T96): skip members outside the wedge; fade those near its edges via scale.
+    // Vision-cone fog-of-war (T96) + perception v2 (V62): skip members the reveal hides; fade edges via scale.
+    // When the scene precomputed a per-slot reveal (cone+near+memory+noise), read it; else fall back to the pure
+    // cone fade so callers that pass only a wedge keep working.
     let fade = 1;
     if (visibility) {
-      fade = visionCullFade(position[slot * 3]!, position[slot * 3 + 2]!, visibility);
+      fade = visibility.reveal ? visibility.reveal[slot]! : visionCullFade(position[slot * 3]!, position[slot * 3 + 2]!, visibility);
       if (fade <= 0) continue;
     }
 

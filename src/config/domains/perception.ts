@@ -25,14 +25,42 @@ export const perceptionConfig = registerDomain('perception', {
     max: 360,
   }),
   /** Player vision cone (full angle, degrees) — the Project-Zomboid-style forward awareness wedge used by
-   *  the dev overlay (and, later, fog-of-war reveal). */
+   *  the dev overlay (and the fog-of-war reveal). Widened to 135° (V62 perception v2) so the forward wedge
+   *  reads as peripheral awareness, not a narrow flashlight beam. */
   playerFieldOfViewDegrees: num({
     owner: 'perception',
     unit: 'degrees',
-    doc: 'Full angle of the player forward vision cone (overlay + future fog-of-war reveal).',
-    default: 100,
+    doc: 'Full angle of the player forward vision cone (overlay + fog-of-war reveal).',
+    default: 135,
     min: 10,
     max: 360,
+  }),
+  /**
+   * Near-proximity awareness radius (m) — PLAYER PERCEPTION v2 (V62). A zombie within this radius is REVEALED
+   * regardless of cone direction (you sense something right beside/behind you), BUT still gated on structural
+   * line-of-sight (hasLineOfSight) — you do NOT sense it through a solid wall. Combines with the forward cone as
+   * one OR-term of the reveal: revealVisibility = max(cone, near, memory, noise).
+   */
+  playerNearAwarenessRadiusMeters: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'Radius (m) within which a zombie is revealed regardless of cone direction, still gated on LOS (V62).',
+    default: 4,
+    min: 0,
+    max: 30,
+  }),
+  /**
+   * Recently-seen memory window (s) — PLAYER PERCEPTION v2 (V62). A zombie that WAS revealed stays revealed for
+   * this long after it leaves view, fading out (visibility ramps 1→0) over the window. This is a RENDER-side,
+   * per-entity last-seen map held in the view layer, fed by dt — never sim state (V26 determinism is untouched).
+   */
+  playerSightMemorySeconds: num({
+    owner: 'perception',
+    unit: 'seconds',
+    doc: 'Seconds a once-revealed zombie stays (fading) revealed after leaving the cone/LOS (render-side memory, V62).',
+    default: 3,
+    min: 0,
+    max: 30,
   }),
   /** Player vision range (m) for the forward cone overlay. */
   playerVisionRange: num({

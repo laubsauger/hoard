@@ -31,6 +31,23 @@ export const audioConfig = registerDomain('audio', {
     doc: 'Default audible duration of a transient event in ticks (drives Stimulus decayPerTick).',
     default: 6, min: 1, max: 6000, integer: true,
   }),
+  // ---- player movement footsteps (V62 SNEAK stance) — the player emits a footstep stimulus the horde hears
+  // every `footstepStrideMeters` of travel, scaled by the active stance noise multiplier (sneak < walk < sprint).
+  footstepStrideMeters: num({
+    owner: 'audio', unit: 'meters',
+    doc: 'Distance the player travels between emitted footstep stimuli (V62). Accumulator-driven so frame-rate never changes how loud walking is.',
+    default: 1.5, min: 0.1, max: 10,
+  }),
+  sneakNoiseMultiplier: num({
+    owner: 'audio', unit: 'ratio',
+    doc: 'Footstep stimulus intensity scale while SNEAKING (Ctrl) — strictly below walk (1.0) so a sneaking player is harder for the horde to hear (V62).',
+    default: 0.35, min: 0, max: 1,
+  }),
+  sprintNoiseMultiplier: num({
+    owner: 'audio', unit: 'ratio',
+    doc: 'Footstep stimulus intensity scale while SPRINTING — louder than walk (1.0); slots above walk in the stance noise order sneak<walk<sprint (V62).',
+    default: 1.6, min: 1, max: 4,
+  }),
   // ---- coarse sector sound graph (long-range spread) ----
   doorAttenuation: num({ owner: 'audio', unit: 'ratio', doc: 'Intensity fraction retained crossing a closed door link.', default: 0.35, min: 0, max: 1 }),
   windowAttenuation: num({ owner: 'audio', unit: 'ratio', doc: 'Intensity fraction retained crossing a window link.', default: 0.55, min: 0, max: 1 }),

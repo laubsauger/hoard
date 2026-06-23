@@ -10,7 +10,10 @@ export {
   nearestInteractable,
   interactionActionLabel,
   interactionPrompt,
+  highlightBoxFor,
   type InteractionTargetWorld,
   type NearestInteractable,
   type InteractionPrompt,
+  type InteractionHighlightTarget,
+  type HighlightDims,
 } from './nearest';

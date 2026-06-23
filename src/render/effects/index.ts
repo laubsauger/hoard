@@ -57,6 +57,14 @@ export {
   type FireLightPick,
 } from './fireView';
 export {
+  HighlightView,
+  resolveHighlightSettings,
+  highlightColorFor,
+  highlightPulseIntensity,
+  type HighlightSettings,
+  type RGB,
+} from './highlightView';
+export {
   SCALING_STAGES,
   INITIAL_SCALING_STATE,
   isScalingLever,

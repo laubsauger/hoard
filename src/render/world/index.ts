@@ -3,8 +3,10 @@
 export {
   resolveVisibilitySettings,
   resolveSurfaceVisibility,
+  exteriorWallOccludesPlayer,
   classifyThreat,
   threatMarkerStyle,
+  type ExteriorWallCutawayInput,
   type SurfaceKind,
   type VisibilitySettings,
   type OcclusionContext,

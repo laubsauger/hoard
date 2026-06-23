@@ -7,6 +7,7 @@ import {
   resolveCutawayDepthSettings,
   resolveCutawayDepthOffset,
   wallFacesCamera,
+  exteriorWallOccludesPlayer,
   classifyThreat,
   threatMarkerStyle,
   type OcclusionContext,
@@ -114,6 +115,45 @@ describe('directional cutaway — wallFacesCamera (T82/V58)', () => {
     const far = resolveSurfaceVisibility('upperWall', ctx({ surfaceHeightMeters: 4, occludesPlayerView: faces(WEST, toCam) }), settings);
     expect(near.visible).toBe(false);
     expect(far.visible).toBe(true);
+  });
+});
+
+describe('outside-wall cutaway — exteriorWallOccludesPlayer (V62)', () => {
+  const adjacencyMeters = settings.exteriorCutawayAdjacencyMeters;
+  // A SOUTH-facing exterior wall: its plane is at z=10, outward normal points south (+z toward open space).
+  const SOUTH: VecXZ = { x: 0, z: 1 };
+  const wallCenter: VecXZ = { x: 0, z: 10 };
+
+  it('resolves a positive adjacency band from config', () => {
+    expect(adjacencyMeters).toBeGreaterThan(0);
+  });
+
+  it('fades the near wall when the player hugs it OUTSIDE and the camera is beyond it (the plane separates them)', () => {
+    const player: VecXZ = { x: 0, z: 10 + adjacencyMeters * 0.4 }; // just OUTSIDE (outward side, within band)
+    const camera: VecXZ = { x: 0, z: 4 }; // INWARD (building) side of the wall → wall is between camera + player
+    expect(exteriorWallOccludesPlayer({ outwardNormal: SOUTH, wallCenter, player, camera, adjacencyMeters })).toBe(true);
+  });
+
+  it('does NOT fade when the camera is on the SAME (outward) side as the player — wall is not between them', () => {
+    const player: VecXZ = { x: 0, z: 10 + adjacencyMeters * 0.4 };
+    const camera: VecXZ = { x: 0, z: 30 }; // far OUTWARD, same side as the player
+    expect(exteriorWallOccludesPlayer({ outwardNormal: SOUTH, wallCenter, player, camera, adjacencyMeters })).toBe(false);
+  });
+
+  it('does NOT fade a wall the player is not adjacent to (player too far outside the band)', () => {
+    const player: VecXZ = { x: 0, z: 10 + adjacencyMeters + 3 }; // beyond the adjacency band
+    const camera: VecXZ = { x: 0, z: 4 };
+    expect(exteriorWallOccludesPlayer({ outwardNormal: SOUTH, wallCenter, player, camera, adjacencyMeters })).toBe(false);
+  });
+
+  it('does NOT fade when the player is on the INWARD side (inside) — the occupied-building path owns that case', () => {
+    const player: VecXZ = { x: 0, z: 8 }; // inward of the wall plane
+    const camera: VecXZ = { x: 0, z: 4 };
+    expect(exteriorWallOccludesPlayer({ outwardNormal: SOUTH, wallCenter, player, camera, adjacencyMeters })).toBe(false);
+  });
+
+  it('a degenerate (zero-length) normal never occludes', () => {
+    expect(exteriorWallOccludesPlayer({ outwardNormal: { x: 0, z: 0 }, wallCenter, player: { x: 0, z: 11 }, camera: { x: 0, z: 4 }, adjacencyMeters })).toBe(false);
   });
 });
 

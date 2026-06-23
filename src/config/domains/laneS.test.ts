@@ -43,6 +43,13 @@ describe('lane-S config domains (V4 / §I scales)', () => {
     }
   });
 
+  it('player perception v2 defaults: wider 135° cone + near-awareness + sight-memory window (V62)', () => {
+    const p = resolveDomain(perceptionConfig, TIER);
+    expect(p.playerFieldOfViewDegrees).toBe(135); // widened from 100 (req 1)
+    expect(p.playerNearAwarenessRadiusMeters).toBeGreaterThan(0); // proximity reveal (req 2)
+    expect(p.playerSightMemorySeconds).toBeGreaterThan(0); // recently-seen memory window (req 3)
+  });
+
   it('mobile tier scales zombie capacity + flow-field cache down', () => {
     expect(resolveDomain(zombiesConfig, 'mobile-webgpu').capacity).toBeLessThan(
       resolveDomain(zombiesConfig, TIER).capacity,

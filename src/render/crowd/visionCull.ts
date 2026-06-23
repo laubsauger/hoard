@@ -25,6 +25,12 @@ export interface VisionCull {
   readonly edgeBandRadians: number;
   /** Optional wall line-of-sight test: true = clear path, false = blocked. Omitted = ignore occlusion. */
   readonly lineOfSight?: (x0: number, z0: number, x1: number, z1: number) => boolean;
+  /**
+   * Optional PRECOMPUTED per-slot reveal (V62 perception v2): when present, packing reads `reveal[slot]` instead
+   * of recomputing the cone fade — this carries the combined max(cone, near, memory, noise) reveal the scene
+   * computes once per frame (incl. the stateful recently-seen memory). Indexed by SoA slot; sized to capacity.
+   */
+  readonly reveal?: Float32Array;
 }
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);

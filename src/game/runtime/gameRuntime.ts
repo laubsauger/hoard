@@ -65,6 +65,7 @@ import { CombatSystem, type ShotResult } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
+  lootableContainerCells,
   DoorSystem,
   REGION_ROOM_A,
   REGION_ROOM_B,
@@ -75,8 +76,11 @@ import {
 import {
   nearestInteractable,
   interactionPrompt,
+  highlightBoxFor,
   type InteractionTargetWorld,
   type InteractionPrompt,
+  type InteractionHighlightTarget,
+  type HighlightDims,
 } from '@/game/interaction';
 import { structuresConfig } from '@/config/domains/structures';
 import {
@@ -165,6 +169,9 @@ export class GameRuntime {
   readonly inventory: InventorySystem;
   /** Display-name -> ContainerRef for the named containers the inventory UI surfaces. */
   private readonly namedContainers = new Map<string, ContainerRef>();
+  /** FIXED world positions of the lootable world containers (the kitchen cupboard) — anchored at a stable
+   *  scene cell (NOT the player cell), so a container is interactable only within reach of THAT spot (V4). */
+  private readonly worldContainers: { readonly x: number; readonly z: number; readonly label: string }[] = [];
   /** M2 medium-term objective state machine (find parts -> repair radio -> evacuate). */
   readonly objective: ObjectiveSystem;
   /** M2 decisive horde event shaped by the player's structural mods (§G central promise). */
@@ -222,6 +229,9 @@ export class GameRuntime {
 
   private playerPos: Vec3;
   private playerHeading = 0;
+  /** V62 SNEAK: distance (m) the player has travelled since the last emitted footstep stimulus. A stride-length
+   *  accumulator so the player's audible loudness is frame-rate-independent and deterministic across replay. */
+  private footstepAccumMeters = 0;
   private weatherProfile: WeatherProfile;
   /** Absolute-tick offset so time-of-day survives a save/reload (set from capturedAtTick on load). */
   private tickOffset = 0;
@@ -384,11 +394,17 @@ export class GameRuntime {
     }
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
     // never perturbs the IdFactory counters or the spawn-scatter rng that determinism/replay depend on (V26).
-    const cupRef: ContainerRef = { entity: WORLD_CONTAINER_ENTITY as EntityId, container: 'Kitchen Cupboard' };
-    this.inventory.addContainer(cupRef, { type: 'cupboard' });
-    this.namedContainers.set('Kitchen Cupboard', cupRef);
+    // Each container is anchored at a FIXED authored cell (lootableContainerCells) — a corner of the player's
+    // room, NOT the player cell — so it reads as an object in the world, not a thing that trails the player.
     const lootRng = mulberry32((opts.scatterSeed ?? 1) ^ 0x10c7);
-    for (const s of rollLoot('kitchen', lootRng)) this.inventory.seed(cupRef, s.item, s.count);
+    lootableContainerCells(this.scene).forEach((placement, i) => {
+      const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + i) as EntityId, container: placement.label };
+      this.inventory.addContainer(ref, { type: 'cupboard' });
+      this.namedContainers.set(placement.label, ref);
+      const center = this.scene.cellCenter(placement.cell);
+      this.worldContainers.push({ x: center.x, z: center.z, label: placement.label });
+      for (const s of rollLoot('kitchen', lootRng)) this.inventory.seed(ref, s.item, s.count);
+    });
 
     this.registerSystems();
   }
@@ -510,8 +526,14 @@ export class GameRuntime {
    * is scaled by `playerSprintSpeedMultiplier` and stamina drains this frame; otherwise normal speed and
    * stamina regenerates (T22 owns the pool + fatigue coupling). A dead player never sprints (control is
    * halted before this runs). Drain/regen scale by `dtSeconds` since this is driven per-frame.
+   *
+   * V62 SNEAK stance: `sneak` (Ctrl) emits LESS footstep noise than walking (sneak < walk < sprint). The horde
+   * only ever learns of the player through stimuli (V14), so the player emits a footstep stimulus every stride
+   * of travel, scaled by the active stance's noise multiplier — a sneaking player is genuinely harder to hear.
+   * Sprint takes precedence over sneak (you cannot sprint silently). This is a real, deterministic sim event
+   * driven purely by movement intent, so it stays consistent across replay (V26).
    */
-  movePlayer(dirX: number, dirZ: number, dtSeconds: number, sprint = false): boolean {
+  movePlayer(dirX: number, dirZ: number, dtSeconds: number, sprint = false, sneak = false): boolean {
     if (this.isPlayerDead()) return false; // game-over: player control is halted (V12-safe — sim keeps running)
     const len = Math.hypot(dirX, dirZ);
     if (len === 0 || dtSeconds <= 0) return false;
@@ -519,24 +541,48 @@ export class GameRuntime {
     const speed = this.playerCfg.moveSpeedMetersPerSecond * (sprinting ? this.playerCfg.playerSprintSpeedMultiplier : 1);
     const stepX = (dirX / len) * speed * dtSeconds;
     const stepZ = (dirZ / len) * speed * dtSeconds;
-    const nx = this.playerPos.x + stepX;
-    const nz = this.playerPos.z + stepZ;
+    const ox = this.playerPos.x;
+    const oz = this.playerPos.z;
+    const nx = ox + stepX;
+    const nz = oz + stepZ;
     // T58/V42: radius-aware so the player body never clips half into a wall.
     const r = this.playerCfg.bodyRadiusMeters;
+    let moved = false;
     if (isWalkableRadius(this.scene, nx, nz, r)) {
       this.playerPos = { x: nx, y: this.playerPos.y, z: nz };
-      return true;
+      moved = true;
+    } else if (isWalkableRadius(this.scene, nx, oz, r)) {
+      // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
+      this.playerPos = { x: nx, y: this.playerPos.y, z: oz };
+      moved = true;
+    } else if (isWalkableRadius(this.scene, ox, nz, r)) {
+      this.playerPos = { x: ox, y: this.playerPos.y, z: nz };
+      moved = true;
     }
-    // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
-    if (isWalkableRadius(this.scene, nx, this.playerPos.z, r)) {
-      this.playerPos = { x: nx, y: this.playerPos.y, z: this.playerPos.z };
-      return true;
+    if (!moved) return false;
+    // V62: emit stance-scaled footstep noise for the ACTUAL displacement (slides emit less than a clear step).
+    const stanceNoise = sprinting
+      ? this.audioCfg.sprintNoiseMultiplier
+      : sneak
+        ? this.audioCfg.sneakNoiseMultiplier
+        : 1;
+    this.accumulateFootstepNoise(Math.hypot(this.playerPos.x - ox, this.playerPos.z - oz), stanceNoise);
+    return true;
+  }
+
+  /**
+   * V62 SNEAK: accrue travelled distance and emit a footstep stimulus the horde hears each `footstepStrideMeters`.
+   * Intensity is scaled by the active stance (sneak < walk < sprint), so sneaking is quieter than walking the same
+   * distance. Stride-accumulated so loudness is frame-rate-independent; deterministic (driven by movement intent).
+   */
+  private accumulateFootstepNoise(distanceMeters: number, stanceNoise: number): void {
+    if (distanceMeters <= 0) return;
+    this.footstepAccumMeters += distanceMeters;
+    const stride = this.audioCfg.footstepStrideMeters;
+    while (this.footstepAccumMeters >= stride) {
+      this.footstepAccumMeters -= stride;
+      this.audio.hearEvent('footstep', this.playerPos.x, this.playerPos.z, this.clock.tick, { intensityScale: stanceNoise });
     }
-    if (isWalkableRadius(this.scene, this.playerPos.x, nz, r)) {
-      this.playerPos = { x: this.playerPos.x, y: this.playerPos.y, z: nz };
-      return true;
-    }
-    return false;
   }
 
   /** The mid structural cell of the destructible section — the UI's default breach/board target. */
@@ -580,10 +626,34 @@ export class GameRuntime {
     const wallC = this.scene.cellCenter(wallNav);
     const wallCell = this.scene.wall.getCell(this.defaultBreachCell());
     out.push({ kind: 'structure', breached: wallCell?.breached ?? false, x: wallC.x, z: wallC.z, label: 'Wall section' });
-    // The lootable cupboard lives in the player's start room (T85).
-    const cup = this.scene.cellCenter(this.scene.playerCell);
-    out.push({ kind: 'container', x: cup.x, z: cup.z, label: 'Kitchen Cupboard' });
+    // The lootable cupboard(s) at their FIXED authored cells — only nearest when the player is actually beside
+    // the cabinet (range-gated by nearestInteractable), never house-wide (the old playerCell anchor bug).
+    for (const c of this.worldContainers) {
+      out.push({ kind: 'container', x: c.x, z: c.z, label: c.label });
+    }
     return out;
+  }
+
+  /** Physical dims used to SIZE the active-interactable highlight box (typed config + scene cell size, V4). */
+  private highlightDims(): HighlightDims {
+    return {
+      navCellSize: this.scene.navGrid.settings.navCellSize,
+      defaultHeightMeters: this.structuresCfg.interactionHighlightHeightMeters,
+      cupboardWidthMeters: this.structuresCfg.cupboardWidthMeters,
+      cupboardDepthMeters: this.structuresCfg.cupboardDepthMeters,
+      cupboardHeightMeters: this.structuresCfg.cupboardHeightMeters,
+    };
+  }
+
+  /**
+   * The NEAREST interactable in reach as a placed + SIZED highlight box (world centre + axis-aligned bounds +
+   * kind), or null when nothing is in reach (T60/V29). The render lane draws ONE colour-coded glowing outline
+   * at this box so the player sees WHICH object the "{key} to {action}" prompt refers to. Pure read of the
+   * live sim state — the frame loop polls it each frame and hides the highlight when this returns null.
+   */
+  nearestInteractableHighlight(): InteractionHighlightTarget | null {
+    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    return near ? highlightBoxFor(near.target, this.highlightDims()) : null;
   }
 
   /** The "{key} to {action}" prompt for the NEAREST interactable in reach, or null (T60). Pure read of the

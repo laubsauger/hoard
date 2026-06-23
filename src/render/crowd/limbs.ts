@@ -90,10 +90,11 @@ export function packLimbInputs(
     if (simTier[slot]! > maxSimTier) continue; // not limbed-eligible → drawn as a box
     if (rank++ >= capacity) continue; // beyond the pool cap (V13) → the box path renders this overflow figure
 
-    // Vision-cone fog-of-war (T96): hide figures outside the wedge; fade those near its edges via scale.
+    // Vision-cone fog-of-war (T96) + perception v2 (V62): read the precomputed per-slot reveal when the scene
+    // supplied one (cone+near+memory+noise); else fall back to the pure cone fade.
     let fade = 1;
     if (visibility) {
-      fade = visionCullFade(position[slot * 3]!, position[slot * 3 + 2]!, visibility);
+      fade = visibility.reveal ? visibility.reveal[slot]! : visionCullFade(position[slot * 3]!, position[slot * 3 + 2]!, visibility);
       if (fade <= 0) continue;
     }
 

@@ -13,7 +13,7 @@
 
 import type { FixedClock, SystemContext } from '@/game/core';
 import type { StimulusField } from '@/game/stimulus';
-import { ZombieState } from '@/game/simulation';
+import { ZombieState, SimTier } from '@/game/simulation';
 import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/game/simulation';
 import { steer, type FlowField, type FlowFieldCache } from '@/game/navigation';
 import {
@@ -118,6 +118,8 @@ export class HordeSimulation {
   private readonly resolvePool: SeparationAgent[] = [];
   private readonly resolveBySlot = new Map<number, SeparationAgent>();
   private readonly resolveNeighbors: SeparationAgent[] = [];
+  // Reused buffer for the nearest-first limb-tier budget cap in stepTiers (pooled — tiers run every 4 ticks).
+  private readonly tierCand: { slot: ZombieSlot; dist: number; visible: boolean; recentDamage: boolean; mandatory: boolean }[] = [];
 
   /** Missing-limb consequence tunables (V17), read straight from the combat domain — no literals. */
   private readonly consequence: ConsequenceConfig;
@@ -512,22 +514,50 @@ export class HordeSimulation {
     const target = getTargetSlot();
     const sight = perception.sightRange;
     const window = combatCfg.recentDamageWindowTicks;
+    const budget = combatCfg.heroActivePromotionBudget;
+
+    // Pass 1: gather candidates (pooled buffer, no per-tick alloc). `mandatory` = targeted/recently-damaged →
+    // always hero for combat correctness (V22), exempt from the budget cap.
+    const cand = this.tierCand;
+    let n = 0;
     zombies.forEachAlive((slot) => {
       const dist = planarDistanceToPlayer(zombies, slot, p.x, p.z);
-      const visible = dist <= sight;
       const damagedAt = lastDamageTick.get(slot);
       const recentDamage = damagedAt !== undefined && ctx.tick - damagedAt <= window;
+      let c = cand[n];
+      if (!c) { c = { slot, dist: 0, visible: false, recentDamage: false, mandatory: false }; cand[n] = c; }
+      c.slot = slot;
+      c.dist = dist;
+      c.visible = dist <= sight;
+      c.recentDamage = recentDamage;
+      c.mandatory = slot === target || recentDamage;
+      n += 1;
+    });
+    cand.length = n;
+
+    // Rank by distance: only the NEAREST `budget` may hold a limb tier (≤1) so the render limb pool shows the
+    // CLOSEST figures (no slot-order inversion where far zombies are limbed + close ones boxed). V13/V22.
+    cand.sort((a, b) => a.dist - b.dist);
+
+    for (let i = 0; i < n; i++) {
+      const c = cand[i]!;
       const inputs: TierInputs = {
-        distance: dist,
-        visible,
-        threat: visible ? perception.visibleThreatWeight : 0,
+        distance: c.dist,
+        visible: c.visible,
+        threat: c.visible ? perception.visibleThreatWeight : 0,
         cameraImportance: 0,
-        targeted: slot === target,
-        recentDamage,
+        targeted: c.slot === target,
+        recentDamage: c.recentDamage,
         currentAttack: false,
         perfBudget: combatCfg.perfBudget,
       };
-      tierManager.update(zombies, slot, inputs);
-    });
+      let a = tierManager.assign(inputs);
+      // Budget cap: a non-mandatory zombie outside the nearest-`budget` set may NOT keep a limb tier — clamp
+      // it to the box tier so the limb pool only ever holds the nearest N (mandatory/combat zombies bypass).
+      if (!c.mandatory && a.simTier <= SimTier.ActiveCrowd && i >= budget) {
+        a = { simTier: SimTier.VisibleHorde, renderTier: c.visible ? SimTier.VisibleHorde : SimTier.Abstract };
+      }
+      tierManager.apply(zombies, c.slot, a);
+    }
   }
 }

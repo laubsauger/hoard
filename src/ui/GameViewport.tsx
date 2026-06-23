@@ -32,11 +32,13 @@ import { ImpactView, resolveImpactSettings, type ImpactIngestContext } from '../
 import { GibView, resolveGibSettings } from '../render/effects/gibView';
 import { WeatherView, resolveRainSettings } from '../render/effects/weatherView';
 import { FireView, resolveFireSettings, type FireIgnition } from '../render/effects/fireView';
+import { HighlightView, resolveHighlightSettings } from '../render/effects/highlightView';
 import { CorpseField, resolveCorpseFieldSettings } from '../render/corpse';
 import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
 import { createNoiseSnapshotGate, noiseViewStore } from '../stores/noiseView';
 import { inventoryViewStore } from '../stores/inventoryView';
+import { uiStore } from '../stores/ui';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
 import { buildCityDistrict, rayDistanceToWall } from '../game/scene';
@@ -223,11 +225,16 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // `fireIgnited` WorldEvents (mapped to world positions) + the runtime's live `isRouteBurning` truth each
       // frame; never touches the sim. Resources tracked → freed on unmount (V24).
       const fireView = new FireView(resolveFireSettings(tier), host.resources);
+      // T60/V29: the ACTIVE-interactable highlight — one colour-coded glowing outline on the nearest
+      // interactable in reach (the target the prompt + wheel act on). Tracked in the host registry → freed on
+      // unmount (V24). Driven each frame off runtime.nearestInteractableHighlight() below.
+      const highlightView = new HighlightView(resolveHighlightSettings(tier), host.resources);
       bloodView.attachTo(scene.scene);
       gibView.attachTo(scene.scene);
       impactView.attachTo(scene.scene);
       weatherView.attachTo(scene.scene);
       fireView.attachTo(scene.scene);
+      highlightView.attachTo(scene.scene);
 
       // Procedural WebAudio OUTPUT layer (NEW audio-out lane). Synthesized — no asset files. Created here
       // but SILENT until a user gesture resumes its AudioContext (autoplay policy, wired in onClick/onKeyDown
@@ -443,7 +450,13 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         toggleNearestDoor: () => { runtime.toggleNearestDoor(); },
         nearestInteraction: () => runtime.nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
         nearestInteractable: () => runtime.nearestInteractableTarget(),
-        loot: () => inventoryViewStore.getState().setOpenContainer('Kitchen Cupboard'),
+        loot: () => {
+          // Open the dual-pane inventory ON the looted container (was only setting the container, never the
+          // panel, so nothing showed — the InventoryMenu is gated on uiStore.activePanel === 'inventory').
+          const t = runtime.nearestInteractableTarget();
+          inventoryViewStore.getState().setOpenContainer(t?.kind === 'container' ? t.label : 'Kitchen Cupboard');
+          uiStore.getState().openPanel('inventory');
+        },
         rotate: (dir) => camera.rotate(dir),
         zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
         setWeather: (profile) => runtime.setWeather(profile),
@@ -491,8 +504,11 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         if (stepDt > 0) {
           const mv = moveSpeedKeys();
           // Sprint lever (Shift by default): the runtime gates it on stamina + drains/regenerates the pool.
-          const sprint = keys.has(inputStore.getState().bindings.sprint);
-          if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint);
+          // Sneak stance (Ctrl by default, V62): emits less footstep noise — sprint takes precedence in the runtime.
+          const bindNow = inputStore.getState().bindings;
+          const sprint = keys.has(bindNow.sprint);
+          const sneak = keys.has(bindNow.sneak);
+          if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint, sneak);
           const hit = aimWorldPoint();
           if (hit) {
             const pp = runtime.player();
@@ -546,6 +562,14 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         // near-ortho eye sits ~100m+ away, so using it for distance would cull every fire).
         fireView.update(dt, fireIgnitions, (cell) => runtime.isRouteBurning(cell), camPos, { x: p.x, y: 0, z: p.z }, access.feedback.reduceFlashes);
         corpseField.update(runtime.corpses.list); // T55/B9 — mirror lingering corpses onto the instanced field
+        // T60/V29: glow the NEAREST interactable in reach (hidden when none). Pulse is damped to a steady glow
+        // when reduce-flashes / reduce-motion is set. The runtime gives the placed + sized box; the view only
+        // positions/scales/colours it (V1/V2 — never reads world state back).
+        highlightView.update(
+          runtime.nearestInteractableHighlight(),
+          dt,
+          access.feedback.reduceFlashes || access.feedback.reduceMotion,
+        );
         scene?.syncFrame(dt, camera.camera, debugViewStore.getState().flags);
         gizmos.update(
           runtime.zombies,

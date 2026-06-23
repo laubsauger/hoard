@@ -17,6 +17,7 @@ export type InputAction =
   | 'moveLeft'
   | 'moveRight'
   | 'sprint'
+  | 'sneak'
   | 'rotateCW'
   | 'rotateCCW'
   | 'zoomIn'
@@ -36,6 +37,7 @@ export const INPUT_ACTIONS: readonly InputAction[] = [
   'moveLeft',
   'moveRight',
   'sprint',
+  'sneak',
   'rotateCW',
   'rotateCCW',
   'zoomIn',
@@ -54,6 +56,7 @@ export const INPUT_ACTION_LABELS: Readonly<Record<InputAction, string>> = {
   moveLeft: 'Move left',
   moveRight: 'Move right',
   sprint: 'Sprint',
+  sneak: 'Sneak',
   rotateCW: 'Rotate camera CW',
   rotateCCW: 'Rotate camera CCW',
   zoomIn: 'Zoom in',
@@ -86,6 +89,7 @@ const DEFAULT_BINDINGS: Bindings = {
   moveLeft: 'KeyA',
   moveRight: 'KeyD',
   sprint: 'ShiftLeft',
+  sneak: 'ControlLeft',
   rotateCW: 'KeyE',
   rotateCCW: 'KeyQ',
   zoomIn: 'Equal',

@@ -31,6 +31,10 @@ export {
   type DoorView,
 } from './doors';
 export {
+  lootableContainerCells,
+  type ContainerPlacement,
+} from './containers';
+export {
   authorHouseStyle,
   resolveHouseVariation,
   windowState,

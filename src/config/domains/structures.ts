@@ -98,4 +98,40 @@ export const structuresConfig = registerDomain('structures', {
     min: 0.5,
     max: 12,
   }),
+
+  // ---- Lootable kitchen cupboard (T85): cabinet dims shared by the render mesh + the container's
+  // interactable bounds (the active-highlight box), so the visible box and the hotspot always coincide (V4). ----
+  cupboardWidthMeters: num({
+    owner: 'structures',
+    unit: 'meters',
+    doc: 'Width of a lootable kitchen-cupboard cabinet (render mesh + container highlight box).',
+    default: 1,
+    min: 0.3,
+    max: 3,
+  }),
+  cupboardDepthMeters: num({
+    owner: 'structures',
+    unit: 'meters',
+    doc: 'Depth of a lootable kitchen-cupboard cabinet (render mesh + container highlight box).',
+    default: 0.6,
+    min: 0.2,
+    max: 2,
+  }),
+  cupboardHeightMeters: num({
+    owner: 'structures',
+    unit: 'meters',
+    doc: 'Height of a lootable kitchen-cupboard cabinet (render mesh + container highlight box).',
+    default: 1.1,
+    min: 0.3,
+    max: 4,
+  }),
+  /** Height (m) of the active-interactable highlight box for non-container targets (door/window/wall/corpse). */
+  interactionHighlightHeightMeters: num({
+    owner: 'structures',
+    unit: 'meters',
+    doc: 'Vertical size of the active-interactable highlight box for door/window/wall/corpse targets (T60/V29).',
+    default: 2.2,
+    min: 0.2,
+    max: 10,
+  }),
 });

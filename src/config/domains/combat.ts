@@ -114,6 +114,19 @@ export const combatConfig = registerDomain('combat', {
     min: 1,
     max: 200,
   }),
+  /** Max zombies promoted to limb-fidelity sim tiers (hero/active), chosen NEAREST-first. Caps how many can
+   *  be tier<=1 so the render limb pool (crowdLimbedBudget) shows the CLOSEST N as figures — without this cap a
+   *  dense near-horde over-fills the pool and the render picks arbitrary slot-order (close zombies wrongly box,
+   *  far ones limbed). Keep <= the desktop limb budget. V13/V22. */
+  heroActivePromotionBudget: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Max zombies at limb-fidelity sim tier (hero/active), nearest-first — caps the limb render pool input.',
+    default: 120,
+    min: 1,
+    max: 2000,
+    integer: true,
+  }),
   /** No zombie spawns within this radius of the player start — a safe bubble so one never materializes
    *  right next to the player at game start (a sampled scatter point inside it is rejected + resampled). */
   playerSafeSpawnMeters: num({

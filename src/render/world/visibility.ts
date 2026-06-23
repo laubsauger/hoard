@@ -22,6 +22,11 @@ export interface VisibilitySettings {
    * "turned toward the camera" (i.e. between camera + player → occluding). See `wallFacesCamera`.
    */
   readonly cameraFacingDotThreshold: number;
+  /**
+   * OUTSIDE-WALL cutaway band (V62): how close the player must stand to an EXTERIOR wall (on its outward side)
+   * for that wall to fade when it lies between the camera and the player. See `exteriorWallOccludesPlayer`.
+   */
+  readonly exteriorCutawayAdjacencyMeters: number;
 }
 
 export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings {
@@ -29,6 +34,7 @@ export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings
     baseHeightMeters: resolve(renderingConfig.wallBasePreservedHeightMeters, tier),
     upperFadeStartMeters: resolve(renderingConfig.upperWallFadeStartHeightMeters, tier),
     cameraFacingDotThreshold: resolve(renderingConfig.cutawayCameraFacingDotThreshold, tier),
+    exteriorCutawayAdjacencyMeters: resolve(renderingConfig.exteriorCutawayAdjacencyMeters, tier),
   };
 }
 
@@ -63,6 +69,40 @@ export function wallFacesCamera(input: WallFacingInput): boolean {
   if (nl === 0 || cl === 0) return false;
   const dot = (n.x * c.x + n.z * c.z) / (nl * cl);
   return dot > input.facingDotThreshold;
+}
+
+export interface ExteriorWallCutawayInput {
+  /** The wall's outward-facing horizontal normal (points from the enclosed building toward open space). */
+  readonly outwardNormal: VecXZ;
+  /** A point ON the wall's plane (its world-XZ centre is fine — the wall shell is thin). */
+  readonly wallCenter: VecXZ;
+  /** Player world-XZ. */
+  readonly player: VecXZ;
+  /** Camera world-XZ. */
+  readonly camera: VecXZ;
+  /** Max distance (m) the player may stand OUTSIDE the wall (along its outward normal) and still trigger. */
+  readonly adjacencyMeters: number;
+}
+
+/**
+ * OUTSIDE-WALL cutaway decision (V62): fade an EXTERIOR wall when the player is standing just OUTSIDE it and the
+ * wall plane lies BETWEEN the camera and the player — so an exterior wall never hides the player from an orbiting
+ * camera that has swung around behind it. We project both the player and the camera onto the wall's outward
+ * normal (signed distance from the wall plane): the player must be on the OUTWARD side within the adjacency band
+ * (0 ≤ playerSide ≤ adjacency), and the camera must be on the INWARD (building) side (cameraSide < 0) — i.e. the
+ * plane separates them. Purely a VIEW aid: this never touches the structural/nav grid, so crowd reveal + LOS are
+ * unaffected (V63). Pure + GPU-free; a degenerate (zero-length) normal never occludes.
+ */
+export function exteriorWallOccludesPlayer(input: ExteriorWallCutawayInput): boolean {
+  const n = input.outwardNormal;
+  const nl = Math.hypot(n.x, n.z);
+  if (nl === 0) return false;
+  const nx = n.x / nl;
+  const nz = n.z / nl;
+  const playerSide = (input.player.x - input.wallCenter.x) * nx + (input.player.z - input.wallCenter.z) * nz;
+  const cameraSide = (input.camera.x - input.wallCenter.x) * nx + (input.camera.z - input.wallCenter.z) * nz;
+  if (playerSide < 0 || playerSide > input.adjacencyMeters) return false; // player not just-outside this wall
+  return cameraSide < 0; // wall plane sits between the (inward) camera and the (outward) player
 }
 
 export interface OcclusionContext {

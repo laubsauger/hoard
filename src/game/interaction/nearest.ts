@@ -15,6 +15,60 @@ export interface InteractionTargetWorld extends InteractionTarget {
   readonly label: string;
 }
 
+/**
+ * The placed + SIZED active interactable the renderer outlines (T60/V29): world centre + an axis-aligned box
+ * roughly bounding the target, plus its kind (the highlight colour-codes by kind). One at a time — the nearest
+ * target in reach. Produced by `highlightBoxFor` so the transform is pure + headless-testable.
+ */
+export interface InteractionHighlightTarget {
+  readonly kind: TargetKind;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly sizeX: number;
+  readonly sizeY: number;
+  readonly sizeZ: number;
+}
+
+/** Physical dims used to size a target's highlight box (typed config + scene cell size — no magic numbers). */
+export interface HighlightDims {
+  /** Nav cell edge (m) — the planar footprint of a door/window/wall/corpse highlight box. */
+  readonly navCellSize: number;
+  /** Height (m) of a door/window/wall/corpse highlight box (the cupboard uses its own dims below). */
+  readonly defaultHeightMeters: number;
+  readonly cupboardWidthMeters: number;
+  readonly cupboardDepthMeters: number;
+  readonly cupboardHeightMeters: number;
+}
+
+/**
+ * Map a world interactable to its highlight box (pure). A container is sized to the cabinet dims so the
+ * outline hugs the cupboard mesh; every other kind gets a one-cell footprint at the configured height. The
+ * box rests on the floor (centre at half its height) so it reads as a standing object, not a buried one.
+ */
+export function highlightBoxFor(target: InteractionTargetWorld, dims: HighlightDims): InteractionHighlightTarget {
+  if (target.kind === 'container') {
+    return {
+      kind: 'container',
+      x: target.x,
+      y: dims.cupboardHeightMeters / 2,
+      z: target.z,
+      sizeX: dims.cupboardWidthMeters,
+      sizeY: dims.cupboardHeightMeters,
+      sizeZ: dims.cupboardDepthMeters,
+    };
+  }
+  return {
+    kind: target.kind,
+    x: target.x,
+    y: dims.defaultHeightMeters / 2,
+    z: target.z,
+    sizeX: dims.navCellSize,
+    sizeY: dims.defaultHeightMeters,
+    sizeZ: dims.navCellSize,
+  };
+}
+
 /** The nearest interactable to a point, with its planar distance. */
 export interface NearestInteractable {
   readonly target: InteractionTargetWorld;

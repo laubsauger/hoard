@@ -11,6 +11,7 @@ export {
 } from './packing';
 export { Crowd, CrowdLimbs, resolveCrowdSettings, type CrowdSettings } from './crowd';
 export { visionCullFade, type VisionCull } from './visionCull';
+export { instantaneousReveal, PerceptionMemory, type RevealParams } from './perceptionMemory';
 export {
   packLimbInputs,
   composeLimbMatrix,
