@@ -412,7 +412,7 @@ REALITY CHECK: Waves 0–10 built the engine + combat rendering, but the GAME is
 
 | id | st | lane | task | deps | cites |
 |---|---|---|---|---|---|
-| T83 | . | A | item catalog CONTENT: a real authored set of `ItemDef`s (melee/firearm weapons, ammo, food, drink, meds/bandages, tools, materials, valuables) with stats/weight/stack per the items config — populate the registry; validated (V4/V7) | T23 | V4,V7,items-config,inventory-config,PZ-research |
+| T83 | x | A | item catalog CONTENT: a real authored set of `ItemDef`s (melee/firearm weapons, ammo, food, drink, meds/bandages, tools, materials, valuables) with stats/weight/stack per the items config — populate the registry; validated (V4/V7) | T23 | V4,V7,items-config,inventory-config,PZ-research |
 | T84 | . | S | loot population + tables: per-container-type + per-zombie-type loot tables (weighted, deterministic seed V26); world build fills furniture/floor containers, zombie DEATH (T54) spawns a corpse container with loot; searched/looted state persists (V9) | T23,T54,T63,T83 | V9,V26,inventory-config,PZ-research |
 | T85 | . | S | item world-presence + pickup: dropped/loose items exist as world entities the floor-container surfaces; pick up / drop / transfer via `moveItem`; equipped weapon drives `runtime.fire` (T73) | T23,T63,T73 | V1,inventory-config |
 | T86 | . | INT | M3 playable loot loop (integration): enter a building → open a container/corpse → loot items into inventory (T62) → equip a weapon → use the equipped weapon; via the interaction wheel (T60), NOT the dummy bar; delete `Controls.tsx` dummy buttons | T59,T60,T62,T63,T83,T84,T85 | V27,V45,milestone-3 |
