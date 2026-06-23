@@ -201,6 +201,58 @@ export function rayDistanceToWall(
 }
 
 /**
+ * Visibility FAN (T68/V47): cast `rays+1` rays fanned across a cone of half-angle `fovHalf` centred on
+ * `heading` from (x,z), each clipped at the first wall (`rayDistanceToWall`). Returns the per-ray reach
+ * distances — the DEFORMED visibility polygon (hugs walls), NOT a uniform cone scaled to one ray. The
+ * shared primitive used by BOTH the perception logic (a target is seen iff inside this polygon) AND the
+ * debug overlay (which builds its cone mesh from these distances), so they always agree.
+ */
+export function castVisibilityFan(
+  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  x: number,
+  z: number,
+  heading: number,
+  fovHalf: number,
+  range: number,
+  rays: number,
+  out?: Float32Array,
+): Float32Array {
+  const n = Math.max(1, rays) + 1;
+  const dist = out && out.length >= n ? out : new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = heading - fovHalf + (2 * fovHalf * i) / (n - 1);
+    dist[i] = rayDistanceToWall(scene, x, z, a, range);
+  }
+  return dist;
+}
+
+/**
+ * True when a target at (tx,tz) is inside the agent's deformed visibility fan from (x,z) — within range,
+ * within the cone, AND not occluded by a wall on the direct ray (the same LOS the fan is built from). This
+ * is the authoritative "can see" test the perception logic uses; it agrees with the fan overlay by
+ * construction. (`fovHalf >= π` = omnidirectional, range-only + LOS.)
+ */
+export function seesWithinFan(
+  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  x: number,
+  z: number,
+  heading: number,
+  fovHalf: number,
+  range: number,
+  tx: number,
+  tz: number,
+): boolean {
+  const dx = tx - x;
+  const dz = tz - z;
+  if (Math.hypot(dx, dz) > range) return false;
+  if (fovHalf < Math.PI) {
+    const diff = Math.atan2(dz, dx) - heading;
+    if (Math.abs(Math.atan2(Math.sin(diff), Math.cos(diff))) > fovHalf) return false;
+  }
+  return hasLineOfSight(scene, x, z, tx, tz);
+}
+
+/**
  * Build a fresh BASE world (immutable authored geometry). Reload reconstructs this and re-applies the
  * compact delta on top (V9) — the base is never persisted, only re-built here.
  */

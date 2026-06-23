@@ -5,6 +5,8 @@ export {
   isWalkableRadius,
   hasLineOfSight,
   rayDistanceToWall,
+  castVisibilityFan,
+  seesWithinFan,
   buildingsOf,
   TEST_BLOCK_WORLD_VERSION,
   REGION_ROOM_A,
