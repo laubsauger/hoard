@@ -62,6 +62,7 @@ import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
 import { buildingIndexAt } from './systems/playerLocation';
+import { BreachSystem } from './systems/breachSystem';
 import { resolveFogDistances, approach, resolveToneExposure, interiorExposure } from '../lighting/lighting';
 import {
   CombatFeedbackSystem,
@@ -165,6 +166,9 @@ export class BlockScene {
   /** T108 windows: each window's child meshes (glass pane / dark void / boards), keyed by nav cell. syncWindows
    *  toggles their visibility to match the authoritative glass/board state (the render only REFLECTS it, V12). */
   private readonly windowMeshes: { navCell: number; pane: Mesh; voidMesh: Mesh; boards: Mesh[] }[] = [];
+
+  /** Per-frame systems constructed from the builder handles (Phase 2 of the decomposition). */
+  private readonly breach = new BreachSystem(this.sectionMeshes);
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -317,7 +321,7 @@ export class BlockScene {
     this.combatView = new CombatFeedbackView(combatSettings, this.registry);
     this.combatView.attachTo(this.scene);
 
-    this.syncBreach();
+    this.breach.sync(this.runtime.scene);
     this.syncFrame(0, undefined);
   }
 
@@ -347,7 +351,7 @@ export class BlockScene {
   /** Re-point at a freshly loaded runtime (save/load rebuild) and resync breach + crowd. */
   rebindRuntime(runtime: GameRuntime): void {
     this.runtime = runtime;
-    this.syncBreach();
+    this.breach.sync(this.runtime.scene);
     this.syncFrame(0, undefined);
   }
 
@@ -382,7 +386,7 @@ export class BlockScene {
     // the player facing 90° off the cursor).
     this.playerMesh.rotation.y = -this.runtime.playerAim();
 
-    this.syncBreach();
+    this.breach.sync(this.runtime.scene);
     this.syncDoors(dtSeconds);
     this.syncWindows();
     this.syncLighting(dtSeconds);
@@ -513,13 +517,6 @@ export class BlockScene {
     const brightness = Math.min(1, Math.max(0, sceneBrightness));
     f.intensity = this.lighting.flashlightIntensity * (dayScale + (1 - dayScale) * (1 - brightness));
     f.visible = f.intensity > 0;
-  }
-
-  private syncBreach(): void {
-    for (const s of this.sectionMeshes) {
-      const breached = this.runtime.scene.wall.isBreached(s.cell);
-      for (const o of s.objects) o.visible = !breached;
-    }
   }
 
   /**
@@ -726,7 +723,6 @@ export class BlockScene {
 
   /** Test/diagnostics: whether every section mesh for a structural cell is currently hidden (breached). */
   isSectionHidden(structuralCell: number): boolean {
-    const s = this.sectionMeshes.find((m) => m.cell === structuralCell);
-    return s ? s.objects.every((o) => !o.visible) : false;
+    return this.breach.isSectionHidden(structuralCell);
   }
 }
