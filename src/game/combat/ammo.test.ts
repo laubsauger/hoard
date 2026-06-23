@@ -16,7 +16,9 @@ const AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectil
 function harness(weaponOverrides: Partial<ResolvedDomain<typeof weaponsConfig>> = {}) {
   const zombies = new SimulationZombies(64);
   const spatial = new SpatialHash({ cellSize: 2 });
-  const weapons = { ...resolveDomain(weaponsConfig, 'desktop-high'), ...weaponOverrides };
+  // Default these ammo tests to MANUAL reload (the dry-click / explicit-reload paths under test); the
+  // auto-reload case opts in via overrides. The product default is now ON (see weaponsConfig).
+  const weapons = { ...resolveDomain(weaponsConfig, 'desktop-high'), autoReloadWhenEmpty: false, ...weaponOverrides };
   const combat = resolveDomain(combatConfig, 'desktop-high');
   const world: WorldEvent[] = [];
   const visual: VisualEvent[] = [];

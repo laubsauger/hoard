@@ -240,8 +240,8 @@ export const weaponsConfig = registerDomain('weapons', {
   /** When true, attempting to fire an empty magazine (with reserve available) auto-starts a reload. */
   autoReloadWhenEmpty: bool({
     owner: 'weapons',
-    doc: 'When firing an empty magazine, automatically begin a reload if reserve remains (default off).',
-    default: false,
+    doc: 'When firing an empty magazine, automatically begin a reload if reserve remains. ON by default — a gun that silently stops with 48 rounds in reserve reads as broken; the player still gets the reload pause + can reload early with R.',
+    default: true,
   }),
 
   // pistol ammo — a full magazine of 12 with a few spare mags in reserve; quick reload + quick swap.
