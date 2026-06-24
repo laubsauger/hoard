@@ -192,7 +192,9 @@ export class GameAudio {
   gunshot(indoor = false): void {
     const peak = voiceGain(1, this.tuning.gunshotGain, 1, this.tuning.masterCeiling);
     if (peak <= 0) return;
-    this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03);
+    // EXEMPT from the voice cap (counted=false) — the player gunshot is priority feedback; otherwise rapid fire
+    // (the pistol clip is longer than the fire interval, so shots overlap) hit the cap and dropped every other.
+    this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03, /* counted */ false);
   }
 
   /** Player weapon RELOAD — the authored reload sample (magazine swap). */
@@ -308,7 +310,7 @@ export class GameAudio {
    * don't sound identical). Returns false when the bank has not decoded / is absent — there is NO synth
    * fallback, so the caller simply makes no sound. Pooled + voice-capped via startTransient (V24).
    */
-  private playSample(bank: SfxBankName, gain: number, pan: number, pitchVar = 0): boolean {
+  private playSample(bank: SfxBankName, gain: number, pan: number, pitchVar = 0, counted = true): boolean {
     const ctx = this.ctx;
     const bus = this.sfxBus;
     if (!ctx || !bus || gain <= 0) return false;
@@ -321,7 +323,7 @@ export class GameAudio {
     const g = ctx.createGain();
     g.gain.value = gain;
     src.connect(g).connect(this.panner(ctx, pan, bus));
-    this.startTransient(src, ctx.currentTime, buf.duration / rate, /* counted */ true);
+    this.startTransient(src, ctx.currentTime, buf.duration / rate, counted);
     return true;
   }
 

@@ -303,23 +303,50 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
       );
       if (cand === undefined || cand === null) continue;
       captiveDoorCell = b.navGrid.index(dr.cx, dr.cy);
-      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway
-      // — but NOT on a window cell, or it spawns embedded in the glass (and used to smash it on load). Window
-      // cells are tracked separately so the captive prefers a solid interior corner; they're only used as a
-      // fallback if (impossibly) every room cell carries a window.
+      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway,
+      // but it MUST be a cell REACHABLE from the door over the live nav grid (furniture is already placed) — else
+      // it lands in a corner BOXED IN by a container/dresser and can never move (the stuck-behind-a-container
+      // bug). Flood the room's WALKABLE cells from the door seam; pick the farthest REACHABLE non-window cell.
+      const candCells = new Set<number>();
+      for (const rc of placed.rooms) if (rc.roomId === cand) candCells.add(b.navGrid.index(rc.cx, rc.cy));
       const winCells = new Set<number>(placed.windows.map((wn) => b.navGrid.index(wn.cx, wn.cy)));
+      const D: Record<Edge, { dx: number; dy: number }> = { n: { dx: 0, dy: -1 }, s: { dx: 0, dy: 1 }, e: { dx: 1, dy: 0 }, w: { dx: -1, dy: 0 } };
+      const reachable = new Set<number>();
+      const queue: CellXY[] = [];
+      // Seed from the door cell + its cross-edge neighbour — whichever lies inside the dead-end room starts the flood.
+      for (const seed of [{ cx: dr.cx, cy: dr.cy }, { cx: dr.cx + D[dr.dir].dx, cy: dr.cy + D[dr.dir].dy }]) {
+        const idx = b.navGrid.index(seed.cx, seed.cy);
+        if (candCells.has(idx) && !b.navGrid.isBlocked(idx) && !reachable.has(idx)) {
+          reachable.add(idx);
+          queue.push(seed);
+        }
+      }
+      while (queue.length > 0) {
+        const c = queue.shift()!;
+        for (const d of [D.n, D.s, D.e, D.w]) {
+          const nx = c.cx + d.dx;
+          const ny = c.cy + d.dy;
+          const nidx = b.navGrid.index(nx, ny);
+          if (!candCells.has(nidx) || reachable.has(nidx) || b.navGrid.isBlocked(nidx)) continue;
+          if (!b.navGrid.canStep(c.cx, c.cy, d.dx, d.dy)) continue; // respect interior partitions / blocked edges
+          reachable.add(nidx);
+          queue.push({ cx: nx, cy: ny });
+        }
+      }
       let best: CellXY | null = null;
       let bestD = -1;
       let fallback: CellXY | null = null;
       let fallbackD = -1;
       for (const rc of placed.rooms) {
         if (rc.roomId !== cand) continue;
+        const idx = b.navGrid.index(rc.cx, rc.cy);
+        if (!reachable.has(idx)) continue; // never spawn the captive where it can't reach its own door
         const dd = Math.max(Math.abs(rc.cx - dr.cx), Math.abs(rc.cy - dr.cy));
         if (dd > fallbackD) {
           fallbackD = dd;
           fallback = { cx: rc.cx, cy: rc.cy };
         }
-        if (winCells.has(b.navGrid.index(rc.cx, rc.cy))) continue; // skip window cells for the primary pick
+        if (winCells.has(idx)) continue; // prefer a non-window cell
         if (dd > bestD) {
           bestD = dd;
           best = { cx: rc.cx, cy: rc.cy };

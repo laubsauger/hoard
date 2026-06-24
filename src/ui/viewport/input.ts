@@ -62,7 +62,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
       }
     }
     // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
-    if (e.code === 'KeyR' && getRuntime().reloadWeapon()) gameAudio.reload(); // sampled magazine-swap on a real reload
+    if (e.code === 'KeyR') getRuntime().reloadWeapon(); // reload sample plays from the render loop's reload-start edge (manual + auto)
     if (e.code === 'BracketRight') getRuntime().cycleWeapon(1);
     if (e.code === 'BracketLeft') getRuntime().cycleWeapon(-1);
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
