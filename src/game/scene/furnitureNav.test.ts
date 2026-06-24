@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { buildCityDistrict } from './cityDistrict';
+import { furnitureBlockedCells } from './furnitureSolidity';
 import type { NavGrid } from '@/game/navigation';
 import type { PlacedHouse } from './placeHouse';
 import type { Edge } from './houseTemplates';
@@ -64,13 +65,23 @@ describe('furniture in the district (nav)', () => {
     const { block } = buildCityDistrict();
     const furniture = block.placedFurniture ?? [];
     expect(furniture.length).toBeGreaterThan(0);
-    // every solid piece's anchor cell is blocked; every non-solid piece's cell is NOT (it stays walkable).
+    // Every solid piece blocks its MESH-FOOTPRINT cells (centred on the piece, sized to the mesh — not the fat
+    // reserved cell box). At least one of those cells is blocked on the live grid (a doorway cell could be
+    // skip-protected, so don't require ALL). Non-solid pieces block nothing.
     const grid = block.navGrid;
+    const cs = grid.settings.navCellSize;
     let solidCount = 0;
     for (const p of furniture) {
+      const cells = furnitureBlockedCells(p, cs);
       if (p.solid) {
         solidCount++;
-        expect(grid.isBlocked(grid.index(p.cx, p.cy))).toBe(true);
+        expect(cells.length).toBeGreaterThan(0);
+        const anyBlocked = cells.some(
+          (c) => c.cx >= 0 && c.cy >= 0 && c.cx < grid.width && c.cy < grid.height && grid.isBlocked(grid.index(c.cx, c.cy)),
+        );
+        expect(anyBlocked).toBe(true);
+      } else {
+        expect(cells.length).toBe(0); // non-solid → no nav block
       }
     }
     expect(solidCount).toBeGreaterThan(0);
