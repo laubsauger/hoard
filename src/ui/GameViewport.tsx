@@ -16,6 +16,7 @@ import {
 } from '../render/engine';
 import { createDevStats, createRendererHost, startRendererHost, attachResize } from './viewport/rendererHost';
 import { createCameraController } from './viewport/cameraController';
+import { createEngineHandle, type EngineHandle } from './viewport/engineHandle';
 import { createEffectViews } from './viewport/effectViews';
 import { AimRaycaster } from './viewport/aim';
 import { registerInput } from './viewport/input';
@@ -29,17 +30,13 @@ import { SceneGizmos } from '../render/debug';
 import { debugViewStore } from '../diagnostics/store';
 import { createNoiseSnapshotGate, noiseViewStore } from '../stores/noiseView';
 import { inventoryViewStore } from '../stores/inventoryView';
-import { uiStore } from '../stores/ui';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../render/accessibility';
 import { GameRuntime } from '../game/runtime';
 import { createGameRuntime } from './viewport/gameRuntime';
 import { rayDistanceToWall } from '../game/scene';
-import type { InteractionPrompt, InteractionTargetWorld } from '../game/interaction';
 import { InMemoryPersistenceAdapter, IndexedDbPersistenceAdapter, type PersistenceAdapter } from '../game/persistence';
-import type { CommandId, EntityId, ModuleId } from '../game/core/contracts';
-import type { WeatherProfile } from '../config/domains/weather';
 import { sessionStore, simStepDt } from '../stores/session';
-import { inputStore, formatKeyCode } from '../stores/input';
+import { inputStore } from '../stores/input';
 import { settingsStore, type SettingsState } from '../stores/settings';
 import { GameAudio, resolveAudioOutTuning, type AudibleSound } from '../audio-out';
 
@@ -57,34 +54,9 @@ function accessibilityFromSettings(s: SettingsState): RenderAccessibility {
 
 const DEG2RAD = Math.PI / 180;
 
-/** The engine handle the React shell uses to issue slice-level intent (save/load/modify/weather). */
-export interface EngineHandle {
-  save(): Promise<void>;
-  load(): Promise<void>;
-  breach(): void;
-  board(): void;
-  ignite(): void;
-  /** T46/T60: toggle the door NEAREST the player (open↔closed). No-op when none is in reach. */
-  toggleNearestDoor(): void;
-  /** T108: window verbs for the NEAREST window in reach (smash glass / board up / pry boards off / climb). */
-  smashWindow(): void;
-  boardWindow(): void;
-  removeWindowBoard(): void;
-  climbWindow(): void;
-  /** T60: the "{key} to {action}" prompt for the nearest interactable in reach, or null (HUD polls this). */
-  nearestInteraction(): InteractionPrompt | null;
-  /** T60: the nearest interactable target (full state) — the wheel resolves its context verbs. */
-  nearestInteractable(): InteractionTargetWorld | null;
-  /** T59: open a world container's loot panel (the "Search/Loot" verb for a storage target). */
-  loot(): void;
-  rotate(dir: 1 | -1): void;
-  zoom(delta: number): void;
-  setWeather(profile: WeatherProfile): void;
-  // M2 medium-term objective intents (V1 — issued as confirmAction commands).
-  collectPart(): void;
-  repairRadio(): void;
-  advanceObjective(): void;
-}
+// The engine handle the React shell uses to issue slice-level intent (save/load/modify/weather) lives
+// with its factory; re-exported so the existing shell imports (`from './GameViewport'`) are unchanged.
+export type { EngineHandle };
 
 export interface GameViewportProps {
   onReady?: (handle: EngineHandle) => void;
@@ -123,7 +95,6 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
     let adapter: PersistenceAdapter | undefined;
     const keys = new Set<string>();
     const aim = new AimRaycaster();
-    let cmdSeq = 1;
     let selfNoise = 0; // 0..1 player-produced noise, bumped on fire, decays each frame (HUD noise meter).
     const cleanups: (() => void)[] = [];
 
@@ -243,55 +214,17 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       sessionStore.getState().setPhase('playing');
 
       // expose the slice handle to the React shell (commands flow UI -> engine, V1).
-      const nextCmd = (): CommandId => cmdSeq++ as unknown as CommandId;
-      onReady?.({
-        save: () => runtime.save(),
-        load: async () => {
-          const fresh = createGameRuntime(tier, adp);
-          await fresh.loadFrom();
-          runtime = fresh;
-          scene?.rebindRuntime(fresh);
-          publishInventory(); // re-surface the reloaded runtime's inventory (T85)
-        },
-        breach: () => {
-          runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'breach' });
-        },
-        board: () => {
-          runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'board' });
-        },
-        ignite: () => runtime.igniteRoute(runtime.defaultBreachCell()),
-        toggleNearestDoor: () => { runtime.toggleNearestDoor(); },
-        // T108 window verbs. Board-up consumes planks + a tool; pry returns the planks — re-publish the
-        // inventory so the HUD plank count updates immediately (V1). Climb is flavour (the opening is already
-        // passable — its nav cell is cleared), so it is a no-op that simply closes the wheel.
-        smashWindow: () => { runtime.smashNearestWindow(); },
-        boardWindow: () => { if (runtime.boardNearestWindow()) publishInventory(); },
-        removeWindowBoard: () => { if (runtime.unboardNearestWindow()) publishInventory(); },
-        climbWindow: () => { runtime.climbThroughNearestWindow(); },
-        nearestInteraction: () => runtime.nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
-        nearestInteractable: () => runtime.nearestInteractableTarget(),
-        loot: () => {
-          // Open the dual-pane inventory ON the looted container (was only setting the container, never the
-          // panel, so nothing showed — the InventoryMenu is gated on uiStore.activePanel === 'inventory').
-          // No fallback: if no container is in reach there is nothing to loot — do nothing.
-          const t = runtime.nearestInteractableTarget();
-          if (t?.kind !== 'container') return;
-          inventoryViewStore.getState().setOpenContainer(t.label);
-          uiStore.getState().openPanel('inventory');
-        },
-        rotate: (dir) => camera.rotate(dir),
-        zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
-        setWeather: (profile) => runtime.setWeather(profile),
-        collectPart: () => {
-          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.collectPart' });
-        },
-        repairRadio: () => {
-          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.repair' });
-        },
-        advanceObjective: () => {
-          runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.advance' });
-        },
-      });
+      onReady?.(
+        createEngineHandle({
+          tier,
+          adapter: adp,
+          camera,
+          scene,
+          getRuntime: () => runtime,
+          setRuntime: (r) => { runtime = r; },
+          publishInventory,
+        }),
+      );
 
       // ---- frame loop: real dt -> runtime.update (fixed ticks) -> sync scene -> render (V12) ----
       let last = performance.now();
