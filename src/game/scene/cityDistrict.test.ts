@@ -135,9 +135,10 @@ describe('city district scene (T80 — large multi-building world)', () => {
         if (e.kind !== 'interior' || e.outerCx === null || e.outerCy === null) continue;
         const innerOk = !grid.isBlocked(grid.index(e.innerCx, e.innerCy));
         const outerOk = !grid.isBlocked(grid.index(e.outerCx, e.outerCy));
-        // BOTH room cells stay walkable (the PZ model) — only the cross-edge changes.
-        expect(innerOk).toBe(true);
-        expect(outerOk).toBe(true);
+        // P1b: a SOLID furniture piece may legitimately block a room cell adjacent to a partition; that's an
+        // orthogonal cell-block, not the edge-wall this test probes. Skip those — the edge-wall still stands,
+        // we just can't assert the cell is walkable when furniture occupies it.
+        if (!innerOk || !outerOk) continue;
         if (doorKeys.has(e.key)) {
           expect(grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)).toBe(true); // doorway: passable
           openDoorways += 1;
@@ -164,6 +165,9 @@ describe('city district scene (T80 — large multi-building world)', () => {
       for (const e of house.wallEdges) {
         if (e.kind !== 'interior' || e.outerCx === null || e.outerCy === null) continue;
         if (doorKeys.has(e.key)) continue;
+        // P1b: both probe cells must be walkable (a solid-furniture cell isn't a valid flow-field target).
+        if (grid.isBlocked(grid.index(e.innerCx, e.innerCy))) continue;
+        if (grid.isBlocked(grid.index(e.outerCx, e.outerCy))) continue;
         probe = { ax: e.innerCx, ay: e.innerCy, bx: e.outerCx, by: e.outerCy };
         break;
       }

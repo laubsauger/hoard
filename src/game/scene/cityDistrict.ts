@@ -17,6 +17,8 @@
 import { NavGrid, RegionGraph } from '@/game/navigation';
 import { StructuralModule } from '@/game/destruction';
 import { setPropSolid } from './propSolidity';
+import { furnishHouse } from './furnishHouse';
+import { setFurnitureSolid } from './furnitureSolidity';
 import type { ModuleId } from '@/game/core/contracts';
 import { resolveDomain } from '@/config/registry';
 import { worldConfig } from '@/config/domains/world';
@@ -30,6 +32,7 @@ import {
   type BuildingFootprint,
   type GroundRect,
   type PropInstance,
+  type PlacedFurniture,
   type TestBlock,
 } from './testBlock';
 import { placeHouse, type PlacedHouse } from './placeHouse';
@@ -110,6 +113,7 @@ interface DistrictBuild {
   readonly props: PropInstance[];
   readonly exitCells: CellXY[];
   readonly houses: PlacedHouse[];
+  readonly furniture: PlacedFurniture[];
   readonly windowSeeds: WindowPlacement[];
   readonly houseVar: HouseVariationParams;
   readonly boardedFraction: number;
@@ -177,6 +181,13 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const placed = placeHouse(template, originCx, originCy);
   const houseIndex = b.houses.length;
   b.houses.push(placed);
+
+  // --- furniture (P1b): furnish every room of this house, in WORLD cells, off a deterministic per-house seed
+  // (the placer mixes in each room's type + bounds, so one seed varies layouts per room — V26). SOLID pieces are
+  // marked blocked in the nav grid below (after stamping), exactly like prop solidity; the renderer + loot pass
+  // read the same list off the scene contract.
+  const houseSeed = (Math.imul(originCx + 1, 0x27d4eb2f) ^ Math.imul(originCy + 1, 0x165667b1)) | 0;
+  for (const piece of furnishHouse(placed, houseIndex, houseSeed)) b.furniture.push(piece);
 
   // --- seal the exterior shell: block the whole (W+2)×(D+2) perimeter ring (the template footprint is a
   // rectangle, so EVERY boundary edge is exterior wall). Door gaps are punched after.
@@ -349,6 +360,7 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     props: [],
     exitCells: [],
     houses: [],
+    furniture: [],
     windowSeeds: [],
     houseVar: resolveHouseVariation(tier),
     boardedFraction: worldCfg.houseWindowBoardedFraction,
@@ -391,6 +403,15 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     setPropSolid(navGrid, prop, true, (cx, cy) => exitKeys.has(navGrid.index(cx, cy)), fenceMissingChance);
   }
 
+  // ---- FURNITURE solidity (P1b): same single-nav-source pattern — a SOLID furniture piece (bed/sofa/counter/
+  // fridge/wardrobe/…) marks its footprint BLOCKED so movement + shots + sight all stop at it; low/small pieces
+  // stay walkable. The placer guarantees each room keeps a walkable path (furnishRoom flood-fill), and we block
+  // only the SOLID subset of pieces, so the room's free space (a superset of the placer's) stays connected — no
+  // room is sealed. Door/exit cells are guarded (furniture never lands on them, but skip is belt-and-braces).
+  for (const piece of build.furniture) {
+    setFurnitureSolid(navGrid, piece, true, (cx, cy) => exitKeys.has(navGrid.index(cx, cy)));
+  }
+
   // ---- the standalone destructible §G wall section (breach mechanic kept; no house bisected) ----
   for (const c of BREACH_WALL_CELLS) navGrid.block(c.cx, c.cy);
   const wall = new StructuralModule({ id: TEST_MODULE_ID, sizeX: 1, sizeY: 1, sizeZ: WALL_SECTION_CELLS, seed: 7531 });
@@ -431,6 +452,7 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     props: build.props,
     exitCells: build.exitCells,
     placedHouses: houses,
+    placedFurniture: build.furniture,
     windowSeeds: build.windowSeeds,
     roomAt,
     cellCenter: (cell) => ({ x: (cell.cx + 0.5) * navCellSize, y: 0, z: (cell.cy + 0.5) * navCellSize }),

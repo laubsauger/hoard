@@ -21,7 +21,25 @@ export {
   type GroundKind,
   type PropInstance,
   type PropKind,
+  type PlacedFurniture,
 } from './testBlock';
+export {
+  furnishRoom,
+  furnitureFits,
+  furnitureLeavesPathClear,
+  pieceCells,
+  type FurniturePiece,
+  type FurnitureKind,
+  type FurnishRoomArgs,
+  type RoomWindow,
+} from './furnishRoom';
+export { furnishHouse } from './furnishHouse';
+export {
+  FURNITURE_SOLIDITY,
+  isFurnitureSolid,
+  furnitureBlockedCells,
+  setFurnitureSolid,
+} from './furnitureSolidity';
 export { buildCityBlock, CITY_BLOCK_WORLD_VERSION, REGION_STREET } from './cityBlock';
 export { buildCityDistrict, CITY_DISTRICT_WORLD_VERSION, type CityDistrict } from './cityDistrict';
 export {

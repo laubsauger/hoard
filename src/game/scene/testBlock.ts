@@ -13,7 +13,9 @@ import { RegionGraph } from '@/game/navigation';
 import { StructuralModule } from '@/game/destruction';
 import type { ModuleId } from '@/game/core/contracts';
 import type { PlacedHouse } from './placeHouse';
-import type { RoomType } from './houseTemplates';
+import type { Edge, RoomType } from './houseTemplates';
+import type { FurnitureKind } from './furnishRoom';
+import type { LootSource } from '@/game/inventory/loot';
 import type { WindowPlacement } from './windows';
 
 /** Base-package version this authored block belongs to (save-compat gate on reload — V23). */
@@ -89,6 +91,30 @@ export interface PropInstance {
   readonly variant?: number;
 }
 
+/**
+ * One placed furniture piece in the world (P1b). Emitted by furnishHouse for every room of every placed house,
+ * in WORLD nav cells (`cx,cy` = the piece's anchor / min corner; `footprint` extends +cx/+cy). SOLID pieces have
+ * their footprint cells blocked in the nav grid (furnitureSolidity), so they stop movement + shots + sight; LOW
+ * pieces stay walkable. `container` (non-null) marks a lootable container the runtime seeds from its LootSource.
+ * The renderer (furnitureBuilder) draws a mesh per piece, oriented by `facing`. */
+export interface PlacedFurniture {
+  readonly kind: FurnitureKind;
+  readonly cx: number;
+  readonly cy: number;
+  readonly footprint: { readonly w: number; readonly d: number };
+  /** Direction the piece's FRONT faces (wall pieces face into the room). */
+  readonly facing: Edge;
+  /** True when this piece blocks nav (its footprint is marked blocked). */
+  readonly solid: boolean;
+  /** The loot source this piece is searched as, or null for a non-container piece. */
+  readonly container: LootSource | null;
+  /** Index into `placedHouses` of the owning house. */
+  readonly houseIndex: number;
+  /** Room id within the owning house. */
+  readonly roomId: number;
+  readonly roomType: RoomType;
+}
+
 export interface TestBlock {
   readonly navGrid: NavGrid;
   readonly region: RegionGraph;
@@ -116,6 +142,10 @@ export interface TestBlock {
    *  district; absent for the bare GATE-0 / M1 blocks. The renderer (P0c) builds walls/doors/windows from
    *  each house's `wallEdges`; loot/AI read rooms-as-regions via `roomAt`. */
   readonly placedHouses?: readonly PlacedHouse[];
+  /** P1b: the furniture placed across every house's rooms (world cells + kind + facing + solidity + container).
+   *  Solid pieces are already blocked in the nav grid; the renderer draws a mesh per piece; the runtime seeds
+   *  the container-bearing pieces as lootable world containers. Absent for the bare GATE-0 / M1 blocks. */
+  readonly placedFurniture?: readonly PlacedFurniture[];
   /** P0: the authored window set (derived from the placed templates). When present, `windowPlacements` returns
    *  THIS exact set so the sim seed + the renderer mesh build read the SAME windows (V26). */
   readonly windowSeeds?: readonly WindowPlacement[];
