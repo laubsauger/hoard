@@ -100,3 +100,17 @@ the same XZ (looks like a real upstairs); the cutaway shows the player's CURRENT
 level 0, every system defaults to level 0 → byte-identical to today, so the existing suite stays green. Staged:
 (P3a) per-level nav + stair-link API; (P3b) agent level + climb in movement/flow; (P3c) per-level perception+
 sound; (P3d) render stacking + per-level cutaway + stairs mesh; (P3e) cityDistrict emits some colonial-2storey.
+
+## House polish punch-list (user feedback, do with P3d/e + cleanup)
+1. **Exterior wall = thin edge-wall, not a 2m ring.** cityDistrict's (W+2)×(D+2) blocked ring makes the wall a
+   full nav cell (~2m) thick → ~50% of a small house is non-nav wall + a big floor↔outside gap. Make exterior
+   walls thin edge-walls on the room perimeter (reuse edge-wall nav); rooms reach the footprint boundary; no ring.
+2. **Fewer/bigger rooms.** Houses are overcrowded with walls/rooms for their size. Reduce interior partitions —
+   bigger rooms in the templates (fewer 1-cell rooms), less wall noise.
+3. **Interior walls thinner.** Reduce interior partition wall thickness.
+4. **Weird/nonsensical walls — reduce noise.** Audit for spurious wall segments; clean up.
+5. **Windows: kill z-fighting + thinner.** Pane/void/frame still z-fight (paneInset insufficient) + span full wall
+   depth = too thick. Thin the glass + frame; fix the coincident-face z-fight properly.
+6. **Roof texture.** Roofs are flat single-color + lame — add shingle/material detail (procedural banding, no files).
+7. **Remove backward-compat after P3 lands.** Drop the single-level legacy paths/gating once multi-floor is real —
+   don't carry legacy. (Do LAST, after P3d/e green.)
