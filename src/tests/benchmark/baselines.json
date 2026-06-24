@@ -3,9 +3,9 @@
   "note": "Per-tick CPU sim cost (ms) recorded by src/tests/benchmark on a developer workstation. Hardware-agnostic proxy ONLY — NOT the in-browser GPU frame-time capture (deferred). Regenerate with BENCH_RECORD=1 npx vitest run src/tests/benchmark. The regression test asserts measured <= max(baseline * toleranceFactor, floorMs); see config.ts.",
   "scenes": {
     "crowd-avenue": {
-      "medianMs": 9.6652,
-      "p95Ms": 13.6429,
-      "p99Ms": 14.1825,
+      "medianMs": 34.0145,
+      "p95Ms": 61.2078,
+      "p99Ms": 68.4165,
       "entityCount": 2000
     },
     "breach-cascade": {

@@ -98,17 +98,20 @@ function perimeter(w: number, h: number): CellXY[] {
 // shared flow field pulling them toward the player while gunfire rings out.
 // ---------------------------------------------------------------------------------------------------
 export function buildCrowdAvenue(): TestBlock {
-  const w = 100; // 200 m long
-  const h = 14; // 28 m wide
+  // navCellSize is 1 m (was 2 m): cell counts are doubled so the PHYSICAL avenue is unchanged (200 m × 28 m).
+  // This keeps the 2000-agent density — and hence the per-tick separation/steering cost the baseline measured —
+  // identical, rather than packing the same horde into a half-size world.
+  const w = 200; // 200 m long
+  const h = 28; // 28 m wide
   return assemble({
     worldVersion: 'bench-crowd-avenue-1',
     widthCells: w,
     heightCells: h,
-    playerCell: { cx: 4, cy: 7 },
-    spawnCenterCell: { cx: 70, cy: 7 },
+    playerCell: { cx: 8, cy: 14 },
+    spawnCenterCell: { cx: 140, cy: 14 },
     blocked: perimeter(w, h),
     // inert corner wall (not breached in this scene); kept off every path.
-    wall: { cx: 1, sectionStartCy: 1, sectionCells: 1 },
+    wall: { cx: 2, sectionStartCy: 2, sectionCells: 1 },
   });
 }
 

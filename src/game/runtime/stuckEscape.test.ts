@@ -7,8 +7,8 @@ import { selectEscapeDir, STUCK_ESCAPE_FAN } from './hordeSystems';
 import { NavGrid } from '@/game/navigation';
 import { nearestWalkablePoint } from '@/game/scene';
 
-const CS = 2; // navCellSize (default desktop-high)
-const center = (c: number): number => (c + 0.5) * CS;
+/** World centre of a cell on `g` — derived from the grid's ACTUAL navCellSize (config-robust). */
+const center = (g: NavGrid, c: number): number => (c + 0.5) * g.settings.navCellSize;
 
 describe('stuck-escape direction selection (T134/V101)', () => {
   it('the fan is the documented 6-direction set (±30/±60/±90), unit-length, nearest-first', () => {
@@ -42,7 +42,7 @@ describe('stuck-escape direction selection (T134/V101)', () => {
 
   it('wall-follows: with a wall to the right, the body turns the OTHER way deterministically', () => {
     // heading +x into a wall; "clear" only when the rotated step turns toward -z (turning left/away).
-    const got = selectEscapeDir(1, 0, (edx, edz) => edz < 0);
+    const got = selectEscapeDir(1, 0, (_edx, edz) => edz < 0);
     expect(got).not.toBeNull();
     expect(got!.dirZ).toBeLessThan(0); // chose the -z side
     // and it is the NEAREST such offset (-30°), not a wider one.
@@ -55,7 +55,7 @@ describe('spawn-clamp to nearest walkable (T134/V101)', () => {
   function scene(g: NavGrid) {
     return {
       navGrid: g,
-      cellCenter: (c: { cx: number; cy: number }) => ({ x: center(c.cx), y: 0, z: center(c.cy) }),
+      cellCenter: (c: { cx: number; cy: number }) => ({ x: center(g, c.cx), y: 0, z: center(g, c.cy) }),
       isWalkableWorld: (x: number, z: number) => {
         const { cx, cy } = g.worldToCell(x, z);
         if (cx < 0 || cy < 0 || cx >= g.width || cy >= g.height) return false;
@@ -77,7 +77,7 @@ describe('spawn-clamp to nearest walkable (T134/V101)', () => {
     g.block(5, 5); // a wall/furniture cell
     const s = scene(g);
     // spawn at the centre of the blocked cell (5,5) → world (11,11). Must snap OUT to an adjacent walkable cell.
-    const p = nearestWalkablePoint(s, center(5), center(5), 0.35, 24);
+    const p = nearestWalkablePoint(s, center(g, 5), center(g, 5), 0.35, 24);
     expect(s.isWalkableWorld(p.x, p.z)).toBe(true);
     const cell = g.worldToCell(p.x, p.z);
     expect(g.isBlocked(g.index(cell.cx, cell.cy))).toBe(false);
@@ -89,8 +89,8 @@ describe('spawn-clamp to nearest walkable (T134/V101)', () => {
     const g = new NavGrid({ width: 10, height: 10 });
     g.block(5, 5);
     const s = scene(g);
-    const a = nearestWalkablePoint(s, center(5), center(5), 0.35, 24);
-    const b = nearestWalkablePoint(s, center(5), center(5), 0.35, 24);
+    const a = nearestWalkablePoint(s, center(g, 5), center(g, 5), 0.35, 24);
+    const b = nearestWalkablePoint(s, center(g, 5), center(g, 5), 0.35, 24);
     expect(a).toEqual(b);
   });
 
@@ -103,7 +103,7 @@ describe('spawn-clamp to nearest walkable (T134/V101)', () => {
     }
     const s = scene(g);
     const r = 0.9; // a wide body
-    const p = nearestWalkablePoint(s, center(5), center(5), r, 24);
+    const p = nearestWalkablePoint(s, center(g, 5), center(g, 5), r, 24);
     // the chosen point must clear the body radius (centre + rim all walkable), not merely sit on a walkable cell.
     expect(s.isWalkableWorld(p.x + r, p.z)).toBe(true);
     expect(s.isWalkableWorld(p.x - r, p.z)).toBe(true);
@@ -113,6 +113,6 @@ describe('spawn-clamp to nearest walkable (T134/V101)', () => {
     const g = new NavGrid({ width: 6, height: 6 });
     for (let cx = 0; cx < 6; cx++) for (let cy = 0; cy < 6; cy++) g.block(cx, cy); // everything blocked
     const s = scene(g);
-    expect(() => nearestWalkablePoint(s, center(3), center(3), 0.35, 8)).toThrow(/no walkable cell/);
+    expect(() => nearestWalkablePoint(s, center(g, 3), center(g, 3), 0.35, 8)).toThrow(/no walkable cell/);
   });
 });

@@ -36,8 +36,8 @@ import {
   type PlacedFurniture,
   type TestBlock,
 } from './testBlock';
-import { placeHouse, type PlacedHouse } from './placeHouse';
-import { HOUSE_TEMPLATES, type HouseTemplate, type RoomType, type Edge } from './houseTemplates';
+import { placeHouse, SUBDIV, type PlacedHouse } from './placeHouse';
+import { HOUSE_TEMPLATES, subdivideTemplate, type HouseTemplate, type RoomType, type Edge } from './houseTemplates';
 import { houseStyleForBuilding, type WindowPlacement } from './windows';
 import { resolveHouseVariation, windowState, type HouseVariationParams } from './houseStyle';
 
@@ -46,19 +46,22 @@ export const REGION_STREET = 2;
 
 export const CITY_DISTRICT_WORLD_VERSION = 'm2-citydistrict-2';
 
-// ---- district grid layout (nav cells; navCellSize is 2 m) -------------------------------------------
+// ---- district grid layout (nav cells; navCellSize is 1 m) -------------------------------------------
 // A regular block of COLS×ROWS lots, separated (and bordered) by STREET-wide bands. One lot is an open
-// green (the horde muster). A house's nav footprint is EXACTLY its template W×D ROOM cells — there is NO
-// exterior wall ring. The exterior walls are THIN edge-walls on the outer faces of the perimeter room cells
-// (setWallBetween against the open street, the same model as interior partitions), so the building bounds
-// are W×D and the interior floor reaches the outer wall with no gap. They fit inside one LOT_W×LOT_H lot.
-const STREET = 4; // cells (8 m) — street + sidewalk + verge band around every lot
-const LOT_W = 11; // cells — lot footprint (house + yard)
-const LOT_H = 11;
+// green (the horde muster). A house's nav footprint is EXACTLY its SUBDIVIDED template W×D ROOM cells (the
+// templates are authored on the 2 m grid; the scene stamps subdivideTemplate(t, SUBDIV) at navCellSize 1 m so
+// the house keeps its physical size) — there is NO exterior wall ring. The exterior walls are THIN edge-walls
+// on the outer faces of the perimeter room cells (setWallBetween against the open street, the same model as
+// interior partitions), so the building bounds are W×D and the interior floor reaches the outer wall with no
+// gap. They fit inside one LOT_W×LOT_H lot. Cell-DISTANCE constants are doubled vs the old 2 m grid so the
+// world geometry is IDENTICAL in metres (COLS/ROWS are COUNTS — unchanged; derived dims stay derived).
+const STREET = 8; // cells (8 m) — street + sidewalk + verge band around every lot
+const LOT_W = 22; // cells (22 m) — lot footprint (house + yard)
+const LOT_H = 22;
 const COLS = 5;
 const ROWS = 3;
-const GRID_WIDTH_CELLS = STREET + COLS * (LOT_W + STREET); // 79
-const GRID_HEIGHT_CELLS = STREET + ROWS * (LOT_H + STREET); // 49
+const GRID_WIDTH_CELLS = STREET + COLS * (LOT_W + STREET); // 158
+const GRID_HEIGHT_CELLS = STREET + ROWS * (LOT_H + STREET); // 98
 
 /** The central lot left open as a green (no house) — the horde musters here and streams outward. */
 const PARK_COL = 2;
@@ -70,7 +73,7 @@ const PLAYER_ROW = 0;
 
 const TEST_MODULE_ID = 1 as ModuleId;
 const FRACTURE_FAMILY = 0;
-const WALL_SECTION_CELLS = 4; // the standalone breach-mechanic wall — 4 destructible cells
+const WALL_SECTION_CELLS = 8; // the standalone breach-mechanic wall — 8 destructible cells (8 m at navCellSize 1)
 
 // ---- deterministic per-lot variation ----------------------------------------------------------------
 /** Small deterministic hash → [0,1) so the same lot always authors the same house (replay-stable, V26). */
@@ -176,8 +179,11 @@ function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
  */
 function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const lot = lotOrigin(i, j);
-  const template = templateForLot(i, j);
-  const { w, d } = template.footprint;
+  // The templates are authored on the coarse 2 m grid; the live nav grid runs at 1 m. Stamp the SUBDIVIDED
+  // template so the house keeps its physical size (W×SUBDIV × D×SUBDIV finer cells = identical metres) while
+  // gaining 1 m collision / indoor-nav resolution.
+  const template = subdivideTemplate(templateForLot(i, j), SUBDIV);
+  const { w, d } = template.footprint; // already the subdivided (fine-cell) footprint
   // Footprint = the W×D ROOM cells (no exterior wall ring). Centre it in the lot; the building bounds ARE the
   // room cells, so the perimeter cells are walkable floor with thin exterior edge-walls on their outer faces.
   const originCx = lot.minCx + Math.max(0, Math.floor((LOT_W - w) / 2));
@@ -207,7 +213,9 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   // marked blocked in the nav grid below (after stamping), exactly like prop solidity; the renderer + loot pass
   // read the same list off the scene contract.
   const houseSeed = (Math.imul(originCx + 1, 0x27d4eb2f) ^ Math.imul(originCy + 1, 0x165667b1)) | 0;
-  for (const piece of furnishHouse(placed, houseIndex, houseSeed, reserved)) b.furniture.push(piece);
+  // Furniture footprints scale by SUBDIV too (a bed stays ≈2 m: 2×2 fine cells at navCellSize 1 m), matching the
+  // subdivided room cells the placer fills.
+  for (const piece of furnishHouse(placed, houseIndex, houseSeed, reserved, SUBDIV)) b.furniture.push(piece);
 
   // --- exterior walls as THIN edge-walls: for every perimeter room-cell OUTER face (a footprint-boundary face,
   // i.e. the neighbour one step out is OUTSIDE the room map), wall the shared edge against the open street. Both

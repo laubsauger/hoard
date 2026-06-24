@@ -368,7 +368,7 @@ export class GameRuntime {
       const grid = this.scene.navGrid;
       for (const prop of this.scene.props ?? []) {
         const h = PROP_SOLIDITY[prop.kind].heightMeters;
-        for (const c of propBlockedCells(prop, fenceMiss)) {
+        for (const c of propBlockedCells(prop, grid.settings.navCellSize, fenceMiss)) {
           if (c.cx < 0 || c.cy < 0 || c.cx >= grid.width || c.cy >= grid.height) continue;
           const idx = grid.index(c.cx, c.cy);
           const prev = this.propSightHeightByCell.get(idx);

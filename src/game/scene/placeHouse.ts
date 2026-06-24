@@ -21,6 +21,15 @@ import {
   type WindowSpec,
 } from './houseTemplates';
 
+/**
+ * Cell-subdivision factor the SCENE stamps houses at. The templates are authored on the coarse 2 m grid; the
+ * live nav grid runs at navCellSize = 1 m, so the scene places `subdivideTemplate(template, SUBDIV)` to keep
+ * each house the SAME physical size (templateW*SUBDIV × templateD*SUBDIV finer cells = identical metres) while
+ * gaining a 1 m collision / indoor-nav resolution. Furniture footprints scale by the same factor (a bed stays
+ * ≈2 m). placeHouse itself is subdivision-agnostic — it places whatever template it is handed.
+ */
+export const SUBDIV = 2;
+
 const EDGE_DELTA: Record<Edge, { dx: number; dy: number }> = {
   n: { dx: 0, dy: -1 },
   s: { dx: 0, dy: 1 },

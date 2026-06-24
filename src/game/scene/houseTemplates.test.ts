@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   HOUSE_TEMPLATES,
+  subdivideTemplate,
   tileCheck,
   doorGraphConnected,
   reachableFromExterior,
@@ -121,6 +122,84 @@ describe.each(HOUSE_TEMPLATES.map((t) => [t.id, t] as const))('template %s', (_i
     expect(template.footprint.w).toBeLessThanOrEqual(9);
     expect(template.footprint.d).toBeGreaterThanOrEqual(4);
     expect(template.footprint.d).toBeLessThanOrEqual(7);
+  });
+});
+
+// subdivideTemplate expands each authored cell into a factor×factor block so the SAME physical house is
+// expressed on a finer nav grid (navCellSize / factor). It must preserve EVERY structural invariant the raw
+// templates satisfy — only the cell pitch tightens. Exercised at factor 2 (the scene's SUBDIV) for all levels.
+describe('subdivideTemplate — keeps every floor-plan invariant on a finer cell pitch', () => {
+  const FACTOR = 2;
+
+  it('factor 1 is an identity (same object, no churn)', () => {
+    const t = HOUSE_TEMPLATES[0]!;
+    expect(subdivideTemplate(t, 1)).toBe(t);
+  });
+
+  it('rejects a non-positive / non-integer factor (surfaces a bad call, no silent fallback)', () => {
+    expect(() => subdivideTemplate(HOUSE_TEMPLATES[0]!, 0)).toThrow();
+    expect(() => subdivideTemplate(HOUSE_TEMPLATES[0]!, 1.5)).toThrow();
+  });
+
+  describe.each(HOUSE_TEMPLATES.map((t) => [t.id, t] as const))('subdivideTemplate(%s, 2)', (_id, template) => {
+    const sub = subdivideTemplate(template, FACTOR);
+
+    it('scales the footprint + preserves storeys/id and per-level room/door/window counts', () => {
+      expect(sub.id).toBe(template.id);
+      expect(sub.storeys).toBe(template.storeys);
+      expect(sub.footprint.w).toBe(template.footprint.w * FACTOR);
+      expect(sub.footprint.d).toBe(template.footprint.d * FACTOR);
+      expect(sub.levels.length).toBe(template.levels.length);
+      template.levels.forEach((lvl, i) => {
+        expect(sub.levels[i]!.rooms.length).toBe(lvl.rooms.length);
+        expect(sub.levels[i]!.doors.length).toBe(lvl.doors.length);
+        expect(sub.levels[i]!.windows.length).toBe(lvl.windows.length);
+      });
+    });
+
+    sub.levels.forEach((plan, levelIdx) => {
+      describe(`level ${levelIdx}`, () => {
+        it('rooms still tile the subdivided footprint exactly (no gaps / overlaps)', () => {
+          expect(tileCheck(plan.rooms, sub.footprint)).toBe(true);
+        });
+
+        it('every door still sits on a real shared/boundary wall edge', () => {
+          for (const door of plan.doors) {
+            expect(doorPlacementValid(door, plan.rooms, sub.footprint)).toBe(true);
+          }
+        });
+
+        it('the room graph stays connected via interior doors', () => {
+          expect(doorGraphConnected(plan.rooms, plan.doors)).toBe(true);
+        });
+
+        it('every window stays on an exterior wall of its room (never an interior partition)', () => {
+          for (const win of plan.windows) {
+            expect(windowOnExterior(win, plan.rooms, sub.footprint)).toBe(true);
+            expect(cellInRoom(win.atCell, plan.rooms[win.room]!)).toBe(true);
+          }
+        });
+      });
+    });
+
+    it('the entry level stays reachable from its exterior front door', () => {
+      const ground = sub.levels.find((l) => l.storey === 0)!;
+      expect(reachableFromExterior(ground.rooms, ground.doors)).toBe(true);
+    });
+
+    it('a stairs cell (if any) scales by the factor and stays inside its hall on both levels', () => {
+      template.levels.forEach((lvl, i) => {
+        if (!lvl.stairsCell) {
+          expect(sub.levels[i]!.stairsCell).toBeNull();
+          return;
+        }
+        const s = sub.levels[i]!.stairsCell!;
+        expect(s.cx).toBe(lvl.stairsCell.cx * FACTOR);
+        expect(s.cy).toBe(lvl.stairsCell.cy * FACTOR);
+        // it lands inside a hall room on the subdivided plan (stairs sit in the hall/landing).
+        expect(sub.levels[i]!.rooms.some((r) => r.type === 'hall' && cellInRoom(s, r))).toBe(true);
+      });
+    });
   });
 });
 

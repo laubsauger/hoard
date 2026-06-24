@@ -22,35 +22,37 @@ export const REGION_STREET = 2;
 export const CITY_BLOCK_WORLD_VERSION = 'm1-cityblock-1';
 
 // ---- authored layout (nav cells) ----
-const GRID_WIDTH_CELLS = 45; // ~90 m at navCellSize 2 m
-const GRID_HEIGHT_CELLS = 27; // ~54 m
+// navCellSize is 1 m; every cell-DISTANCE literal is doubled vs the old 2 m grid so the world geometry is
+// IDENTICAL in metres (derived offsets like the 1-cell perimeter-wall thickness stay derived).
+const GRID_WIDTH_CELLS = 90; // ~90 m at navCellSize 1 m
+const GRID_HEIGHT_CELLS = 54; // ~54 m
 
 // Building shell (inclusive) — everything outside this rectangle is open-air street.
-const B_MIN_CX = 4;
-const B_MAX_CX = 40;
-const B_MIN_CY = 4;
-const B_MAX_CY = 22;
+const B_MIN_CX = 8;
+const B_MAX_CX = 80;
+const B_MIN_CY = 8;
+const B_MAX_CY = 44;
 
 // Interior walkable band rows (inside the perimeter walls); the dividing wall spans these rows.
-const IN_MIN_CY = B_MIN_CY + 1; // 5
-const IN_MAX_CY = B_MAX_CY - 1; // 21
+const IN_MIN_CY = B_MIN_CY + 1; // 9
+const IN_MAX_CY = B_MAX_CY - 1; // 43
 
 // Solid dividing wall between room A and room B.
-const WALL_CX = 22;
+const WALL_CX = 44;
 // The destructible wall section spans these interior rows; the rest of the column is permanent.
-const WALL_SECTION_CY_START = 11;
-const WALL_SECTION_CELLS = 4; // cy 11,12,13,14
+const WALL_SECTION_CY_START = 22;
+const WALL_SECTION_CELLS = 8; // cy 22..29
 
 // Escape door: a gap in the building's RIGHT perimeter wall, opening room B to the street.
-const DOOR_CX = B_MAX_CX; // 40
-const DOOR_CY_START = 13;
-const DOOR_CELLS = 2; // cy 13,14
+const DOOR_CX = B_MAX_CX; // 80
+const DOOR_CY_START = 26;
+const DOOR_CELLS = 4; // cy 26..29
 
 const TEST_MODULE_ID = 1 as ModuleId;
 const FRACTURE_FAMILY = 0;
 
-const PLAYER_CELL: CellXY = { cx: 31, cy: 13 }; // room B centre
-const SPAWN_CENTER_CELL: CellXY = { cx: 13, cy: 13 }; // room A centre
+const PLAYER_CELL: CellXY = { cx: 62, cy: 26 }; // room B centre
+const SPAWN_CENTER_CELL: CellXY = { cx: 26, cy: 26 }; // room A centre
 
 function isDoorCell(cx: number, cy: number): boolean {
   return cx === DOOR_CX && cy >= DOOR_CY_START && cy < DOOR_CY_START + DOOR_CELLS;

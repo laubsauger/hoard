@@ -256,6 +256,79 @@ export function reachableFromExterior(rooms: readonly Room[], doors: readonly Do
   return count === n;
 }
 
+/**
+ * SUBDIVIDE a template by an integer `factor`: expand every authored cell into a factor×factor block of finer
+ * cells, so the SAME PHYSICAL house is expressed on a finer nav grid (navCellSize / factor) — identical world
+ * metres, double the nav resolution. Pure, no RNG (V26).
+ *
+ * - footprint, room bounds and stairs scale by `factor`; a room `minCx..maxCx` → `minCx*f .. maxCx*f + f-1`
+ *   (its whole f×f-per-cell block), so the partition seams stay contiguous → the rooms still TILE exactly.
+ * - each door / window keeps its room link + edge and moves to the SINGLE sub-cell ON that edge of its authored
+ *   block (n/w → block's top-left, s → bottom-left, e → top-right): a 1-sub-cell (≈1 m) doorway/window whose
+ *   neighbour one step in `edge` still lands in the subdivided toRoom (interior) or outside (exterior).
+ *
+ * The result still satisfies tileCheck / doorPlacementValid / windowOnExterior / doorGraphConnected /
+ * reachableFromExterior (the room graph is unchanged — only the cell pitch tightens).
+ */
+export function subdivideTemplate(t: HouseTemplate, factor: number): HouseTemplate {
+  if (!Number.isInteger(factor) || factor < 1) {
+    throw new Error(`subdivideTemplate: factor must be a positive integer, got ${factor}`);
+  }
+  if (factor === 1) return t;
+  const f = factor;
+  /** The single sub-cell on `edge` of the f×f block that authored cell `c` expands into. */
+  const subCell = (c: Cell, edge: Edge): Cell => {
+    const cx0 = f * c.cx;
+    const cy0 = f * c.cy;
+    const onEdge: Record<Edge, Cell> = {
+      n: { cx: cx0, cy: cy0 },
+      s: { cx: cx0, cy: cy0 + f - 1 },
+      w: { cx: cx0, cy: cy0 },
+      e: { cx: cx0 + f - 1, cy: cy0 },
+    };
+    return onEdge[edge];
+  };
+  const levels = t.levels.map(
+    (plan): FloorPlan => ({
+      storey: plan.storey,
+      rooms: plan.rooms.map(
+        (room): Room => ({
+          type: room.type,
+          bounds: {
+            minCx: room.bounds.minCx * f,
+            minCy: room.bounds.minCy * f,
+            maxCx: room.bounds.maxCx * f + f - 1,
+            maxCy: room.bounds.maxCy * f + f - 1,
+          },
+        }),
+      ),
+      doors: plan.doors.map(
+        (door): Door => ({
+          fromRoom: door.fromRoom,
+          toRoom: door.toRoom,
+          edge: door.edge,
+          atCell: subCell(door.atCell, door.edge),
+        }),
+      ),
+      windows: plan.windows.map(
+        (win): WindowSpec => ({
+          room: win.room,
+          edge: win.edge,
+          atCell: subCell(win.atCell, win.edge),
+        }),
+      ),
+      stairsCell: plan.stairsCell ? { cx: plan.stairsCell.cx * f, cy: plan.stairsCell.cy * f } : null,
+    }),
+  );
+  return {
+    id: t.id,
+    name: t.name,
+    storeys: t.storeys,
+    footprint: { w: t.footprint.w * f, d: t.footprint.d * f },
+    levels,
+  };
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The hand-authored templates. Each is grounded in a real suburban layout (room sizes ~ the foot dimensions
 // in docs/PROCEDURAL-HOUSES.md, mapped onto the 2 m cell grid). The room ORDER is the index space that doors

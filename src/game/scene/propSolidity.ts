@@ -13,10 +13,10 @@ import type { PropInstance, PropKind } from './testBlock';
 export interface PropSolidity {
   /** Whether this prop kind is a solid obstacle (blocks shots + movement via the nav grid). */
   readonly solid: boolean;
-  /** Half-extent (cells) along the prop's LENGTH — its local +Z, the long axis of the mesh (e.g. a car body). */
-  readonly halfLenCells: number;
-  /** Half-extent (cells) along the prop's WIDTH — its local +X, the short axis. */
-  readonly halfWidCells: number;
+  /** Half-extent (METRES) along the prop's LENGTH — its local +Z, the long axis of the mesh (e.g. a car body). */
+  readonly halfLenMeters: number;
+  /** Half-extent (METRES) along the prop's WIDTH — its local +X, the short axis. */
+  readonly halfWidMeters: number;
   /**
    * Approximate occluder HEIGHT (m). SIGHT (eye-height LOS) is blocked only by a prop at/above eye height; a
    * prop SHORTER than eye height is SEEN OVER (a waist-high picket fence). Movement + projectile occlusion are
@@ -25,16 +25,18 @@ export interface PropSolidity {
   readonly heightMeters: number;
 }
 
-/** Per-kind solidity, sized to the MESH footprint (not a fat square): a car body is BoxGeometry(2 wide × 4.2
- *  long), so on a 2 m nav grid it is ~1 cell wide × ~3 cells long — NOT a 6×6 block. The footprint is oriented
- *  by the prop's `rot`. Tall dense obstacles are solid; low/soft decor (tire, bush) is shoot-over cover and gappy
- *  fences stay non-blocking so a single span never seals a yard (their look is purely render). */
+/** Per-kind solidity, sized to the MESH footprint in METRES (resolution-independent — it rasterizes into the
+ *  grid's navCellSize cells, so the SAME physical car blocks the same metres whether navCellSize is 2 m or 1 m).
+ *  A car body is ~4.2 m long × ~1.8 m wide, oriented by the prop's `rot`. Tall dense obstacles are solid;
+ *  low/soft decor (tire, bush) is shoot-over cover and gappy fences stay non-blocking so a single span never
+ *  seals a yard (their look is purely render). Half-extents reproduce the OLD 2 m-grid footprint and auto-scale:
+ *  e.g. a car at navCellSize 2 m rasterizes to ~3 cells long × 1 wide (as before), at 1 m to ~5 × 1. */
 export const PROP_SOLIDITY: Readonly<Record<PropKind, PropSolidity>> = {
-  car: { solid: true, halfLenCells: 1, halfWidCells: 0, heightMeters: 1.6 }, // ~4.2 m long × 2 m wide → 3 cells long, 1 wide; tall enough to block sight (cover)
-  tree: { solid: true, halfLenCells: 0, halfWidCells: 0, heightMeters: 4 }, // the trunk — one cell; a tall canopy blocks sight
-  tire: { solid: false, halfLenCells: 0, halfWidCells: 0, heightMeters: 0.5 }, // low — you shoot/step/see over it
-  bush: { solid: false, halfLenCells: 0, halfWidCells: 0, heightMeters: 0.8 }, // soft, low cover
-  fence: { solid: true, halfLenCells: 0, halfWidCells: 0, heightMeters: 1.0 }, // a picket span blocks bodies/shots — but is WAIST-HIGH, so sight passes OVER it (V85)
+  car: { solid: true, halfLenMeters: 2.1, halfWidMeters: 0.9, heightMeters: 1.6 }, // ~4.2 m long × 1.8 m wide; tall enough to block sight (cover)
+  tree: { solid: true, halfLenMeters: 0.5, halfWidMeters: 0.5, heightMeters: 4 }, // the trunk — one cell; a tall canopy blocks sight
+  tire: { solid: false, halfLenMeters: 0.5, halfWidMeters: 0.5, heightMeters: 0.5 }, // low — you shoot/step/see over it
+  bush: { solid: false, halfLenMeters: 0.5, halfWidMeters: 0.5, heightMeters: 0.8 }, // soft, low cover
+  fence: { solid: true, halfLenMeters: 0.5, halfWidMeters: 0.5, heightMeters: 1.0 }, // a picket span (one cell) blocks bodies/shots — but is WAIST-HIGH, so sight passes OVER it (V85)
 };
 
 /** A fence span is PRESENT (solid) unless its deterministic decay rolled it MISSING — the EXACT decision the
@@ -45,28 +47,37 @@ function fencePresent(prop: PropInstance, fenceMissingChance: number): boolean {
   return hash01(seed, 5000) >= fenceMissingChance;
 }
 
-/** The nav cells a SOLID prop occupies — a rectangle sized to the mesh and ROTATED by the prop's `rot` (so a
- *  parked car blocks a car-shaped strip, not a fat square). Empty for non-solid kinds. A fence span blocks only
- *  when PRESENT (its decay roll didn't make it a gap) — pass the world `fenceMissingChance` so it matches the
- *  render. Pure + deterministic; the scene generator marks these blocked, callers clamp to grid bounds. */
-export function propBlockedCells(prop: PropInstance, fenceMissingChance = 0): { cx: number; cy: number }[] {
+/** The nav cells a SOLID prop occupies — its mesh-sized METRE rectangle, ROTATED by the prop's `rot`, rasterized
+ *  into the grid's `navCellSize` cells (so a parked car blocks a car-shaped strip, not a fat square, at any nav
+ *  resolution). A cell is included iff its CENTRE falls inside the rotated rectangle. Empty for non-solid kinds.
+ *  A fence span blocks only when PRESENT (its decay roll didn't make it a gap) — pass the world
+ *  `fenceMissingChance` so it matches the render. Pure + deterministic; the scene generator marks these blocked,
+ *  callers clamp to grid bounds. */
+export function propBlockedCells(
+  prop: PropInstance,
+  navCellSize: number,
+  fenceMissingChance = 0,
+): { cx: number; cy: number }[] {
   const s = PROP_SOLIDITY[prop.kind];
   if (!s.solid) return [];
   if (prop.kind === 'fence' && !fencePresent(prop, fenceMissingChance)) return []; // missing span → a walkable gap
   const rot = prop.rot ?? 0;
   const cos = Math.cos(rot);
   const sin = Math.sin(rot);
-  const seen = new Set<number>();
+  // Cell reach to scan: the rectangle's diagonal half-extent, converted to cells (+1 for the centre offset).
+  const reach = Math.ceil(Math.hypot(s.halfLenMeters, s.halfWidMeters) / navCellSize) + 1;
   const cells: { cx: number; cy: number }[] = [];
-  for (let dz = -s.halfLenCells; dz <= s.halfLenCells; dz++) {
-    for (let dx = -s.halfWidCells; dx <= s.halfWidCells; dx++) {
-      // local (dx = width/+X, dz = length/+Z) rotated about +Y by `rot`, snapped to the nearest cell.
-      const cx = prop.cx + Math.round(dx * cos + dz * sin);
-      const cy = prop.cy + Math.round(-dx * sin + dz * cos);
-      const key = cx * 100003 + cy;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      cells.push({ cx, cy });
+  for (let dy = -reach; dy <= reach; dy++) {
+    for (let dx = -reach; dx <= reach; dx++) {
+      // world offset (m) of this candidate cell's centre from the prop cell's centre (the +0.5 centres cancel).
+      const ox = dx * navCellSize;
+      const oy = dy * navCellSize;
+      // rotate the world offset back into the prop's local frame (inverse of the rot used by the renderer).
+      const localX = ox * cos - oy * sin; // local +X = width
+      const localZ = ox * sin + oy * cos; // local +Z = length
+      if (Math.abs(localX) <= s.halfWidMeters && Math.abs(localZ) <= s.halfLenMeters) {
+        cells.push({ cx: prop.cx + dx, cy: prop.cy + dy });
+      }
     }
   }
   return cells;
@@ -90,7 +101,7 @@ export function setPropSolid(
   skip?: (cx: number, cy: number) => boolean,
   fenceMissingChance = 0,
 ): void {
-  for (const cell of propBlockedCells(prop, fenceMissingChance)) {
+  for (const cell of propBlockedCells(prop, navGrid.settings.navCellSize, fenceMissingChance)) {
     if (cell.cx < 0 || cell.cy < 0 || cell.cx >= navGrid.width || cell.cy >= navGrid.height) continue;
     if (skip?.(cell.cx, cell.cy)) continue;
     if (solid) navGrid.block(cell.cx, cell.cy);
@@ -112,9 +123,10 @@ export function propOccludesSight(kind: PropKind, eyeHeightMeters: number): bool
 export function propSeeOverCells(
   prop: PropInstance,
   eyeHeightMeters: number,
+  navCellSize: number,
   fenceMissingChance = 0,
 ): { cx: number; cy: number }[] {
   const s = PROP_SOLIDITY[prop.kind];
   if (!s.solid || s.heightMeters >= eyeHeightMeters) return []; // non-solid (no block) or tall (occludes sight)
-  return propBlockedCells(prop, fenceMissingChance);
+  return propBlockedCells(prop, navCellSize, fenceMissingChance);
 }

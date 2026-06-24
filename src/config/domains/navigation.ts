@@ -18,8 +18,8 @@ export const navigationConfig = registerDomain('navigation', {
   navCellSize: num({
     owner: 'navigation',
     unit: 'meters',
-    doc: 'Edge length of a nav cost-grid cell (square). Flow-field + Dijkstra resolution.',
-    default: 2,
+    doc: 'Edge length of a nav cost-grid cell (square). Flow-field + Dijkstra resolution. 1 m for finer collision + indoor nav; navTileSize/navCellSize stays an integer ratio (16/1).',
+    default: 1,
     min: 0.5,
     max: 8,
   }),

@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { NavGrid } from '@/game/navigation';
 import { hasLineOfSight, rayDistanceToWall, seesWithinFan } from './testBlock';
 
-const CS = 2; // navCellSize (default desktop-high)
+const CS = 1; // navCellSize (default desktop-high — 1 m)
 const center = (c: number) => (c + 0.5) * CS;
 
 /** An "everything walkable" scene so ONLY edge-walls can occlude. */
@@ -44,11 +44,11 @@ describe('hasLineOfSight — interior edge-walls occlude sight + sound (V47/V28)
     const g = new NavGrid({ width: 8, height: 3 });
     for (let cy = 0; cy < 3; cy++) g.setWallBetween(4, cy, 5, cy); // solid partition at the cx=4|5 seam
     const scene = openScene(g);
-    // ray fired east from inside cell (1,1) hits the seam between cx=4 and cx=5 → cropped near x=10 (5*CS)
+    // ray fired east from inside cell (1,1) hits the seam between cx=4 and cx=5 → cropped near x=5 (5*CS)
     const d = rayDistanceToWall(scene, center(1), center(1), 0, 20);
     expect(d).toBeLessThan(20);
-    expect(d).toBeGreaterThan(6); // it travelled across cells 1..4 before the seam, not stopping immediately
-    expect(d).toBeLessThan(9); // and stopped at the 5*CS=10 seam, not beyond
+    expect(d).toBeGreaterThan(2.5); // it travelled across cells 1..4 before the seam, not stopping immediately
+    expect(d).toBeLessThan(4.5); // and stopped at the 5*CS=5 seam, not beyond
   });
 
   it('seesWithinFan: a target behind an interior wall is NOT seen; through the doorway it IS', () => {

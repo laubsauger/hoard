@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { NavGrid } from '@/game/navigation';
 import { segmentCrossesWall } from './testBlock';
 
-const CS = 2; // navCellSize (default desktop-high)
+const CS = 1; // navCellSize (default desktop-high — 1 m)
 const center = (c: number) => (c + 0.5) * CS;
 
 describe('segmentCrossesWall — per-tick movement gate (steering V19 + player)', () => {

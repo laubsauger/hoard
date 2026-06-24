@@ -25,19 +25,21 @@ export const TEST_BLOCK_WORLD_VERSION = 'gate0-testblock-1';
 export const REGION_ROOM_A = 0;
 export const REGION_ROOM_B = 1;
 
-/** Authored layout (nav cells). The grid is two 20x20 rooms either side of a one-cell-thick wall. */
-const GRID_WIDTH_CELLS = 41; // room A: cx 0..19 | wall: cx 20 | room B: cx 21..40
-const GRID_HEIGHT_CELLS = 20;
-const WALL_CX = 20;
+/** Authored layout (nav cells). The grid is two 40x40 rooms either side of a one-cell-thick wall. navCellSize
+ *  is 1 m, so every cell-DISTANCE literal is doubled vs the old 2 m grid → IDENTICAL world geometry in metres
+ *  (≈82 m × 40 m). The wall stays a 1-cell column (its thickness halves with the cell pitch, like cityBlock). */
+const GRID_WIDTH_CELLS = 82; // room A: cx 0..39 | wall: cx 40 | room B: cx 41..81
+const GRID_HEIGHT_CELLS = 40;
+const WALL_CX = 40;
 /** The destructible wall section spans these rows; the rest of the wall column is permanent. */
-const WALL_SECTION_CY_START = 8;
-const WALL_SECTION_CELLS = 4; // cy 8,9,10,11
+const WALL_SECTION_CY_START = 16;
+const WALL_SECTION_CELLS = 8; // cy 16..23
 const TEST_MODULE_ID = 1 as ModuleId;
 const FRACTURE_FAMILY = 0;
 
 /** Player stands in room B; horde spawn-centre sits in room A. (cell coords) */
-const PLAYER_CELL: CellXY = { cx: 31, cy: 10 };
-const SPAWN_CENTER_CELL: CellXY = { cx: 9, cy: 10 };
+const PLAYER_CELL: CellXY = { cx: 62, cy: 20 };
+const SPAWN_CENTER_CELL: CellXY = { cx: 18, cy: 20 };
 
 export interface CellXY {
   readonly cx: number;

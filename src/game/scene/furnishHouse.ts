@@ -108,6 +108,7 @@ export function furnishHouse(
   houseIndex: number,
   seed: number,
   reservedCells: readonly Cell[] = [],
+  footprintCells = 1,
 ): PlacedFurniture[] {
   const out: PlacedFurniture[] = [];
   for (const room of roomLayouts(placed)) {
@@ -123,6 +124,7 @@ export function furnishHouse(
       doorCells: [...room.doorCells, ...reservedHere],
       windows: room.windows,
       exteriorEdges: room.exteriorEdges,
+      footprintCells,
     });
     for (const p of pieces) {
       out.push({

@@ -14,42 +14,51 @@ describe('prop solidity (V53/V42)', () => {
     expect(PROP_SOLIDITY.fence.solid).toBe(true); // a picket span blocks (no walking through fences)
     expect(PROP_SOLIDITY.tire.solid).toBe(false);
     expect(PROP_SOLIDITY.bush.solid).toBe(false);
-    expect(propBlockedCells({ kind: 'tire', cx: 5, cy: 5 })).toEqual([]);
-    expect(propBlockedCells({ kind: 'tree', cx: 5, cy: 5 })).toEqual([{ cx: 5, cy: 5 }]); // trunk = one cell
+    // Footprints rasterize a METRE rectangle into the grid's navCellSize cells — here the world default 1 m.
+    const CS = 1;
+    expect(propBlockedCells({ kind: 'tire', cx: 5, cy: 5 }, CS)).toEqual([]);
+    expect(propBlockedCells({ kind: 'tree', cx: 5, cy: 5 }, CS)).toEqual([{ cx: 5, cy: 5 }]); // trunk = one cell
     // A fence span blocks one cell when PRESENT; a missing span (chance 1 → always missing) is a walkable gap.
-    expect(propBlockedCells({ kind: 'fence', cx: 5, cy: 5 }, 0)).toEqual([{ cx: 5, cy: 5 }]); // never missing → blocks
-    expect(propBlockedCells({ kind: 'fence', cx: 5, cy: 5 }, 1)).toEqual([]); // always missing → gap
-    // car at rot 0 → a car-SHAPED strip: 3 cells along its length (local +Z = cy), only 1 cell WIDE (not 3).
-    const car = propBlockedCells({ kind: 'car', cx: 10, cy: 10 });
-    expect(car.length).toBe(3);
-    expect(car).toContainEqual({ cx: 10, cy: 9 });
+    expect(propBlockedCells({ kind: 'fence', cx: 5, cy: 5 }, CS, 0)).toEqual([{ cx: 5, cy: 5 }]); // never missing → blocks
+    expect(propBlockedCells({ kind: 'fence', cx: 5, cy: 5 }, CS, 1)).toEqual([]); // always missing → gap
+    // car at rot 0 → a car-SHAPED strip: at 1 m it is ~5 cells along its length (local +Z = cy), only 1 cell WIDE.
+    const car = propBlockedCells({ kind: 'car', cx: 10, cy: 10 }, CS);
+    expect(car.length).toBe(5);
+    expect(car).toContainEqual({ cx: 10, cy: 8 });
     expect(car).toContainEqual({ cx: 10, cy: 10 });
-    expect(car).toContainEqual({ cx: 10, cy: 11 });
+    expect(car).toContainEqual({ cx: 10, cy: 12 });
     expect(car.some((c) => c.cx !== 10)).toBe(false); // never widens past the car's 1-cell width
     // rot 90° → the same strip runs along X instead (footprint follows the parked orientation).
-    const carRot = propBlockedCells({ kind: 'car', cx: 10, cy: 10, rot: Math.PI / 2 });
-    expect(carRot.length).toBe(3);
-    expect(carRot).toContainEqual({ cx: 9, cy: 10 });
-    expect(carRot).toContainEqual({ cx: 11, cy: 10 });
+    const carRot = propBlockedCells({ kind: 'car', cx: 10, cy: 10, rot: Math.PI / 2 }, CS);
+    expect(carRot.length).toBe(5);
+    expect(carRot).toContainEqual({ cx: 8, cy: 10 });
+    expect(carRot).toContainEqual({ cx: 12, cy: 10 });
+    expect(carRot.some((c) => c.cy !== 10)).toBe(false);
+    // resolution-independent: the SAME car at the old 2 m grid rasterizes to the old ~3-cell strip (auto-scales).
+    const carCoarse = propBlockedCells({ kind: 'car', cx: 10, cy: 10 }, 2);
+    expect(carCoarse.length).toBe(3);
+    expect(carCoarse).toContainEqual({ cx: 10, cy: 9 });
+    expect(carCoarse).toContainEqual({ cx: 10, cy: 11 });
   });
 
   it('V85 see-over: a sub-eye-height fence is SEEN OVER (sight gap) while tall car/tree occlude; crouching lowers it', () => {
     const eye = 1.6;
+    const CS = 1;
     // A waist-high fence (~1 m) is BELOW eye height → does NOT occlude sight; its footprint is a SEE-OVER cell.
     expect(propOccludesSight('fence', eye)).toBe(false);
-    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, 0)).toEqual([{ cx: 5, cy: 5 }]);
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, CS, 0)).toEqual([{ cx: 5, cy: 5 }]);
     // Car + tree are AT/ABOVE eye height → they occlude sight; no see-over cells (vision stops at them).
     expect(propOccludesSight('car', eye)).toBe(true);
     expect(propOccludesSight('tree', eye)).toBe(true);
-    expect(propSeeOverCells({ kind: 'car', cx: 10, cy: 10 }, eye)).toEqual([]);
+    expect(propSeeOverCells({ kind: 'car', cx: 10, cy: 10 }, eye, CS)).toEqual([]);
     // Non-solid decor blocks nothing AND is no see-over cell (there is nothing to see over).
     expect(propOccludesSight('tire', eye)).toBe(false);
-    expect(propSeeOverCells({ kind: 'tire', cx: 5, cy: 5 }, eye)).toEqual([]);
+    expect(propSeeOverCells({ kind: 'tire', cx: 5, cy: 5 }, eye, CS)).toEqual([]);
     // A MISSING fence span (chance 1) is a real walkable gap — not a see-over cell either.
-    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, 1)).toEqual([]);
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, CS, 1)).toEqual([]);
     // CROUCHED (eye 0.8 m < the 1 m fence): you can no longer see over it → it occludes, and you are hidden behind it.
     expect(propOccludesSight('fence', 0.8)).toBe(true);
-    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, 0.8, 0)).toEqual([]);
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, 0.8, CS, 0)).toEqual([]);
   });
 
   it('the live district marks a car prop nav-BLOCKED so shots/bodies/sight stop at it', () => {

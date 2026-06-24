@@ -41,12 +41,14 @@ describe('container fixed placement + active highlight (BUG1/T60)', () => {
     const rt = makeRuntime();
     const cup = rt.interactables().find((t) => t.kind === 'container')!;
     const range = resolveDomain(structuresConfig, TIER).interactionRangeMeters;
-    // step toward the cupboard until within reach (walkable interior path; slides on walls).
-    for (let i = 0; i < 400; i++) {
+    // step toward the cupboard until right beside it (walkable interior path; slides on walls). At the finer
+    // 1 m nav resolution we must stand BESIDE the cabinet (a stop ~one wall-width short still has the partition
+    // on the sightline → the LOS interaction gate would reject it), so walk in close rather than to range-0.5.
+    for (let i = 0; i < 600; i++) {
       const p = rt.player();
       const dx = cup.x - p.x;
       const dz = cup.z - p.z;
-      if (Math.hypot(dx, dz) <= range - 0.5) break;
+      if (Math.hypot(dx, dz) <= 0.8) break;
       rt.movePlayer(dx, dz, 0.1);
     }
     const p = rt.player();

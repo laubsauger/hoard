@@ -95,6 +95,12 @@ export interface FurnishRoomArgs {
   readonly windows: readonly RoomWindow[];
   /** Which of the room's four boundary edges face OUTSIDE the footprint (windows may only sit on these). */
   readonly exteriorEdges: readonly Edge[];
+  /**
+   * Edge length (in cells) of each emitted piece's square footprint. 1 on the coarse first pass; the scene sets
+   * it to SUBDIV when it stamps SUBDIVIDED houses, so a piece stays ≈2 m (2×2 fine cells at navCellSize 1 m).
+   * Wall pieces back onto a boundary with the whole footprint in-bounds; the placer keeps the room path clear.
+   */
+  readonly footprintCells?: number | undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -231,16 +237,6 @@ function rectCells(b: CellRect): Cell[] {
   return out;
 }
 
-/** The room-boundary wall edges of a cell (the rect sides it touches). Corner cells return two. */
-function boundaryEdges(cx: number, cy: number, b: CellRect): Edge[] {
-  const e: Edge[] = [];
-  if (cy === b.minCy) e.push('n');
-  if (cy === b.maxCy) e.push('s');
-  if (cx === b.maxCx) e.push('e');
-  if (cx === b.minCx) e.push('w');
-  return e;
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // Validators (exported — the tests + future consumers reuse them)
 // ---------------------------------------------------------------------------------------------------------
@@ -324,10 +320,16 @@ interface Candidate {
   readonly facing: Edge;
 }
 
-/** Would occupying `cand` keep every still-free cell (incl. doors) in one connected region? */
-function stillConnected(occupied: Set<string>, cand: Candidate, b: CellRect, doorCells: readonly Cell[]): boolean {
+/** Would occupying `cand`'s f×f footprint keep every still-free cell (incl. doors) in one connected region? */
+function stillConnected(
+  occupied: Set<string>,
+  cand: Candidate,
+  f: number,
+  b: CellRect,
+  doorCells: readonly Cell[],
+): boolean {
   const trial = new Set(occupied);
-  trial.add(key(cand.cx, cand.cy));
+  for (let dy = 0; dy < f; dy++) for (let dx = 0; dx < f; dx++) trial.add(key(cand.cx + dx, cand.cy + dy));
   const freeCells = rectCells(b).filter((c) => !trial.has(key(c.cx, c.cy)));
   if (freeCells.length === 0) return true;
   const freeSet = new Set(freeCells.map((c) => key(c.cx, c.cy)));
@@ -356,6 +358,8 @@ function stillConnected(occupied: Set<string>, cand: Candidate, b: CellRect, doo
  */
 export function furnishRoom(args: FurnishRoomArgs): FurniturePiece[] {
   const { type, bounds, doorCells, windows, exteriorEdges } = args;
+  const f = args.footprintCells ?? 1;
+  if (!Number.isInteger(f) || f < 1) throw new Error(`furnishRoom: footprintCells must be a positive integer, got ${f}`);
   const effSeed = roomSeed(args.seed, type, bounds);
 
   // Input validation (not a fallback — surfaces a malformed call): windows must sit on EXTERIOR edges.
@@ -387,20 +391,51 @@ export function furnishRoom(args: FurnishRoomArgs): FurniturePiece[] {
 
   const cells = rectCells(bounds);
 
+  /** The f×f footprint anchored at (ax, ay) fits inside the room bounds. */
+  const footprintInBounds = (ax: number, ay: number): boolean =>
+    ax >= bounds.minCx && ay >= bounds.minCy && ax + f - 1 <= bounds.maxCx && ay + f - 1 <= bounds.maxCy;
+  /** Every cell of the f×f footprint anchored at (ax, ay) is free (not a door, not already occupied). */
+  const footprintFree = (ax: number, ay: number): boolean => {
+    for (let dy = 0; dy < f; dy++) {
+      for (let dx = 0; dx < f; dx++) {
+        const k = key(ax + dx, ay + dy);
+        if (doorSet.has(k) || occupied.has(k)) return false;
+      }
+    }
+    return true;
+  };
+  /** Does any cell of the footprint's back ROW/COLUMN (the wall it backs onto, `back`) carry a window? */
+  const backsOntoWindow = (ax: number, ay: number, back: Edge): boolean => {
+    for (let t = 0; t < f; t++) {
+      const wx = back === 'w' ? ax : back === 'e' ? ax + f - 1 : ax + t;
+      const wy = back === 'n' ? ay : back === 's' ? ay + f - 1 : ay + t;
+      if (windowSet.has(`${wx},${wy}|${back}`)) return true;
+    }
+    return false;
+  };
+
   const program = PROGRAMS[type];
   program.forEach((spec, specIdx) => {
-    // Build the deterministic candidate list for this piece.
+    // Build the deterministic candidate list for this piece (anchor = the footprint's min corner).
     const candidates: Candidate[] = [];
     for (const c of cells) {
-      const k = key(c.cx, c.cy);
-      if (doorSet.has(k) || occupied.has(k)) continue; // never on a door, never overlap
+      if (!footprintInBounds(c.cx, c.cy)) continue; // the whole f×f piece must fit
+      if (!footprintFree(c.cx, c.cy)) continue; // never on a door, never overlap
       if (spec.placement === 'wall') {
-        for (const e of boundaryEdges(c.cx, c.cy, bounds)) {
-          if (spec.tall && windowSet.has(`${c.cx},${c.cy}|${e}`)) continue; // tall piece would block a window
-          candidates.push({ cx: c.cx, cy: c.cy, facing: OPPOSITE[e] });
+        // Wall pieces back onto a room boundary the footprint touches; facing is into the room. Order n,s,e,w so
+        // the f=1 candidate stream matches the original (a boundary cell + its OPPOSITE-facing wall placement).
+        const backs: Edge[] = [];
+        if (c.cy === bounds.minCy) backs.push('n');
+        if (c.cy + f - 1 === bounds.maxCy) backs.push('s');
+        if (c.cx + f - 1 === bounds.maxCx) backs.push('e');
+        if (c.cx === bounds.minCx) backs.push('w');
+        for (const back of backs) {
+          if (spec.tall && backsOntoWindow(c.cx, c.cy, back)) continue; // tall piece would block a window
+          candidates.push({ cx: c.cx, cy: c.cy, facing: OPPOSITE[back] });
         }
       } else {
-        candidates.push({ cx: c.cx, cy: c.cy, facing: faceCentre(c.cx, c.cy) });
+        // Free-standing: face the room centre from the footprint's centre.
+        candidates.push({ cx: c.cx, cy: c.cy, facing: faceCentre(c.cx + (f - 1) / 2, c.cy + (f - 1) / 2) });
       }
     }
     if (candidates.length === 0) return; // no legal spot — scale down gracefully (room too small / full)
@@ -410,14 +445,13 @@ export function furnishRoom(args: FurnishRoomArgs): FurniturePiece[] {
     const start = Math.floor(hash01(effSeed, salt) * candidates.length) % candidates.length;
     for (let j = 0; j < candidates.length; j++) {
       const cand = candidates[(start + j) % candidates.length]!;
-      const k = key(cand.cx, cand.cy);
-      if (occupied.has(k)) continue; // a different facing of an already-taken cell
-      if (!stillConnected(occupied, cand, bounds, doorCells)) continue; // don't seal the room / a doorway
-      occupied.add(k);
+      if (!footprintFree(cand.cx, cand.cy)) continue; // a different facing of an already-taken footprint
+      if (!stillConnected(occupied, cand, f, bounds, doorCells)) continue; // don't seal the room / a doorway
+      for (let dy = 0; dy < f; dy++) for (let dx = 0; dx < f; dx++) occupied.add(key(cand.cx + dx, cand.cy + dy));
       pieces.push({
         kind: spec.kind,
         cell: { cx: cand.cx, cy: cand.cy },
-        footprint: { w: 1, d: 1 },
+        footprint: { w: f, d: f },
         facing: cand.facing,
         container: spec.container,
       });
