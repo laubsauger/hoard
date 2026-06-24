@@ -161,7 +161,7 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   // their visibility (mirrors the door-leaf pattern — the render never decides state, only reflects it, V12). ----
   const maxBoards = cfg.maxBoardsPerWindow;
   /** Build one window unit (frame + pane + void + the full board set) at a sill, tracked for syncWindows. */
-  const buildWindowUnit = (navCell: number, wx: number, sillY: number, wz: number, ns: boolean): void => {
+  const buildWindowUnit = (navCell: number, wx: number, sillY: number, wz: number, ns: boolean, synced: boolean): void => {
     const rotY = ns ? Math.PI / 2 : 0;
     const yc = sillY + winH / 2;
     // `dx` offsets along the wall NORMAL (depth), `runOff` along the wall RUN (span); the geometry's local Z is
@@ -188,7 +188,15 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
       const sign = bI % 2 === 0 ? 1 : -1;
       boards.push(make(boardGeo, boardMat, 0, sign * winH * (0.18 - bI * 0.03), 0, sign * (0.18 - bI * 0.04)));
     }
-    windowMeshes.push({ navCell, pane, voidMesh, boards });
+    if (synced) {
+      windowMeshes.push({ navCell, pane, voidMesh, boards }); // the GROUND-floor window reflects the live 2D sim state
+    } else {
+      // Upper-floor windows are cosmetic — the 2D sim has ONE window-state per cell, so a stacked upper sill must
+      // NOT share it (smashing the lower one used to break the upper). Render it as static intact glass, never
+      // synced, so it stays independent. (Believable per-floor decay arrives with the procedural-house rework.)
+      voidMesh.visible = false;
+      for (const b of boards) b.visible = false;
+    }
   };
 
   const placements = windowPlacements(ts, {
@@ -200,7 +208,8 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
     const bWallH = wallH * Math.max(1, p.storeys);
     const sills = windowSillHeights(cfg.buildingWallHeightMeters, bWallH); // matches the houseBuilder wall punch
     const navCell = grid.index(p.cx, p.cy);
-    for (const sy of sills) buildWindowUnit(navCell, p.x, sy, p.z, p.ns);
+    // Only the ground-floor sill (index 0) syncs to the sim window state; upper sills are static decoration.
+    sills.forEach((sy, i) => buildWindowUnit(navCell, p.x, sy, p.z, p.ns, i === 0));
   }
 
   root.add(group);
