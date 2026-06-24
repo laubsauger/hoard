@@ -150,6 +150,49 @@ describe('ImpactSim — glass shatter (T108): pane-break shard burst', () => {
     reduced.glassShatter(0, 1.8, 0, 1, 0, 0, { goreIntensity: 1, reduceFlashes: true });
     expect(reduced.shardCount).toBeLessThan(full.shardCount);
   });
+});
+
+describe('ImpactSim — body-anchored wounds (T81 surface-stick)', () => {
+  const anchor = (x: number, z: number) => ({ x, y: 0, z, heading: 0, lying: 0, groundY: 0 });
+
+  it('places the wound on the body surface at the struck region height, facing the shooter', () => {
+    const s = new ImpactSim(settings);
+    s.setBodyAnchors({ resolve: () => anchor(0, 0) });
+    s.woundOnBody(7, 'head', -1, 0, ctx); // shooter on the -x side → wound on the -x surface
+    expect(s.woundCount).toBe(1);
+    expect(s.wx[0]!).toBeLessThan(0); // offset toward the shooter (-x)
+    expect(s.wy[0]!).toBeCloseTo(settings.regionHeights.head, 5); // at the head band, not the body centre/base
+    expect(Math.abs(s.wx[0]!)).toBeLessThanOrEqual(settings.woundBodyRadiusMeters + 1e-6); // hugs the surface
+  });
+
+  it('FOLLOWS the body when it moves (reprojected each frame — never floats where it was hit)', () => {
+    const s = new ImpactSim(settings);
+    let body = anchor(0, 0);
+    s.setBodyAnchors({ resolve: () => body });
+    s.woundOnBody(7, 'torsoUpper', -1, 0, ctx);
+    const x0 = s.wx[0]!;
+    body = anchor(10, 0); // body walks +10 m
+    s.update(1 / 60);
+    expect(s.wx[0]!).toBeGreaterThan(x0 + 9); // the mark tracked the body
+  });
+
+  it('no-op without a resolver or when the body is already gone', () => {
+    const s = new ImpactSim(settings);
+    s.woundOnBody(7, 'torsoUpper', -1, 0, ctx); // no resolver wired
+    expect(s.woundCount).toBe(0);
+    s.setBodyAnchors({ resolve: () => null }); // body gone
+    s.woundOnBody(7, 'torsoUpper', -1, 0, ctx);
+    expect(s.woundCount).toBe(0);
+  });
+
+  it('static wound() stays world-anchored (not reprojected to a body)', () => {
+    const s = new ImpactSim(settings);
+    s.setBodyAnchors({ resolve: () => anchor(99, 99) });
+    s.wound(3, 0, 4, 'torsoUpper', 0, 1, ctx);
+    s.update(1 / 60);
+    expect(s.wx[0]!).toBeCloseTo(3, 5); // never snapped to the anchor at (99,99)
+    expect(s.wz[0]!).toBeCloseTo(4, 5);
+  });
 
   it('wounds persist then fade out over their lifetime', () => {
     const s = new ImpactSim(settings);

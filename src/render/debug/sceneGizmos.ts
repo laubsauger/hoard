@@ -3,14 +3,19 @@
 // SAME way the crowd is — InstancedMesh + MeshBasicNodeMaterial — which is the only primitive confirmed to
 // render under three's WebGPURenderer (core Line/Points materials do not). Self-hides when no flag is set.
 //
-// Sight is a heading-oriented CONE (matches the zombie FOV in perception, V14) — NOT a 360° ring. Rings use
-// a FIXED world-space thickness (geometry built at the true radius) so a big range never produces a fat band.
+// §V78: the player vision cone AND the zombie sight cones are RAYCAST-OCCLUDED visibility POLYGONS, NOT full
+// cones — from each agent apex, N rays fan across its FOV and each is clipped at the first occluder along it
+// (`rayDistanceToWall` on the SAME nav grid the shots V53/B20 + perception LOS + flashlight clamp V67 use, so
+// walls + solid props cast visibility shadows for free). The rim is the polyline of those clipped endpoints,
+// rebuilt in place each frame into preallocated buffers (no per-frame allocation, V24). Rings (attack/sound)
+// stay a FIXED world-space thickness so a big range never produces a fat band.
 
 import {
   BoxGeometry,
   BufferGeometry,
   Color,
   DoubleSide,
+  DynamicDrawUsage,
   Float32BufferAttribute,
   Group,
   InstancedMesh,
@@ -24,16 +29,19 @@ import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { ZombieState, type SimulationZombies } from '@/game/simulation';
 import { resolveDomain } from '@/config/registry';
 import { perceptionConfig } from '@/config/domains/perception';
+import { debugConfig } from '@/config/domains/debug';
 import type { QualityTier } from '@/config/types';
 import type { DebugFlags } from '@/diagnostics/flags';
+import { occludedVisibilityRim } from './visibilityRim';
 
 const MAX_GIZMOS = 600;
 const MAX_SOUND = 64;
 const GIZMO_Y = 0.25;
 const RING_THICKNESS = 0.18; // constant world-space ring thickness (T58 feedback: no radius-scaled fat bands)
-const SIGHT_CONE_WORLD_STROKE = 0.05; // sight-cone outline stroke in WORLD meters — thin line, bounded so a
-// big sight range never fattens it (the relative width is derived = stroke / sightRange in the constructor).
 const Y_AXIS = new Vector3(0, 1, 0);
+
+/** Occluder query supplied by the viewport: distance to the first wall/prop along `heading`, capped at `maxR`. */
+type WallDistanceFn = (x: number, z: number, heading: number, maxR: number) => number;
 
 // One solid colour per FSM state. Markers are bucketed into per-state InstancedMeshes (NOT per-instance
 // instanceColor — which does not render reliably on the WebGPU node material, the "always grey" bug).
@@ -57,27 +65,79 @@ function makeRing(radius: number, thickness: number, segs = 48): BufferGeometry 
   return g;
 }
 
-/** Unit vision-cone OUTLINE (arc rim + two apex→rim edges) in the XZ plane — thin, no fill, so overlapping
- *  cones never opaque the scene. `w` is the relative stroke width; scaled per instance by the cone radius. */
-function makeConeOutline(halfAngle: number, segs = 24, w = 0.02): BufferGeometry {
-  const p: number[] = [];
-  const ri = 1 - w;
-  const arc = (a: number, r: number): [number, number] => [Math.cos(a) * r, Math.sin(a) * r];
-  for (let i = 0; i < segs; i++) {
-    const a0 = -halfAngle + (2 * halfAngle * i) / segs;
-    const a1 = -halfAngle + (2 * halfAngle * (i + 1)) / segs;
-    const [ix0, iz0] = arc(a0, ri); const [ox0, oz0] = arc(a0, 1);
-    const [ix1, iz1] = arc(a1, ri); const [ox1, oz1] = arc(a1, 1);
-    p.push(ix0, 0, iz0, ox0, 0, oz0, ox1, 0, oz1, ix0, 0, iz0, ox1, 0, oz1, ix1, 0, iz1);
+/**
+ * §V78 — a single dynamic mesh whose geometry is the OCCLUDED-visibility-polygon OUTLINE: a thin world-space
+ * stroke along the boundary apex → clipped rim → apex, rebuilt in place each frame from raycast rim points.
+ * Lines don't render under WebGPU, so the stroke is a triangle list of thin quads (one per boundary edge, cf.
+ * the old makeConeOutline). ONE mesh holds up to `maxAgents` rims (the agent apexes are world-space, so no
+ * per-instance transform is needed); `setDrawRange` bounds what's drawn. The position buffer is preallocated
+ * to MAX × (segments+2)×6 verts and only rewritten — never reallocated — each frame (V24).
+ */
+class OccludedRimLayer {
+  readonly mesh: Mesh;
+  private readonly positions: Float32Array;
+  private readonly attr: Float32BufferAttribute;
+  private readonly floatsPerAgent: number;
+  private head = 0; // write cursor in floats
+
+  constructor(color: number, maxAgents: number, segments: number, order: number, opacity = 0.85) {
+    const edges = segments + 2; // apex→rim[0], `segments` rim edges, rim[last]→apex
+    const vertsPerAgent = edges * 6; // each edge = a thin quad = 2 tris = 6 verts
+    this.floatsPerAgent = vertsPerAgent * 3;
+    this.positions = new Float32Array(maxAgents * this.floatsPerAgent);
+    this.attr = new Float32BufferAttribute(this.positions, 3);
+    this.attr.setUsage(DynamicDrawUsage);
+    const g = new BufferGeometry();
+    g.setAttribute('position', this.attr);
+    g.setDrawRange(0, 0);
+    this.mesh = new Mesh(g, gizmoMaterial(color, opacity));
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = order;
+    this.mesh.position.y = GIZMO_Y;
   }
-  for (const a of [-halfAngle, halfAngle]) {
-    const dx = Math.cos(a); const dz = Math.sin(a);
-    const px = -dz * w * 0.5; const pz = dx * w * 0.5; // perpendicular half-width
-    p.push(px, 0, pz, dx + px, 0, dz + pz, dx - px, 0, dz - pz, px, 0, pz, dx - px, 0, dz - pz, -px, 0, -pz);
+
+  begin(): void {
+    this.head = 0;
   }
-  const g = new BufferGeometry();
-  g.setAttribute('position', new Float32BufferAttribute(p, 3));
-  return g;
+
+  /** Append one agent's occluded-rim stroke. apex in world XZ; `rim` = `pointCount` XZ pairs (the clipped
+   *  endpoints). `stroke` is the world-space line width. Writes exactly `floatsPerAgent` floats. */
+  add(apexX: number, apexZ: number, rim: Float32Array, pointCount: number, stroke: number): void {
+    const h = stroke * 0.5;
+    const p = this.positions;
+    let o = this.head;
+    const pushEdge = (ax: number, az: number, bx: number, bz: number): void => {
+      let dx = bx - ax;
+      let dz = bz - az;
+      const len = Math.hypot(dx, dz) || 1;
+      dx /= len;
+      dz /= len;
+      const px = -dz * h; // perpendicular half-width
+      const pz = dx * h;
+      p[o++] = ax + px; p[o++] = 0; p[o++] = az + pz;
+      p[o++] = bx + px; p[o++] = 0; p[o++] = bz + pz;
+      p[o++] = bx - px; p[o++] = 0; p[o++] = bz - pz;
+      p[o++] = ax + px; p[o++] = 0; p[o++] = az + pz;
+      p[o++] = bx - px; p[o++] = 0; p[o++] = bz - pz;
+      p[o++] = ax - px; p[o++] = 0; p[o++] = az - pz;
+    };
+    pushEdge(apexX, apexZ, rim[0]!, rim[1]!); // apex → rim[0]
+    for (let i = 0; i < pointCount - 1; i++) {
+      pushEdge(rim[i * 2]!, rim[i * 2 + 1]!, rim[(i + 1) * 2]!, rim[(i + 1) * 2 + 1]!); // rim[i] → rim[i+1]
+    }
+    pushEdge(rim[(pointCount - 1) * 2]!, rim[(pointCount - 1) * 2 + 1]!, apexX, apexZ); // rim[last] → apex
+    this.head = o;
+  }
+
+  finalize(): void {
+    this.mesh.geometry.setDrawRange(0, this.head / 3);
+    this.attr.needsUpdate = true;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    (this.mesh.material as MeshBasicNodeMaterial).dispose();
+  }
 }
 
 /** Nav-grid info the world overlays (spatial grid + structural cells) are built from. */
@@ -164,47 +224,57 @@ class InstancedLayer {
 
 export class SceneGizmos {
   readonly group = new Group();
-  private readonly sight: InstancedLayer; // heading-oriented cone (unit radius, scaled per agent)
+  // §V78: sight + player vision are raycast-OCCLUDED visibility polygons (per-agent dynamic outline), cyan
+  // for zombies / violet for the player — NOT a shared scaled cone (an occluder must carve a shadow per agent).
+  private readonly sightRim: OccludedRimLayer; // zombie sight cones (cyan), MAX_GIZMOS rims
+  private readonly playerRim: OccludedRimLayer; // player vision cone (violet), 1 rim
   private readonly attack: InstancedLayer; // thin ring baked at attackRange (translate only)
   private readonly sound: InstancedLayer; // unit ring scaled per own radius
   private readonly stateMarkers: InstancedLayer[]; // one InstancedMesh per FSM state (solid colour each)
   private readonly stateCounts: number[] = [];
-  private readonly playerCone: Mesh;
   private readonly markerColor = new Color();
   private readonly sightRange: number;
+  private readonly sightFovHalf: number;
   private readonly playerFovHalf: number;
+  private readonly playerVisionRange: number;
+  private readonly raySegments: number;
+  private readonly strokeMeters: number;
+  /** Reused scratch for one agent's rim points (XZ pairs) — sized to segments+1; never reallocated (V24). */
+  private readonly rimScratch: Float32Array;
+  // §V78: occluder query state, mutated per agent so `distanceAt` (created ONCE) stays allocation-free.
+  private rimX = 0;
+  private rimZ = 0;
+  private rimRange = 0;
+  private wallDistanceFn: WallDistanceFn | null = null;
+  private readonly distanceAt = (angle: number): number =>
+    this.wallDistanceFn ? this.wallDistanceFn(this.rimX, this.rimZ, angle, this.rimRange) : this.rimRange;
   /** World overlays (spatial grid lines + filled structural cells) — static, built once from the nav grid. */
   private gridLines: Mesh | null = null;
   private structuralQuads: Mesh | null = null;
 
   constructor(tier: QualityTier, world?: WorldGridInfo) {
     const p = resolveDomain(perceptionConfig, tier);
+    const d = resolveDomain(debugConfig, tier);
     this.sightRange = p.sightRange;
-    const fovHalf = (p.fieldOfViewDegrees * Math.PI) / 360;
+    this.sightFovHalf = (p.fieldOfViewDegrees * Math.PI) / 360;
+    this.playerFovHalf = (p.playerFieldOfViewDegrees * Math.PI) / 360;
+    this.playerVisionRange = p.playerVisionRange;
+    this.raySegments = d.visionDebugRaySegments;
+    this.strokeMeters = d.visionDebugStrokeMeters;
+    this.rimScratch = new Float32Array((this.raySegments + 1) * 2);
 
-    // Derive the cone-outline stroke so it reads as a THIN fixed world-space line regardless of sight range
-    // (geometry is unit-radius scaled per instance by the range, so relative width = worldStroke / range).
-    const sightStroke = SIGHT_CONE_WORLD_STROKE / Math.max(0.01, this.sightRange);
-    this.sight = new InstancedLayer(makeConeOutline(fovHalf, 24, sightStroke), 0x38bdf8, MAX_GIZMOS, 998, 0.85);
+    // §V78: zombie sight = cyan occluded polygon; player vision = violet occluded polygon. Both are rebuilt
+    // in place each frame from per-agent raycasts (a wall/prop carves a shadow notch), no shared scaled cone.
+    this.sightRim = new OccludedRimLayer(0x38bdf8, MAX_GIZMOS, this.raySegments, 998, 0.85);
+    this.playerRim = new OccludedRimLayer(0xc084fc, 1, this.raySegments, 998, 0.85);
     this.attack = new InstancedLayer(makeRing(p.attackRangeMeters, RING_THICKNESS), 0xef4444, MAX_GIZMOS, 999, 0.7);
     this.sound = new InstancedLayer(makeRing(1, RING_THICKNESS), 0xfacc15, MAX_SOUND, 999, 0.6);
     this.stateMarkers = STATE_HEX.map(
       (hex) => new InstancedLayer(new BoxGeometry(0.6, 0.6, 0.6), hex, MAX_GIZMOS, 1000, 0.95),
     );
 
-    this.playerFovHalf = (p.playerFieldOfViewDegrees * Math.PI) / 360;
-    // Player vision = OUTLINED cone (analogous to the zombie sight cones, not a solid fill), violet so it's
-    // clearly distinct from the cyan ZOMBIE sight (0x38bdf8). Unit-radius outline scaled by the vision range,
-    // with the same thin fixed world-space stroke.
-    const playerStroke = SIGHT_CONE_WORLD_STROKE / Math.max(0.01, p.playerVisionRange);
-    this.playerCone = new Mesh(makeConeOutline(this.playerFovHalf, 24, playerStroke), gizmoMaterial(0xc084fc, 0.85));
-    this.playerCone.frustumCulled = false;
-    this.playerCone.renderOrder = 998;
-    this.playerCone.position.y = GIZMO_Y;
-    this.playerCone.scale.set(p.playerVisionRange, 1, p.playerVisionRange);
-    this.playerCone.visible = false;
-
-    this.group.add(this.sight.mesh, this.attack.mesh, this.sound.mesh, this.playerCone);
+    this.playerRim.mesh.visible = false;
+    this.group.add(this.sightRim.mesh, this.playerRim.mesh, this.attack.mesh, this.sound.mesh);
     for (const m of this.stateMarkers) this.group.add(m.mesh);
 
     if (world) {
@@ -227,9 +297,10 @@ export class SceneGizmos {
     flags: DebugFlags,
     player: { x: number; z: number; heading: number },
     queryStimuli: (x: number, z: number) => readonly { x: number; z: number; intensity: number; radius: number }[],
-    wallDistance?: (x: number, z: number, heading: number, maxR: number) => number,
+    wallDistance?: WallDistanceFn,
   ): void {
     const showPlayer = flags.showPlayerVision;
+    this.wallDistanceFn = wallDistance ?? null; // §V78: occluder query for this frame (null → unoccluded full cone)
     // World overlays are static meshes — just toggle their visibility (no per-frame rebuild needed).
     if (this.gridLines) this.gridLines.visible = flags.showSpatialGrids;
     if (this.structuralQuads) this.structuralQuads.visible = flags.showStructuralCells;
@@ -244,24 +315,42 @@ export class SceneGizmos {
     this.group.visible = any;
     if (!any) return;
 
-    // Player vision cone (single mesh) — orient to the aim heading. Nose is +x, so rotateY(-heading).
-    this.playerCone.visible = showPlayer;
+    const segs = this.raySegments;
+    const rimPoints = segs + 1;
+
+    // §V78: player vision = a RAYCAST-OCCLUDED polygon — fan rays across the FOV, clip each at the first
+    // occluder, stroke the apex → clipped rim → apex boundary (a wall ahead carves a shadow, see around corners).
+    this.playerRim.mesh.visible = showPlayer;
     if (showPlayer) {
-      this.playerCone.position.set(player.x, GIZMO_Y, player.z);
-      this.playerCone.rotation.y = -player.heading;
+      this.rimX = player.x;
+      this.rimZ = player.z;
+      this.rimRange = this.playerVisionRange;
+      const rim = occludedVisibilityRim(
+        player.x, player.z, player.heading, this.playerFovHalf, this.playerVisionRange, segs, this.distanceAt, this.rimScratch,
+      );
+      this.playerRim.begin();
+      this.playerRim.add(player.x, player.z, rim, rimPoints, this.strokeMeters);
+      this.playerRim.finalize();
     }
 
     for (let s = 0; s < STATE_HEX.length; s++) this.stateCounts[s] = 0;
     let n = 0;
     const pos: [number, number, number] = [0, 0, 0];
+    this.sightRim.begin();
     zombies.forEachAlive((slot) => {
       if (n >= MAX_GIZMOS) return;
       zombies.getPosition(slot, pos);
       const heading = zombies.getHeading(slot);
       if (flags.showSightRadius) {
-        // V47: crop the cone at the first wall along the heading so the overlay shows the OCCLUDED sight.
-        const r = wallDistance ? wallDistance(pos[0], pos[2], heading, this.sightRange) : this.sightRange;
-        this.sight.set(n, pos[0], pos[2], -heading, r, r);
+        // §V78: per-agent raycast-occluded sight polygon (each ray clipped at the first wall/prop along it),
+        // so corners + obstacles cast visibility shadows — NOT a full cone cropped only on the heading ray.
+        this.rimX = pos[0];
+        this.rimZ = pos[2];
+        this.rimRange = this.sightRange;
+        const rim = occludedVisibilityRim(
+          pos[0], pos[2], heading, this.sightFovHalf, this.sightRange, segs, this.distanceAt, this.rimScratch,
+        );
+        this.sightRim.add(pos[0], pos[2], rim, rimPoints, this.strokeMeters);
       }
       if (flags.showAttackRadius) this.attack.set(n, pos[0], pos[2], 0, 1, 1);
       if (flags.showZombieState) {
@@ -275,8 +364,8 @@ export class SceneGizmos {
       n += 1;
     });
 
-    this.sight.mesh.visible = flags.showSightRadius;
-    if (flags.showSightRadius) this.sight.finalize(n);
+    this.sightRim.mesh.visible = flags.showSightRadius;
+    if (flags.showSightRadius) this.sightRim.finalize();
     this.attack.mesh.visible = flags.showAttackRadius;
     if (flags.showAttackRadius) this.attack.finalize(n);
     for (let s = 0; s < this.stateMarkers.length; s++) {
@@ -302,7 +391,8 @@ export class SceneGizmos {
   }
 
   dispose(): void {
-    this.sight.dispose();
+    this.sightRim.dispose();
+    this.playerRim.dispose();
     this.attack.dispose();
     this.sound.dispose();
     for (const m of this.stateMarkers) m.dispose();
@@ -314,7 +404,5 @@ export class SceneGizmos {
       this.structuralQuads.geometry.dispose();
       (this.structuralQuads.material as MeshBasicNodeMaterial).dispose();
     }
-    this.playerCone.geometry.dispose();
-    (this.playerCone.material as MeshBasicNodeMaterial).dispose();
   }
 }

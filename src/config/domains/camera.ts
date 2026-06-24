@@ -62,10 +62,10 @@ export const cameraConfig = registerDomain('camera', {
   zoomMetersMax: num({
     owner: 'camera',
     unit: 'meters',
-    doc: 'Farthest tactical zoom: visible frustum half-height in meters (pull back for horde).',
-    default: 40,
+    doc: 'Farthest tactical zoom: visible frustum half-height in meters (pull back for horde / survey the block).',
+    default: 85,
     min: 1,
-    max: 200,
+    max: 400,
   }),
   zoomMetersDefault: num({
     owner: 'camera',

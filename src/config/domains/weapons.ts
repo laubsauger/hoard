@@ -42,6 +42,16 @@ export const weaponsConfig = registerDomain('weapons', {
     min: 0,
     max: 1,
   }),
+  /** Per-SHOT random aim deviation (full cone, degrees) applied to ANY firearm on top of its pellet pattern —
+   *  no shot is pixel-perfect. Small: a little scatter for variety, not a wild spray (deterministic, V26). */
+  firearmAccuracySpreadDegrees: num({
+    owner: 'weapons',
+    unit: 'degrees',
+    doc: 'Per-shot random aim deviation (full cone) for any firearm — subtle accuracy scatter on top of pellet spread.',
+    default: 3,
+    min: 0,
+    max: 30,
+  }),
   /** Damage multiplier for a head-region hit (also governs sever; head fatality is in combat config). */
   headshotMultiplier: num({
     owner: 'weapons',

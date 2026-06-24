@@ -297,10 +297,96 @@ export const renderingConfig = registerDomain('rendering', {
   crowdLimbBobMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'Peak vertical body bob applied to every part of a limbed figure from its SoA walk phase.',
+    doc: 'Peak vertical body bob applied to every part of a limbed figure on the WALK profile (idle/chase have their own — crowdLimbIdleBobMeters/crowdLimbChaseBobMeters).',
     default: 0.05,
     min: 0,
     max: 0.5,
+  }),
+
+  // ---- STATE-DRIVEN limb gait (T111 / V75): a limbed figure's swing/bob/reach reflect its SoA ZombieState +
+  // per-zombie speed, NOT one generic walk curve. idle≈still breathing; walk = moderate counter-swing paced to
+  // speed; chase = faster/wider/deeper bob; attack = a forward arm LUNGE (reach toward heading, not the
+  // counter-swing). The pure `limbGait`/`gaitPhaseRateHz` (limbs.ts) consume these; unit-tested GPU-free. The
+  // WALK swing/bob reuse crowdLimbWalkSwingRadians/crowdLimbBobMeters above; the rest are per-state below. ----
+  crowdLimbIdleSwingRadians: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Peak limb swing on the IDLE profile — a near-still breathing weight-shift, minimal motion (T111/V75).',
+    default: 0.05,
+    min: 0,
+    max: 1.5,
+  }),
+  crowdLimbChaseSwingRadians: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Peak limb swing on the CHASE (running) profile — wider + more agitated than the walk swing (T111/V75).',
+    default: 0.85,
+    min: 0,
+    max: 2,
+  }),
+  crowdLimbIdleFreqHz: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Animation-phase rate on the IDLE profile — slow breathing cadence; also the floor a slowing walker/chaser lerps back toward (T111/V75).',
+    default: 0.4,
+    min: 0,
+    max: 8,
+  }),
+  crowdLimbWalkFreqHz: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Animation-phase rate on the WALK profile at full pace; scaled down toward the idle rate as speed→0 (T111/V75).',
+    default: 1.4,
+    min: 0,
+    max: 8,
+  }),
+  crowdLimbChaseFreqHz: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Animation-phase rate on the CHASE profile at full pace — faster strides than walk (T111/V75).',
+    default: 2.6,
+    min: 0,
+    max: 12,
+  }),
+  crowdLimbIdleBobMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Vertical body bob on the IDLE profile — a subtle breathing rise; also the floor moving profiles lerp from at speed 0 (T111/V75).',
+    default: 0.012,
+    min: 0,
+    max: 0.5,
+  }),
+  crowdLimbChaseBobMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Vertical body bob on the CHASE profile — deeper than the walk bob (running gait) (T111/V75).',
+    default: 0.12,
+    min: 0,
+    max: 0.5,
+  }),
+  crowdLimbAttackReachRadians: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Peak FORWARD arm reach about the shoulder during the ATTACK lunge — both arms rotate toward the heading (a grasping reach), NOT the locomotion counter-swing (T111/V75).',
+    default: 1.05,
+    min: 0,
+    max: 2.5,
+  }),
+  crowdLimbAttackFreqHz: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Animation-phase rate during ATTACK — drives the grasping lunge pulse of the forward arm reach (T111/V75).',
+    default: 3.2,
+    min: 0,
+    max: 12,
+  }),
+  crowdLimbGaitSpeedRefMetersPerSecond: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Movement speed at which a WALK/CHASE figure reaches its FULL swing amplitude + stride frequency; the locomotion factor is clamp(speed/this,0,1) so a barely-moving body shuffles and a sprinter swings fully (T111/V75).',
+    default: 2.5,
+    min: 0.1,
+    max: 12,
   }),
 
   // ---- Gore render (T19 / V8 / V29): pooled + capped; intensity multiplier injected from accessibility ----
@@ -545,6 +631,14 @@ export const renderingConfig = registerDomain('rendering', {
     default: 10,
     min: 0.5,
     max: 60,
+  }),
+  cutawayXrayRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'X-RAY BUBBLE radius (V74): a Project-Zomboid-style cutaway bubble around the player. An occluding surface fades ONLY when its NEAREST point is within this distance of the player — so the cutaway follows the player everywhere and dissolves nearby occluders on the camera→player sightline (works behind ANY wall — neighbour/exterior included — not just the building the player occupies), yet stays radius-selective (a wall a few metres further back stays solid). A roof occludes from above so being inside the bubble is enough; a wall must ALSO lie between the player and the camera (V66). A tactical few metres — large enough to clear a typical house half-depth so the room you stand in reveals, small enough that the district still reads as solid streets. Pure VIEW aid, never touches the structural/nav grid (V63).',
+    default: 8,
+    min: 1,
+    max: 40,
   }),
 
   // ---- Pooled BLOOD system (T75 / V51): directional droplets that arc under gravity+drag and LAND as
@@ -929,6 +1023,22 @@ export const renderingConfig = registerDomain('rendering', {
     max: 32,
     integer: true,
   }),
+  bloodZombieGoreBodyRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Radial distance from a zombie body axis at which body-gore splats sit — sized to HUG the thin humanoid limbs (much smaller than the player body), so coating gore stays ON the mesh surface instead of floating on a fat cylinder (V48 surface-anchoring).',
+    default: 0.16,
+    min: 0.03,
+    max: 1,
+  }),
+  bloodZombieGoreHeightJitterMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Vertical jitter band around the STRUCK region height at which zombie body-gore splats land (keeps them clustered on the hit region, not smeared over the whole body) (V48).',
+    default: 0.14,
+    min: 0,
+    max: 1,
+  }),
 
   // ---- Pooled GIB system (T76 / V52): flung faceted lit meat chunks that tumble, land, settle, then dry +
   // shrink away. Sibling to the blood spray but SOLID matter — lit MeshStandardMaterial, low emissive so dark
@@ -987,17 +1097,17 @@ export const renderingConfig = registerDomain('rendering', {
   gibBaseSizeMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'Base radius of the faceted gib chunk geometry; per-chunk random + energy scale it (T76/V52).',
-    default: 0.26,
+    doc: 'Base radius of the faceted gib chunk geometry; per-chunk random + energy scale it (T76/V52). Small — a single shot should fling tiny specks, not plump lumps.',
+    default: 0.13,
     min: 0.02,
     max: 2,
-    tiers: { 'mobile-webgpu': 0.2 },
+    tiers: { 'mobile-webgpu': 0.11 },
   }),
   gibSeverChunkCountMin: num({
     owner: 'rendering',
     unit: 'count',
     doc: 'Minimum chunks thrown when a part is detached (partDetached, T76/V52).',
-    default: 3,
+    default: 2,
     min: 1,
     max: 32,
     integer: true,
@@ -1006,11 +1116,11 @@ export const renderingConfig = registerDomain('rendering', {
     owner: 'rendering',
     unit: 'count',
     doc: 'Maximum chunks thrown when a part is detached (partDetached, T76/V52).',
-    default: 6,
+    default: 3,
     min: 1,
     max: 64,
     integer: true,
-    tiers: { 'mobile-webgpu': 4 },
+    tiers: { 'mobile-webgpu': 2 },
   }),
   gibSeverSpeedMinMps: num({
     owner: 'rendering',
@@ -1055,12 +1165,36 @@ export const renderingConfig = registerDomain('rendering', {
   gibHitFleckCount: num({
     owner: 'rendering',
     unit: 'count',
-    doc: 'Number of small gib flecks flung by a hit above the fleck energy threshold (T76/V52).',
-    default: 2,
+    doc: 'Number of small gib flecks flung by a hit that rolls a fleck (T76/V52). Kept low — most hits just spray blood, not meat.',
+    default: 1,
     min: 0,
     max: 16,
     integer: true,
     tiers: { 'mobile-webgpu': 1 },
+  }),
+  gibHitFleckChance: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-hit PROBABILITY a (non-severing) hit also flings small meat flecks. Low so an ordinary shot mostly sprays blood — meat chunks read as the exception, not every shot (hit energy saturates at 1, so a probability gate, not the energy threshold, controls frequency) (T76/V52).',
+    default: 0.16,
+    min: 0,
+    max: 1,
+  }),
+  gibSeverLimbDropChance: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Probability a SEVERED limb physically DROPS as a flung limb chunk (lands on the ground + bleeds) instead of simply vanishing. A decent chance so dismemberment leaves a body part behind (T76/V52/V17).',
+    default: 0.6,
+    min: 0,
+    max: 1,
+  }),
+  gibSeverLimbSizeMul: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Size multiplier (× base gib size) of the dropped LIMB chunk — bigger than a fleck so it reads as a limb, not a speck (T76/V52).',
+    default: 2.8,
+    min: 1,
+    max: 8,
   }),
   gibEmissiveIntensity: num({
     owner: 'rendering',
@@ -1355,6 +1489,14 @@ export const renderingConfig = registerDomain('rendering', {
     min: 0.01,
     max: 1,
   }),
+  impactWoundBodyRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Surface offset of a body wound mark from the struck body axis, toward the shooter — sized to hug the thin zombie limb so the mark sits ON the mesh (and is reprojected to the body each frame, so it follows the moving body instead of floating where it was hit) (T81/V57).',
+    default: 0.16,
+    min: 0.03,
+    max: 1,
+  }),
 
   // ---- FireView (RENDER lane): additive billboard FLAMES + pooled flickering point LIGHTS + faint SMOKE
   // at burning cells. Pure visual mirror of the sim's burning-cell set (V2/V3). Pooled + capped (V24),
@@ -1594,6 +1736,58 @@ export const renderingConfig = registerDomain('rendering', {
   highlightStructureColorR: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) R.', default: 1, min: 0, max: 1 }),
   highlightStructureColorG: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) G.', default: 0.3, min: 0, max: 1 }),
   highlightStructureColorB: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) B.', default: 0.2, min: 0, max: 1 }),
+
+  // ---- Fog of war (T109 / V73) — a ground-plane overlay darkening UNEXPLORED + EXPLORED-but-not-visible
+  //      world cells, driven by a coarse per-cell visited+visible grid (render/world/fogOfWar.ts). The dim
+  //      levels below are the overlay opacities; a CURRENTLY-VISIBLE cell is always fully clear (0). Pure VIEW
+  //      — never mutates sim/nav (V2/V63); allocation-free per frame (V24). ----
+  fogOfWarEnabled: bool({
+    owner: 'rendering',
+    doc: 'Master toggle for the fog-of-war ground overlay (T109). Off renders the world fully un-fogged. Disabled on the mobile tier (the per-frame grid sweep is an early scaling victim).',
+    default: true,
+    tiers: { 'mobile-webgpu': false },
+  }),
+  fogOfWarUnexploredDim: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Overlay opacity for a NEVER-seen (unexplored) world cell — the darkest fog layer (T109/V73).',
+    default: 0.85,
+    min: 0,
+    max: 1,
+  }),
+  fogOfWarExploredDim: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Overlay opacity for an EXPLORED-but-not-currently-visible cell — the dim "memory" layer (T109/V73).',
+    default: 0.5,
+    min: 0,
+    max: 1,
+  }),
+  fogOfWarFadePerSecond: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-second exponential approach rate for each fog cell overlay opacity toward its target so cells fade between states (V73) instead of hard-popping. Mirrors the lighting fog-distance smoothing pattern.',
+    default: 6,
+    min: 0.1,
+    max: 60,
+  }),
+  fogOfWarHeightMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Height the fog overlay plane sits above the base ground so it composites over the ground paint without z-fighting (T109).',
+    default: 0.06,
+    min: 0,
+    max: 2,
+  }),
+  fogOfWarColor: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Fog overlay tint as a packed 0xRRGGBB hex (cool near-black), applied at the per-cell dim opacity (T109).',
+    default: 0x05070a,
+    min: 0,
+    max: 0xffffff,
+    integer: true,
+  }),
 });
 
 // ---- Block-limbed figure layout (T72 / V2 / V13 / ART-DIRECTION) ----
@@ -1601,7 +1795,8 @@ export const renderingConfig = registerDomain('rendering', {
 // feet). Box dims + local offsets are art-direction proportions, not perf knobs, so they live as a typed
 // constant here (centralized + named — no literals in render code, V4) rather than per-field tier specs.
 // `region` ties a part to its SoA anatomyFlags sever bit so a severed limb HIDES (V17); a null region
-// (torso) is never severable. `swingSign` drives the counter-swinging walk gait. Order is the part order.
+// (torso) is never severable. `swingSign` drives the counter-swinging walk gait; `reachSign` drives the
+// forward ATTACK arm reach (T111/V75 — arms only). Order is the part order.
 
 /** Identity of a block-limb body part. Render-side only; maps to an AnatomyRegion for the sever-hide. */
 export type CrowdLimbId = 'torso' | 'head' | 'armLeft' | 'armRight' | 'legLeft' | 'legRight';
@@ -1614,13 +1809,19 @@ export interface CrowdLimbPart {
   readonly offset: readonly [number, number, number];
   /** Walk-phase swing sign about local X (arms/legs counter-swing); 0 keeps the part rigid. */
   readonly swingSign: number;
+  /**
+   * ATTACK forward-reach sign about local X (T111/V75). Non-zero ONLY on the arms, and the SAME on both
+   * arms (not counter-swing) so the attack lunge reaches BOTH arms toward the heading. -1 maps a positive
+   * reach magnitude to a forward (toward local +Z / facing) rotation; 0 = the part never reaches.
+   */
+  readonly reachSign: number;
 }
 
 export const CROWD_LIMB_PARTS: readonly CrowdLimbPart[] = [
-  { id: 'legLeft', size: [0.18, 0.85, 0.2], offset: [-0.13, 0.42, 0], swingSign: 1 },
-  { id: 'legRight', size: [0.18, 0.85, 0.2], offset: [0.13, 0.42, 0], swingSign: -1 },
-  { id: 'torso', size: [0.5, 0.75, 0.32], offset: [0, 1.2, 0], swingSign: 0 },
-  { id: 'head', size: [0.3, 0.32, 0.3], offset: [0, 1.72, 0], swingSign: 0 },
-  { id: 'armLeft', size: [0.14, 0.62, 0.16], offset: [-0.34, 1.2, 0], swingSign: -1 },
-  { id: 'armRight', size: [0.14, 0.62, 0.16], offset: [0.34, 1.2, 0], swingSign: 1 },
+  { id: 'legLeft', size: [0.18, 0.85, 0.2], offset: [-0.13, 0.42, 0], swingSign: 1, reachSign: 0 },
+  { id: 'legRight', size: [0.18, 0.85, 0.2], offset: [0.13, 0.42, 0], swingSign: -1, reachSign: 0 },
+  { id: 'torso', size: [0.5, 0.75, 0.32], offset: [0, 1.2, 0], swingSign: 0, reachSign: 0 },
+  { id: 'head', size: [0.3, 0.32, 0.3], offset: [0, 1.72, 0], swingSign: 0, reachSign: 0 },
+  { id: 'armLeft', size: [0.14, 0.62, 0.16], offset: [-0.34, 1.2, 0], swingSign: -1, reachSign: -1 },
+  { id: 'armRight', size: [0.14, 0.62, 0.16], offset: [0.34, 1.2, 0], swingSign: 1, reachSign: -1 },
 ];

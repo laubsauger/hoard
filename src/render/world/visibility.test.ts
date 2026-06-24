@@ -9,6 +9,7 @@ import {
   wallFacesCamera,
   exteriorWallOccludesPlayer,
   wallBetweenPlayerAndCamera,
+  surfaceInXrayField,
   clampConeRangeToWall,
   classifyThreat,
   threatMarkerStyle,
@@ -156,6 +157,116 @@ describe('generic player↔camera occlusion — wallBetweenPlayerAndCamera (V66)
   it('does not depend on the sign of the normal (plane orientation is symmetric)', () => {
     const flipped = wallBetweenPlayerAndCamera({ outwardNormal: { x: -1, z: 0 }, wallCenter, player: { x: -3, z: 0 }, camera: { x: 3, z: 0 }, lateralSpanMeters: span });
     expect(flipped).toBe(true);
+  });
+});
+
+describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74)', () => {
+  const radius = settings.xrayRadiusMeters;
+  const span = settings.occluderLateralSpanMeters;
+
+  it('resolves a sane positive x-ray radius from config', () => {
+    expect(radius).toBeGreaterThan(0);
+  });
+
+  // A south-facing exterior wall: plane at z=10, outward normal +z, ~8 m wide, thin in z.
+  const SOUTH: VecXZ = { x: 0, z: 1 };
+  const wall = (player: VecXZ, camera: VecXZ, radiusMeters = radius): boolean =>
+    surfaceInXrayField({
+      outwardNormal: SOUTH,
+      surfaceCenter: { x: 0, z: 10 },
+      surfaceHalfExtent: { x: 4, z: 0.1 },
+      player,
+      camera,
+      radiusMeters,
+      lateralSpanMeters: span,
+    });
+
+  it('fades a wall that is BETWEEN player + camera AND within the radius', () => {
+    // player just south of the wall (z=9 < 10), camera north of it (z=20 > 10) → plane separates them; ~1 m away.
+    expect(wall({ x: 0, z: 9 }, { x: 0, z: 20 })).toBe(true);
+  });
+
+  it('keeps that SAME wall opaque when the player is BEYOND the x-ray radius (bubble is selective)', () => {
+    // Still between (player z=10-radius-5 south, camera north), but the wall's nearest point is past the radius.
+    const farSouth = 10 - radius - 5;
+    expect(wall({ x: 0, z: farSouth }, { x: 0, z: 20 })).toBe(false);
+  });
+
+  it('keeps a wall opaque when it is NOT between player + camera, even within the radius (far wall reads enclosure)', () => {
+    // player + camera both NORTH of the wall (z>10) → same signed side → not in the way → opaque.
+    expect(wall({ x: 0, z: 11 }, { x: 0, z: 20 })).toBe(false);
+  });
+
+  it('fades an UN-OCCUPIED building exterior wall behind the player (the bug) — no occupied-building gate', () => {
+    // The decision does not know/consult which building the player occupies: a wall between player + camera within
+    // the bubble fades regardless. This is exactly the neighbour/exterior wall the old gates left the player behind.
+    expect(wall({ x: 0, z: 9 }, { x: 0, z: 30 })).toBe(true);
+  });
+
+  it('with the facing refinement, a CAMERA-FACING wall stays faded when the player HUGS it (un-fade-when-close bug)', () => {
+    const camera: VecXZ = { x: 0, z: 20 }; // north of the wall (z=10) → the wall's +z normal faces the camera
+    const hug = (player: VecXZ): boolean =>
+      surfaceInXrayField({
+        outwardNormal: SOUTH,
+        surfaceCenter: { x: 0, z: 10 },
+        surfaceHalfExtent: { x: 4, z: 0.1 },
+        player,
+        camera,
+        radiusMeters: radius,
+        lateralSpanMeters: span,
+        facingDotThreshold: settings.cameraFacingDotThreshold,
+        facingHugBandMeters: settings.exteriorCutawayAdjacencyMeters,
+      });
+    expect(hug({ x: 0, z: 9.9 })).toBe(true); // just inside → faded (strict between would also catch this)
+    expect(hug({ x: 0, z: 10.05 })).toBe(true); // pressed ONTO the plane → still faded (the bug: between degraded here)
+    // but well PAST the wall on the camera side (beyond the hug band) → it's behind the player → stays opaque.
+    expect(hug({ x: 0, z: 10 + settings.exteriorCutawayAdjacencyMeters + 1 })).toBe(false);
+  });
+
+  it('fades a ROOF from above when the player is under/near its footprint within the radius', () => {
+    // Roof footprint centred at (0,0), 8×8 m; outwardNormal null ⇒ occludes from above (radius only, no between).
+    const roof = (player: VecXZ): boolean =>
+      surfaceInXrayField({
+        outwardNormal: null,
+        surfaceCenter: { x: 0, z: 0 },
+        surfaceHalfExtent: { x: 4, z: 4 },
+        player,
+        camera: { x: 0, z: 30 },
+        radiusMeters: radius,
+        lateralSpanMeters: span,
+      });
+    expect(roof({ x: 0, z: 0 })).toBe(true); // player dead under the roof → nearest point 0
+    expect(roof({ x: 3, z: 3 })).toBe(true); // inside the footprint → still 0
+    expect(roof({ x: 4 + radius + 5, z: 0 })).toBe(false); // well past the footprint + radius → opaque
+  });
+
+  it('uses the NEAREST point of the footprint: a player anywhere inside a LARGE footprint still reveals its roof (V20)', () => {
+    // A 40×40 m footprint whose centre is far from the player, but the player stands inside it → nearest point 0.
+    expect(
+      surfaceInXrayField({
+        outwardNormal: null,
+        surfaceCenter: { x: 0, z: 0 },
+        surfaceHalfExtent: { x: 20, z: 20 },
+        player: { x: 18, z: 18 }, // ~25 m from the centre, but inside the footprint
+        camera: { x: 0, z: 60 },
+        radiusMeters: radius,
+        lateralSpanMeters: span,
+      }),
+    ).toBe(true);
+  });
+
+  it('a degenerate (zero-length) wall normal never occludes (delegates to wallBetweenPlayerAndCamera)', () => {
+    expect(
+      surfaceInXrayField({
+        outwardNormal: { x: 0, z: 0 },
+        surfaceCenter: { x: 0, z: 10 },
+        surfaceHalfExtent: { x: 4, z: 0.1 },
+        player: { x: 0, z: 9 },
+        camera: { x: 0, z: 20 },
+        radiusMeters: radius,
+        lateralSpanMeters: span,
+      }),
+    ).toBe(false);
   });
 });
 

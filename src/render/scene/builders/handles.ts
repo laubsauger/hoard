@@ -22,9 +22,14 @@ export interface FadeSurface {
   readonly outwardNormal: VecXZ | null;
   readonly heightMeters: number;
   readonly buildingIndex: number;
-  /** World-XZ centre of the surface (on the wall plane) — used by the OUTSIDE-WALL cutaway (V62). */
+  /** World-XZ centre of the surface (on the wall plane / roof footprint centre). */
   readonly centerX: number;
   readonly centerZ: number;
+  /** XZ half-extents of the surface's bounding box. The X-RAY BUBBLE cutaway (V74) measures its radius to the
+   *  NEAREST point of this AABB, so a long wall fades when the player nears EITHER end and a player anywhere inside
+   *  a large footprint still reveals its roof (nearest point = 0). */
+  readonly halfX: number;
+  readonly halfZ: number;
   opacity: number;
 }
 

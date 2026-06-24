@@ -1,14 +1,17 @@
-// PER-BUILDING cutaway system (V59): fades the roof + upper walls of ONLY the building the player currently
-// occupies (its neighbours stay opaque so the district reads as solid streets). DIRECTIONAL (V58): a wall fades
-// when its outward normal turns toward the camera OR its plane lies between player↔camera (V66); roofs always
-// occlude from above. OUTSIDE-WALL (V62): an exterior wall the player hugs fades while it hides them.
+// X-RAY BUBBLE cutaway system (T110/V74): ONE generic pass over EVERY fade surface (all buildings' roofs + walls,
+// exterior + neighbour included), regardless of which building the player occupies. A surface fades when it lies
+// IN THE WAY of the camera→player sightline AND is within the x-ray RADIUS of the player — a Project-Zomboid-style
+// cutaway bubble that follows the player and only dissolves nearby occluders (`surfaceInXrayField`). This replaces
+// the old occupied-building (V59) + outside-wall HUG (V62) gates, which left the player hidden behind any wall they
+// were not occupying/hugging. Roofs occlude from above (radius alone); walls must also lie between player + camera.
 //
 // HIGH-RISK invariants this preserves byte-for-byte:
-//   • V20 — a FADED surface stops writing depth (`depthWrite = opacity >= 0.99`) so it can't depth-occlude the
+//   • V20/V56 — a FADED surface stops writing depth (`depthWrite = opacity >= 0.99`) so it can't depth-occlude the
 //     interior floor / blood decals / units below it ("blood invisible indoors").
 //   • V60 — a faded surface KEEPS `object.visible = true` so it still casts shadows + occludes light (the
 //     cutaway is a CAMERA-only view aid; the shadow depth pass ignores opacity).
 //   • V29 — motion reduction snaps the fade instantly (fadeRate = 1) instead of animating it.
+//   • V65 — a faded surface eases toward the SLIVER min-opacity, never fully vanishing.
 //
 // Extracted from BlockScene (docs/REFACTOR-godfiles.md).
 
@@ -16,20 +19,15 @@ import type { Camera } from 'three';
 import type { GameRuntime } from '../../../game/runtime';
 import {
   resolveSurfaceVisibility,
-  wallFacesCamera,
-  exteriorWallOccludesPlayer,
-  wallBetweenPlayerAndCamera,
+  surfaceInXrayField,
   type OcclusionContext,
   type VisibilitySettings,
-  type VecXZ,
 } from '../../world/visibility';
 import type { FadeSurface } from '../builders/handles';
-import { buildingIndexAt } from './playerLocation';
 
 export interface CutawaySystemConfig {
   readonly visibility: VisibilitySettings;
   readonly roofFadeSeconds: number;
-  readonly navCellSize: number;
 }
 
 export class CutawaySystem {
@@ -39,61 +37,34 @@ export class CutawaySystem {
   ) {}
 
   update(runtime: GameRuntime, camera: Camera | undefined, dtSeconds: number, reduceMotion: boolean): void {
-    // PER-BUILDING cutaway (V59): only the building the player currently occupies fades; its neighbours stay
-    // opaque so the district still reads as solid streets of houses.
     const player = runtime.player();
-    const insideIndex = buildingIndexAt(runtime.scene, this.cfg.navCellSize, player.x, player.z);
     // V29 motion reduction: cut roofs/upper walls instantly rather than animating the fade (less motion).
     const fadeRate = reduceMotion ? 1 : this.cfg.roofFadeSeconds > 0 ? dtSeconds / this.cfg.roofFadeSeconds : 1;
-    // T82/V58 DIRECTIONAL cutaway: derive the horizontal player→camera direction from the camera position. A
-    // wall fades only when its outward normal turns toward the camera; the roof always occludes from above.
-    let towardCamera: VecXZ | null = null;
-    if (camera) {
-      const dx = camera.position.x - player.x;
-      const dz = camera.position.z - player.z;
-      if (Math.hypot(dx, dz) > 1e-6) towardCamera = { x: dx, z: dz };
-    }
+    const camX = camera ? camera.position.x : 0;
+    const camZ = camera ? camera.position.z : 0;
     for (const s of this.fadeSurfaces) {
-      const playerInside = insideIndex >= 0 && s.buildingIndex === insideIndex;
-      let occludesPlayerView: boolean;
-      if (towardCamera === null || camera === undefined) {
-        occludesPlayerView = false; // no camera (construction prime) → stay opaque
-      } else if (playerInside) {
-        // Occupied building (V58/V59): roof always occludes from above. A wall fades when it turns toward the
-        // camera (V58 directional test) OR — GENERIC player↔camera occlusion (V66) — when its plane actually lies
-        // between the player and the camera. The second term catches INTERIOR walls (whose guessed outward normal
-        // need not point at the camera) that hide the player on the sightline; the directional term preserves the
-        // existing whole-near-side exterior fade. Either making it true fades the wall to the sliver (V65).
-        occludesPlayerView = s.kind === 'roof' || s.outwardNormal === null
-          ? true
-          : wallFacesCamera({
+      // X-RAY BUBBLE (V74): the SAME generic predicate for every surface of every building — a wall fades when it
+      // lies between the player and the camera AND is within the x-ray radius; a roof fades when the player is
+      // under/near its footprint within the radius. No occupied-building special case — so the player is no longer
+      // hidden behind a neighbour/exterior wall, yet the bubble stays radius-selective (distant houses stay solid).
+      const occludesPlayerView =
+        camera === undefined
+          ? false // construction prime (no camera) → stay opaque
+          : surfaceInXrayField({
               outwardNormal: s.outwardNormal,
-              towardCamera,
-              facingDotThreshold: this.cfg.visibility.cameraFacingDotThreshold,
-            }) ||
-            wallBetweenPlayerAndCamera({
-              outwardNormal: s.outwardNormal,
-              wallCenter: { x: s.centerX, z: s.centerZ },
+              surfaceCenter: { x: s.centerX, z: s.centerZ },
+              surfaceHalfExtent: { x: s.halfX, z: s.halfZ },
               player: { x: player.x, z: player.z },
-              camera: { x: camera.position.x, z: camera.position.z },
+              camera: { x: camX, z: camZ },
+              radiusMeters: this.cfg.visibility.xrayRadiusMeters,
               lateralSpanMeters: this.cfg.visibility.occluderLateralSpanMeters,
+              facingDotThreshold: this.cfg.visibility.cameraFacingDotThreshold,
+              facingHugBandMeters: this.cfg.visibility.exteriorCutawayAdjacencyMeters,
             });
-      } else if (s.kind === 'upperWall' && s.outwardNormal !== null) {
-        // OUTSIDE-WALL cutaway (V62): the player is OUTSIDE this building — fade an exterior wall only when the
-        // player hugs it AND it lies between the camera and the player, so it never hides the player. Roofs of
-        // un-occupied buildings stay opaque (the player isn't under them). VIEW-only — structural LOS unchanged.
-        occludesPlayerView = exteriorWallOccludesPlayer({
-          outwardNormal: s.outwardNormal,
-          wallCenter: { x: s.centerX, z: s.centerZ },
-          player: { x: player.x, z: player.z },
-          camera: { x: camera.position.x, z: camera.position.z },
-          adjacencyMeters: this.cfg.visibility.exteriorCutawayAdjacencyMeters,
-        });
-      } else {
-        occludesPlayerView = false;
-      }
       const ctx: OcclusionContext = {
-        playerInside,
+        // `playerInside` only drives the 'interior' surface case in resolveSurfaceVisibility; fade surfaces are
+        // always 'roof'/'upperWall', so it is inert here — the bubble decides occlusion per surface (V74).
+        playerInside: false,
         occludesPlayerView,
         roomEnclosed: true,
         portalOrLosToCamera: false,

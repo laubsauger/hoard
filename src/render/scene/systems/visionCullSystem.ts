@@ -34,13 +34,20 @@ export class VisionCullSystem {
     this.perceptionReveal = new Float32Array(zombieCapacity);
   }
 
-  build(runtime: GameRuntime, dtSeconds: number): VisionCull {
+  /**
+   * Build this frame's reveal. `passiveRadiusMeters` is the live, ambient-scaled passive awareness radius
+   * (T109/V72) used as the omnidirectional near-reveal radius; when omitted (e.g. tests / the construction
+   * prime) it falls back to the configured night-floor `playerNearAwarenessRadiusMeters`.
+   */
+  build(runtime: GameRuntime, dtSeconds: number, passiveRadiusMeters?: number): VisionCull {
     const p = runtime.player();
     const scene = runtime.scene;
     const los = (x0: number, z0: number, x1: number, z1: number): boolean => hasLineOfSight(scene, x0, z0, x1, z1);
     // The cone wedge PLUS the near/noise reveal params. The combined per-slot reveal is max(cone, near, memory,
     // noise) — see perceptionMemory.ts. LOS routes through the STRUCTURAL hasLineOfSight (nav grid), never mesh
-    // opacity, so a faded cutaway wall can't reveal the zombies behind it (V63).
+    // opacity, so a faded cutaway wall can't reveal the zombies behind it (V63). The near radius scales with
+    // ambient light (T109): brighter day → larger passive radius (you sense further all around you).
+    const nearRadius = passiveRadiusMeters ?? this.cfg.playerNearAwarenessRadiusMeters;
     const params: RevealParams = {
       px: p.x,
       pz: p.z,
@@ -49,7 +56,7 @@ export class VisionCullSystem {
       range: this.cfg.playerVisionRange,
       edgeBandMeters: this.cfg.playerVisionRangeFadeMeters,
       edgeBandRadians: (this.cfg.playerVisionConeFadeDegrees * Math.PI) / 180,
-      nearRadiusMeters: this.cfg.playerNearAwarenessRadiusMeters,
+      nearRadiusMeters: nearRadius,
       hearingRange: this.cfg.hearingRange,
       soundWallOcclusion: this.cfg.soundWallOcclusion,
       lineOfSight: los,

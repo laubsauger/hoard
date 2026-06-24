@@ -43,7 +43,8 @@ import {
 } from '../world/visibility';
 import { SceneResources } from './builders/sceneResources';
 import type { FadeSurface } from './builders/handles';
-import type { BuildContext } from './builders/buildContext';
+import { worldExtent, type BuildContext } from './builders/buildContext';
+import { passiveRadiusFromAmbient } from '../world/passiveAwareness';
 import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { buildProps } from './builders/propsBuilder';
 import { buildContainers } from './builders/containersBuilder';
@@ -56,6 +57,7 @@ import { BreachSystem } from './systems/breachSystem';
 import { DoorSystem } from './systems/doorSystem';
 import { WindowSystem } from './systems/windowSystem';
 import { VisionCullSystem } from './systems/visionCullSystem';
+import { FogOfWarSystem } from './systems/fogOfWarSystem';
 import { LightingSystem } from './systems/lightingSystem';
 import { FlashlightSystem } from './systems/flashlightSystem';
 import { CutawaySystem } from './systems/cutawaySystem';
@@ -160,6 +162,13 @@ export class BlockScene {
   private readonly visionCull: VisionCullSystem;
   /** Per-building cutaway (V59/V20/V60) — assigned in the constructor (needs the resolved navCellSize). */
   private readonly cutaway: CutawaySystem;
+  /** Fog of war (T109/V73) — owns the per-cell visited+visible grid + ground overlay. Assigned in the
+   *  constructor (needs the scene extent + registry). Resolved-on/off + dim levels live in the rendering config. */
+  private readonly fogOfWar: FogOfWarSystem;
+  private fogOfWarEnabled = true;
+  /** Live ambient-scaled passive awareness radius bounds (T109/V72) — the night floor + bright-midday ceiling. */
+  private readonly passiveRadiusMinMeters = this.perception.playerNearAwarenessRadiusMeters;
+  private readonly passiveRadiusMaxMeters = this.perception.passiveAwarenessRadiusMaxMeters;
 
   /** Combat feedback (B7): muzzle flash / tracer / blood / sever, fed by runtime.pollEvents() + fire(). */
   private readonly combat: CombatFeedbackSystem;
@@ -199,8 +208,35 @@ export class BlockScene {
     this.cutaway = new CutawaySystem(this.fadeSurfaces, {
       visibility: this.visibility,
       roofFadeSeconds: this.roofFadeSeconds,
-      navCellSize: this.navCellSize,
     });
+
+    // Fog of war (T109/V73): a per-cell visited+visible grid (1 cell == 1 nav cell) + a ground overlay darkening
+    // unexplored/explored world. Resolved with the LIVE tier (so the mobile-webgpu disable applies). The overlay
+    // mesh is added to the graph below; per-frame reveal runs in syncFrame after lighting (needs the brightness).
+    const navGrid = this.runtime.scene.navGrid;
+    const ext = worldExtent(this.runtime.scene, this.navCellSize);
+    this.fogOfWarEnabled = resolve(renderingConfig.fogOfWarEnabled, this.tierOf());
+    this.fogOfWar = new FogOfWarSystem(this.registry, {
+      cols: navGrid.width,
+      rows: navGrid.height,
+      cellSize: this.navCellSize,
+      worldWidth: ext.width,
+      worldDepth: ext.depth,
+      cone: {
+        fovDegrees: this.perception.playerFieldOfViewDegrees,
+        range: this.perception.playerVisionRange,
+        rangeFadeMeters: this.perception.playerVisionRangeFadeMeters,
+        coneFadeDegrees: this.perception.playerVisionConeFadeDegrees,
+      },
+      dims: {
+        exploredDim: resolve(renderingConfig.fogOfWarExploredDim, this.tierOf()),
+        unexploredDim: resolve(renderingConfig.fogOfWarUnexploredDim, this.tierOf()),
+      },
+      fadePerSecond: resolve(renderingConfig.fogOfWarFadePerSecond, this.tierOf()),
+      heightMeters: resolve(renderingConfig.fogOfWarHeightMeters, this.tierOf()),
+      color: resolve(renderingConfig.fogOfWarColor, this.tierOf()),
+    });
+    this.scene.add(this.fogOfWar.mesh);
 
     this.scene.background = new Color(0x0b0d0a);
     this.fog = new Fog(0x0b0d0a, 1, 400);
@@ -406,11 +442,23 @@ export class BlockScene {
       this.flashlightOn = flags.flashlight;
       this.visionConeCullOn = flags.cullToVisionCone;
     }
+    // PRESERVE ORDER (B6/T98/T109): lighting resolves the scene brightness the flashlight + the passive
+    // awareness radius consume. Lighting reads only the clock/weather/player (independent of crowd/doors), so it
+    // runs FIRST this frame and the ambient-scaled passive radius is ready for BOTH the crowd reveal and the fog.
+    const { sceneBrightness } = this.lightingSys.update(dtSeconds, this.runtime);
+    // T109/V72: ambient-scaled MINIMUM passive awareness radius — small at night (you only sense the flashlight
+    // wedge + what is right beside you), large at bright midday (you see all around you on an open street). Fed
+    // as the omnidirectional near-reveal radius to BOTH the crowd reveal + the fog of war; still LOS-gated (V63).
+    const passiveRadiusMeters = passiveRadiusFromAmbient(sceneBrightness, {
+      minRadiusMeters: this.passiveRadiusMinMeters,
+      maxRadiusMeters: this.passiveRadiusMaxMeters,
+    });
+
     // Compact live crowd inputs into the GPU storage buffers; the transform mat4 + animation phase are
     // assembled by renderer.compute(crowd.computeNode) in the frame loop (wired in GameViewport). When the
     // vision-cone fog-of-war is on, only members inside the player's wedge (cone+range+LOS) are packed (T98).
     // The construction-time prime / rebind (no flags) packs the FULL crowd — the cull is a live-loop concern.
-    const visibility = flags && this.visionConeCullOn ? this.visionCull.build(this.runtime, dtSeconds) : undefined;
+    const visibility = flags && this.visionConeCullOn ? this.visionCull.build(this.runtime, dtSeconds, passiveRadiusMeters) : undefined;
     this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, visibility);
 
     const p = this.runtime.player();
@@ -428,10 +476,12 @@ export class BlockScene {
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);
     this.windows.sync(this.runtime);
-    // PRESERVE ORDER (B6/T98): lighting resolves the scene brightness the flashlight consumes, then the cutaway.
-    const { sceneBrightness } = this.lightingSys.update(dtSeconds, this.runtime);
     this.flashlightSys.update(this.runtime, sceneBrightness, this.flashlightOn);
     this.cutaway.update(this.runtime, camera, dtSeconds, this.accessibility.feedback.reduceMotion);
+    // T109/V73: recompute the fog-of-war visible set (cone ∪ passive disc, LOS-gated) + age the ground overlay.
+    // A pure VIEW — never mutates the sim/nav (V2/V63). Runs every frame so exploration accrues regardless of dev
+    // toggles; the master enable lives in the rendering config (off on mobile).
+    this.fogOfWar.update(this.runtime, passiveRadiusMeters, dtSeconds, this.fogOfWarEnabled);
 
     // Combat feedback (B7): age pulses + gore, then reflect onto the GPU objects.
     this.combat.update(Math.max(0, dtSeconds));

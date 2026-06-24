@@ -38,6 +38,13 @@ export interface VisibilitySettings {
    * `wallBetweenPlayerAndCamera`.
    */
   readonly occluderLateralSpanMeters: number;
+  /**
+   * X-RAY BUBBLE radius (V74): an occluding surface only fades when its NEAREST point is within this distance of
+   * the player — a Project-Zomboid-style cutaway bubble that follows the player and dissolves nearby occluders on
+   * the sightline (works behind ANY wall — neighbour/exterior included — not just the occupied building). See
+   * `surfaceInXrayField`.
+   */
+  readonly xrayRadiusMeters: number;
 }
 
 export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings {
@@ -48,6 +55,7 @@ export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings
     exteriorCutawayAdjacencyMeters: resolve(renderingConfig.exteriorCutawayAdjacencyMeters, tier),
     minOpacity: resolve(renderingConfig.cutawayMinOpacity, tier),
     occluderLateralSpanMeters: resolve(renderingConfig.cutawayOccluderLateralSpanMeters, tier),
+    xrayRadiusMeters: resolve(renderingConfig.cutawayXrayRadiusMeters, tier),
   };
 }
 
@@ -160,6 +168,80 @@ export function wallBetweenPlayerAndCamera(input: PlayerCameraOcclusionInput): b
   const tz = nx;
   const lateral = Math.abs((cx - input.wallCenter.x) * tx + (cz - input.wallCenter.z) * tz);
   return lateral <= input.lateralSpanMeters;
+}
+
+export interface XrayFieldInput {
+  /** The surface's outward-facing horizontal normal — NULL for a ROOF (which occludes from ABOVE, radius-only). */
+  readonly outwardNormal: VecXZ | null;
+  /** The surface's world-XZ centre (wall-plane centre / roof footprint centre). */
+  readonly surfaceCenter: VecXZ;
+  /** XZ half-extents of the surface's bounding box, so the radius uses the NEAREST point of the surface — not just
+   *  its centre — and so a player anywhere inside a large footprint still reveals its roof (nearest point = 0). */
+  readonly surfaceHalfExtent: VecXZ;
+  /** Player world-XZ. */
+  readonly player: VecXZ;
+  /** Camera world-XZ. */
+  readonly camera: VecXZ;
+  /** X-ray bubble radius (m): the surface's nearest point must be within this of the player to fade. */
+  readonly radiusMeters: number;
+  /** Lateral band (m) passed to `wallBetweenPlayerAndCamera` (walls only) — bounds the sightline crossing test. */
+  readonly lateralSpanMeters: number;
+  /** Cosine threshold for the camera-FACING test (`wallFacesCamera`) — a near wall whose outward normal turns
+   *  toward the camera fades regardless of the player's side of it (so HUGGING a camera-side wall keeps it faded).
+   *  OPTIONAL: when omitted, only the strict between-the-sightline test applies (the facing refinement is off). */
+  readonly facingDotThreshold?: number;
+  /** Band (m) for the facing refinement: a camera-facing wall fades only when the player is INSIDE it or hugging
+   *  it (signed distance along the outward normal ≤ this), NOT when the player is well past it on the camera side
+   *  (then the wall is behind the player → keep it for enclosure). Defaults to 0 (fade only when strictly inside). */
+  readonly facingHugBandMeters?: number;
+}
+
+/**
+ * X-RAY BUBBLE cutaway decision (T110 / V74): the ONE generic predicate the CutawaySystem runs over EVERY fade
+ * surface (all buildings' roofs + walls, exterior + neighbour included), replacing the old occupied-building +
+ * outside-wall HUG gates. A surface fades when BOTH:
+ *   (a) it lies IN THE WAY — a wall whose plane is BETWEEN the player and the camera (`wallBetweenPlayerAndCamera`,
+ *       V66); a roof (`outwardNormal === null`) always occludes from above for the iso camera, so it needs only (b).
+ *   (b) it is within the X-RAY RADIUS — its NEAREST point (AABB nearest-point, so long walls / large footprints are
+ *       handled, and a player anywhere inside a footprint has distance 0 to that roof, preserving V20 "see your room").
+ * This is the Project-Zomboid x-ray bubble: it follows the player everywhere and dissolves only nearby occluders on
+ * the sightline — so it works behind an UN-occupied neighbour's exterior wall (the bug) AND is radius-selective.
+ * Pure, GPU-free, allocation-free, deterministic. A pure VIEW aid — never touches the structural/nav grid (V63).
+ */
+export function surfaceInXrayField(input: XrayFieldInput): boolean {
+  // (b) BUBBLE radius — distance from the player to the NEAREST point of the surface's AABB (centre ± half-extent).
+  const dx = Math.abs(input.player.x - input.surfaceCenter.x) - Math.max(0, input.surfaceHalfExtent.x);
+  const dz = Math.abs(input.player.z - input.surfaceCenter.z) - Math.max(0, input.surfaceHalfExtent.z);
+  const nx = dx > 0 ? dx : 0;
+  const nz = dz > 0 ? dz : 0;
+  if (nx * nx + nz * nz > input.radiusMeters * input.radiusMeters) return false;
+  // (a) IN THE WAY: a roof occludes from above (radius alone is enough); a wall is in the way when EITHER it is
+  // a camera-FACING near wall (its outward normal turns toward the camera — position-INDEPENDENT, so it stays
+  // faded even when the player presses right against it / crosses its plane: the "hug" + east/west un-fade bug)
+  // OR its plane lies strictly between the player and the camera (catches INTERIOR occluders whose normal need
+  // not face the camera). The OR restores the V58 directional term the bubble dropped; radius (b) still gates.
+  if (input.outwardNormal === null) return true;
+  if (input.facingDotThreshold !== undefined) {
+    // Player's signed distance along the wall's outward normal: ≤ band ⇒ inside or hugging (fade a camera-facing
+    // wall so it never hides the player); well above band ⇒ the player is PAST it on the camera side, so the wall
+    // is behind the player → don't fade it via facing (keep the far wall for enclosure — the "far wall" case).
+    const n = input.outwardNormal;
+    const nl = Math.hypot(n.x, n.z) || 1;
+    const playerSide = ((input.player.x - input.surfaceCenter.x) * n.x + (input.player.z - input.surfaceCenter.z) * n.z) / nl;
+    if (playerSide <= (input.facingHugBandMeters ?? 0)) {
+      const towardCamera = { x: input.camera.x - input.player.x, z: input.camera.z - input.player.z };
+      if (wallFacesCamera({ outwardNormal: n, towardCamera, facingDotThreshold: input.facingDotThreshold })) {
+        return true;
+      }
+    }
+  }
+  return wallBetweenPlayerAndCamera({
+    outwardNormal: input.outwardNormal,
+    wallCenter: input.surfaceCenter,
+    player: input.player,
+    camera: input.camera,
+    lateralSpanMeters: input.lateralSpanMeters,
+  });
 }
 
 /**

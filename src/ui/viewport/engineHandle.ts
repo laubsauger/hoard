@@ -82,8 +82,8 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
     ignite: () => getRuntime().igniteRoute(getRuntime().defaultBreachCell()),
     toggleNearestDoor: () => { getRuntime().toggleNearestDoor(); },
     // T108 window verbs. Board-up consumes planks + a tool; pry returns the planks — re-publish the
-    // inventory so the HUD plank count updates immediately (V1). Climb is flavour (the opening is already
-    // passable — its nav cell is cleared), so it is a no-op that simply closes the wheel.
+    // inventory so the HUD plank count updates immediately (V1). Climb VAULTS the player to the far side of
+    // an opening (V70) — a player-only move; the window cell stays a blocked wall in nav (V68), never cleared.
     smashWindow: () => { getRuntime().smashNearestWindow(); },
     boardWindow: () => { if (getRuntime().boardNearestWindow()) publishInventory(); },
     removeWindowBoard: () => { if (getRuntime().unboardNearestWindow()) publishInventory(); },

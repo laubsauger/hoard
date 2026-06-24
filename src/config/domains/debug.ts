@@ -45,4 +45,31 @@ export const debugConfig = registerDomain('debug', {
     max: 1024,
     integer: true,
   }),
+  /**
+   * §V78 — ray SEGMENTS fanned across each agent's FOV when the dev overlay draws the RAYCAST-OCCLUDED
+   * vision/sight polygon (player vision cone + zombie sight cones). More segments = a smoother shadow
+   * edge around corners but more per-frame raycasts; bounded so the overlay stays cheap (dev-only).
+   */
+  visionDebugRaySegments: num({
+    owner: 'debug',
+    unit: 'count',
+    doc: 'Rays fanned across each agent FOV for the occluded vision-cone debug overlay (§V78); more = smoother shadow edge, more raycasts.',
+    default: 24,
+    min: 4,
+    max: 128,
+    integer: true,
+    tiers: { 'mobile-webgpu': 16, 'desktop-high': 32 },
+  }),
+  /**
+   * §V78 — world-space stroke width (m) of the occluded vision-polygon OUTLINE. A thin fixed line in
+   * world meters (the rim points are already world-space, so it never fattens with range).
+   */
+  visionDebugStrokeMeters: num({
+    owner: 'debug',
+    unit: 'meters',
+    doc: 'World-space stroke width of the occluded vision-cone debug outline (§V78) — a thin fixed line.',
+    default: 0.05,
+    min: 0.01,
+    max: 1,
+  }),
 });

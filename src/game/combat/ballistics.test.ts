@@ -153,7 +153,9 @@ describe('T73 stop distance is returned for the tracer (V49/V53)', () => {
     spawn(hit, 7, 0);
     const hitRes = hit.sys.fire(ORIGIN, 1, 0, 'torsoUpper');
     expect(hitRes.hit).toBe(true);
-    expect(hitRes.stopDistanceMeters).toBeCloseTo(7, 5);
+    // Stops AT the body (~7 m); within the hit radius — the per-shot accuracy jitter scatters the exact
+    // contact point a hair, so this is no longer a pixel-exact 7.0.
+    expect(hitRes.stopDistanceMeters).toBeCloseTo(7, 0);
 
     const miss = harness();
     const missRes = miss.sys.fire(ORIGIN, 1, 0, 'torsoUpper');

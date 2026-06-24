@@ -56,6 +56,9 @@ export interface GibSettings {
   readonly spinMaxRadPerSec: number;
   readonly hitFleckEnergyThreshold: number;
   readonly hitFleckCount: number;
+  readonly hitFleckChance: number;
+  readonly severLimbDropChance: number;
+  readonly severLimbSizeMul: number;
   readonly emissiveIntensity: number;
   readonly distantSimplifyMeters: number;
   readonly distantCountScale: number;
@@ -79,6 +82,9 @@ export function resolveGibSettings(tier: QualityTier): GibSettings {
     spinMaxRadPerSec: resolve(renderingConfig.gibSpinMaxRadPerSec, tier),
     hitFleckEnergyThreshold: resolve(renderingConfig.gibHitFleckEnergyThreshold, tier),
     hitFleckCount: resolve(renderingConfig.gibHitFleckCount, tier),
+    hitFleckChance: resolve(renderingConfig.gibHitFleckChance, tier),
+    severLimbDropChance: resolve(renderingConfig.gibSeverLimbDropChance, tier),
+    severLimbSizeMul: resolve(renderingConfig.gibSeverLimbSizeMul, tier),
     emissiveIntensity: resolve(renderingConfig.gibEmissiveIntensity, tier),
     distantSimplifyMeters: resolve(renderingConfig.gibDistantSimplifyMeters, tier),
     distantCountScale: resolve(renderingConfig.gibDistantCountScale, tier),
@@ -196,21 +202,29 @@ export class GibSim {
           const region = this.pending ? this.pending.region : 'torsoUpper';
           const y = e.y + regionImpactHeight(region, this.settings.regionHeights);
           this.lastImpact = { x: e.x, y, z: e.z };
-          if (energy >= this.settings.hitFleckEnergyThreshold && this.settings.hitFleckCount > 0) {
-            this.burst(e.x, y, e.z, gibColor('blood'), this.settings.hitFleckCount, dist, ctx, 0.45);
+          // Hit-driven flecks are the EXCEPTION, not every shot: roll a low probability (hit energy saturates
+          // at 1, so the energy threshold alone fired on every hit — that was the "gibs every shot" bug). Most
+          // shots just spray blood; occasionally a tiny meat fleck. Flecks are small (sizeMul 0.35).
+          if (energy >= this.settings.hitFleckEnergyThreshold && this.settings.hitFleckCount > 0 && rnd() < this.settings.hitFleckChance) {
+            this.burst(e.x, y, e.z, gibColor('blood'), this.settings.hitFleckCount, dist, ctx, 0.35);
           }
           this.pending = null;
           break;
         }
         case 'partDetached': {
-          // Sever-driven: a clutch of limb chunks at the last impact point.
+          // Sever-driven (V17): a small spray of meat bits at the cut, PLUS — with a decent probability — the
+          // limb itself DROPS as a flung limb chunk that lands + bleeds (the bloodView partDetached spray is the
+          // bleed), instead of just vanishing. Otherwise the part silently disappears (clean amputation).
           const at = this.lastImpact;
           if (at) {
             const dist = Math.hypot(at.x - ctx.cameraX, at.y - ctx.cameraY, at.z - ctx.cameraZ);
             const s = this.settings;
             const span = Math.max(0, s.severChunkCountMax - s.severChunkCountMin);
             const count = s.severChunkCountMin + Math.round(rnd() * span);
-            this.burst(at.x, at.y, at.z, gibColor('blood'), count, dist, ctx, 1);
+            this.burst(at.x, at.y, at.z, gibColor('blood'), count, dist, ctx, 0.6);
+            if (rnd() < s.severLimbDropChance) {
+              this.burst(at.x, at.y, at.z, gibColor('blood'), 1, dist, ctx, s.severLimbSizeMul); // the limb itself
+            }
           }
           break;
         }

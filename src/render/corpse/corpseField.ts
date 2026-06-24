@@ -1,10 +1,11 @@
-// T55 / V18 / V24 / V33 — pooled instanced CORPSE field. The killed-zombie bodies the CorpseSystem holds
-// (V18 / B9) are rendered as ONE shared InstancedMesh of toppled, settled bodies lying on the ground — no
-// per-corpse object/material. Pure render view (V2): it MIRRORS the sim's public corpse list each frame and
-// never feeds the sim back. r184 binding-safe (V33): SOLID box geometry + a PRE-CREATED instanceColor
-// InstancedBufferAttribute (no lazy setColorAt on an unallocated binding), dynamic-usage matrices, capped at
-// the configured corpse capacity. Every GPU resource is tracked for disposal (V24). Dismemberment carried on
-// the corpse (severed-region bitfield) darkens the body so a dismembered corpse reads as one.
+// T55 / V18 / V24 / V33 — pooled instanced CORPSE field. A killed zombie (V18 / B9) is rendered as the SAME
+// block-limbed humanoid as the live crowd (head/torso/arms/legs), but TOPPLED flat on the ground — so a body
+// reads as a dead version of the thing that was walking, NOT a generic box. ONE shared InstancedMesh PER BODY
+// PART (mirroring CrowdLimbs), composed per corpse into a lying pose. DISMEMBERMENT PERSISTS THROUGH DEATH
+// (V17): a part whose region bit is set in the corpse's `severedFlags` is hidden (degenerate matrix), so a
+// one-armed zombie leaves a one-armed corpse. Pure render view (V2): mirrors the sim corpse list each frame,
+// never feeds back. r184 binding-safe (V33): solid box geo + pre-created instanceColor, dynamic-usage matrices,
+// capped at the configured corpse capacity. Every GPU resource is tracked for disposal (V24).
 
 import {
   BoxGeometry,
@@ -12,31 +13,36 @@ import {
   DynamicDrawUsage,
   InstancedBufferAttribute,
   InstancedMesh,
+  Matrix4,
   MeshStandardMaterial,
-  Object3D,
   type Scene,
+  type Object3D,
 } from 'three';
 import { resolveDomain } from '../../config/registry';
 import { zombiesConfig } from '../../config/domains/zombies';
+import { CROWD_LIMB_PARTS } from '../../config/domains/rendering';
+import { regionBit } from '../../game/combat/anatomy';
+import type { AnatomyRegion } from '../../game/core/contracts/events';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { Corpse } from '../../game/zombie';
 
-// Desaturated, decayed-flesh tone — clearly distinct from the live crowd's greenish tint so a body reads as
-// dead, not active. Per-instance brightness drops with dismemberment (severed-region count).
+// Desaturated, decayed-flesh tone — distinct from the live crowd's greenish tint so a body reads as dead.
 const CORPSE_BASE_COLOR = new Color(0x3a3026);
-// Toppled body box (a flattened humanoid, mirroring the crowd's capsule-ish box, laid on its back/side).
-const CORPSE_BODY_WIDTH = 0.55;
-const CORPSE_BODY_HEIGHT = 1.8;
-const CORPSE_BODY_DEPTH = 0.4;
-// Lift the toppled body so it rests ON the ground (half its post-rotation thickness clears the floor).
-const CORPSE_LIE_HEIGHT = 0.2;
-// Pitched flat (a 90° topple onto the ground plane), then yawed by the body's last heading.
+// Lift the toppled body so it rests ON the ground/slab (roughly half a torso thickness clears the surface).
+const CORPSE_LIE_HEIGHT = 0.18;
+// A 90° topple onto the ground plane (the standing figure tips flat), then yawed by the body's last heading.
 const CORPSE_TOPPLE_PITCH = Math.PI / 2;
-// Each severed region darkens the body by this fraction, floored so a fully dismembered corpse stays visible.
-const CORPSE_SEVER_DARKEN = 0.12;
-const CORPSE_MIN_BRIGHTNESS = 0.4;
-const SEVER_FLAG_BITS = 8; // anatomyFlags occupies the low 8 region bits (head..legRight) — see combat/anatomy.
+
+// Render part id -> SoA anatomy region for the sever-hide (V17). Torso is never severable → null (always shown).
+const PART_REGION: Readonly<Record<string, AnatomyRegion | null>> = {
+  torso: null,
+  head: 'head',
+  armLeft: 'armLeft',
+  armRight: 'armRight',
+  legLeft: 'legLeft',
+  legRight: 'legRight',
+};
 
 export interface CorpseFieldSettings {
   readonly capacity: number;
@@ -47,77 +53,103 @@ export function resolveCorpseFieldSettings(tier: QualityTier): CorpseFieldSettin
   return { capacity: resolveDomain(zombiesConfig, tier).corpseCapacity };
 }
 
-/** Count set region bits in the low 8 bits of the anatomyFlags sever bitfield (how many limbs/head gone). */
-function severedCount(flags: number): number {
-  let n = 0;
-  for (let b = 0; b < SEVER_FLAG_BITS; b++) if ((flags & (1 << b)) !== 0) n += 1;
-  return n;
-}
-
 export class CorpseField {
-  readonly mesh: InstancedMesh;
   readonly settings: CorpseFieldSettings;
 
-  private readonly geometry: BoxGeometry;
-  private readonly material: MeshStandardMaterial;
-  private readonly dummy = new Object3D();
+  /** One InstancedMesh per body part (same part order as CROWD_LIMB_PARTS), each capped at corpse capacity. */
+  private readonly partMeshes: InstancedMesh[] = [];
+  /** Per-part sever bit (0 = torso, never hidden) + local center offset from the feet origin. */
+  private readonly partSeverBit: number[] = [];
+  private readonly partOffset: [number, number, number][] = [];
+
+  // Scratch transforms (no per-corpse/per-part allocation, V24).
+  private readonly bodyM = new Matrix4();
+  private readonly rotM = new Matrix4();
+  private readonly offM = new Matrix4();
+  private readonly partM = new Matrix4();
+  private readonly zeroM = new Matrix4().set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
   private readonly tmp = new Color();
 
   constructor(settings: CorpseFieldSettings, registry: ResourceRegistry) {
     this.settings = settings;
     const cap = Math.max(1, settings.capacity);
 
-    this.geometry = registry.track(
-      new BoxGeometry(CORPSE_BODY_WIDTH, CORPSE_BODY_HEIGHT, CORPSE_BODY_DEPTH),
-      'geometry',
-      'corpse.geometry',
-    );
-    this.material = registry.track(
-      new MeshStandardMaterial({ name: 'corpse.material', roughness: 0.95, metalness: 0 }),
-      'material',
-      'corpse.material',
-    );
-    this.mesh = registry.track(new InstancedMesh(this.geometry, this.material, cap), 'buffer', 'corpse.instancedMesh');
+    for (const part of CROWD_LIMB_PARTS) {
+      const geo = registry.track(
+        new BoxGeometry(part.size[0], part.size[1], part.size[2]),
+        'geometry',
+        `corpse.limbGeo.${part.id}`,
+      );
+      const mat = registry.track(
+        new MeshStandardMaterial({ name: `corpse.limb.${part.id}`, roughness: 0.95, metalness: 0 }),
+        'material',
+        `corpse.limbMat.${part.id}`,
+      );
+      const mesh = registry.track(new InstancedMesh(geo, mat, cap), 'buffer', `corpse.limbMesh.${part.id}`);
+      // r184 binding-safe: dynamic-usage matrices + a PRE-CREATED instanceColor binding; start with 0 drawn.
+      mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+      const colors = new Float32Array(cap * 3).fill(1);
+      mesh.instanceColor = new InstancedBufferAttribute(colors, 3);
+      mesh.instanceColor.setUsage(DynamicDrawUsage);
+      mesh.frustumCulled = false; // bodies span large bounds; cheap, capped count
+      // T45/V36/B13: settled bodies cast + receive the directional shadow so they read as grounded, not floating.
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.count = 0;
+      this.partMeshes.push(mesh);
 
-    // r184 binding-safe: dynamic-usage matrices + a PRE-CREATED instanceColor binding; start with 0 drawn.
-    this.mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-    const colors = new Float32Array(cap * 3).fill(1);
-    this.mesh.instanceColor = new InstancedBufferAttribute(colors, 3);
-    this.mesh.instanceColor.setUsage(DynamicDrawUsage);
-    this.mesh.frustumCulled = false; // corpses span large bounds; cheap, capped count
-    // T45/V36/B13: settled bodies cast + receive the directional shadow so they read as grounded, not floating.
-    this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
-    this.mesh.count = 0;
+      const region = PART_REGION[part.id] ?? null;
+      this.partSeverBit.push(region ? regionBit(region) : 0);
+      this.partOffset.push([part.offset[0], part.offset[1], part.offset[2]]);
+    }
   }
 
-  /** Add the corpse mesh to the scene graph (parent owns graph membership; registry owns disposal — V24). */
+  /** The per-body-part instanced meshes (same order as CROWD_LIMB_PARTS) — exposed for tests/diagnostics. */
+  get meshes(): readonly InstancedMesh[] {
+    return this.partMeshes;
+  }
+
+  /** Add every corpse part mesh to the scene graph (parent owns membership; registry owns disposal — V24). */
   attachTo(scene: Scene | Object3D): void {
-    scene.add(this.mesh);
+    for (const m of this.partMeshes) scene.add(m);
   }
 
   /**
-   * Mirror the CorpseSystem's live records onto the instanced batch: each body toppled flat, yawed by its
-   * last heading, settled on the ground, and darkened by how many regions were severed. Caps at capacity
-   * (the sim already recycles the oldest, so an over-cap list is not expected). Returns the drawn count.
+   * Mirror the CorpseSystem's live records onto the instanced batches: each body composed as a toppled limbed
+   * figure (yawed by its last heading, settled on the ground), with any SEVERED part hidden (V17 — persists
+   * dismemberment through death). Caps at capacity (the sim recycles the oldest). Returns the drawn count.
    */
   update(corpses: readonly Corpse[]): number {
     const n = Math.min(corpses.length, this.settings.capacity);
-    for (let i = 0; i < n; i++) {
-      const c = corpses[i]!;
-      this.dummy.position.set(c.x, CORPSE_LIE_HEIGHT, c.z);
-      this.dummy.rotation.set(CORPSE_TOPPLE_PITCH, c.heading, 0);
-      this.dummy.scale.setScalar(1);
-      this.dummy.updateMatrix();
-      this.mesh.setMatrixAt(i, this.dummy.matrix);
+    for (let ci = 0; ci < n; ci++) {
+      const c = corpses[ci]!;
+      // Body transform = T(pos + lie) · RotY(heading) · RotX(topple): the standing figure tips flat + yaws.
+      this.bodyM.makeTranslation(c.x, c.y + CORPSE_LIE_HEIGHT, c.z);
+      this.rotM.makeRotationY(c.heading);
+      this.bodyM.multiply(this.rotM);
+      this.rotM.makeRotationX(CORPSE_TOPPLE_PITCH);
+      this.bodyM.multiply(this.rotM);
 
-      const dim = Math.max(CORPSE_MIN_BRIGHTNESS, 1 - severedCount(c.severedFlags) * CORPSE_SEVER_DARKEN);
-      this.tmp.setRGB(CORPSE_BASE_COLOR.r * dim, CORPSE_BASE_COLOR.g * dim, CORPSE_BASE_COLOR.b * dim);
-      this.mesh.setColorAt(i, this.tmp);
+      for (let p = 0; p < this.partMeshes.length; p++) {
+        const mesh = this.partMeshes[p]!;
+        const bit = this.partSeverBit[p]!;
+        const severed = bit !== 0 && (c.severedFlags & bit) !== 0;
+        if (severed) {
+          mesh.setMatrixAt(ci, this.zeroM); // V17 — the part was shot off; it stays gone on the corpse
+        } else {
+          const o = this.partOffset[p]!;
+          this.partM.multiplyMatrices(this.bodyM, this.offM.makeTranslation(o[0], o[1], o[2]));
+          mesh.setMatrixAt(ci, this.partM);
+        }
+        this.tmp.setRGB(CORPSE_BASE_COLOR.r, CORPSE_BASE_COLOR.g, CORPSE_BASE_COLOR.b);
+        mesh.setColorAt(ci, this.tmp);
+      }
     }
-    this.mesh.count = n;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    for (const mesh of this.partMeshes) {
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
     return n;
   }
 }

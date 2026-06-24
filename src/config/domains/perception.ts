@@ -36,18 +36,34 @@ export const perceptionConfig = registerDomain('perception', {
     max: 360,
   }),
   /**
-   * Near-proximity awareness radius (m) — PLAYER PERCEPTION v2 (V62). A zombie within this radius is REVEALED
-   * regardless of cone direction (you sense something right beside/behind you), BUT still gated on structural
-   * line-of-sight (hasLineOfSight) — you do NOT sense it through a solid wall. Combines with the forward cone as
-   * one OR-term of the reveal: revealVisibility = max(cone, near, memory, noise).
+   * Near-proximity awareness radius (m) — PLAYER PERCEPTION v2 (V62), now the NIGHT FLOOR of the passive
+   * awareness radius (T109/V72). A zombie/world cell within this radius is REVEALED regardless of cone direction
+   * (you sense something right beside/behind you), BUT still gated on structural line-of-sight (hasLineOfSight)
+   * — you do NOT sense it through a solid wall. Combines with the forward cone as one OR-term of the reveal:
+   * revealVisibility = max(cone, near, memory, noise). The LIVE radius scales with ambient light from THIS floor
+   * (full darkness) up to `passiveAwarenessRadiusMaxMeters` (full daylight) — see passiveRadiusFromAmbient.
    */
   playerNearAwarenessRadiusMeters: num({
     owner: 'perception',
     unit: 'meters',
-    doc: 'Radius (m) within which a zombie is revealed regardless of cone direction, still gated on LOS (V62).',
+    doc: 'Passive awareness radius (m) at full darkness — the night floor; LOS-gated, cone-independent (V62/V72).',
     default: 4,
     min: 0,
     max: 30,
+  }),
+  /**
+   * Passive awareness radius (m) at full daylight — the bright-midday CEILING (T109/V72). Standing on an open
+   * street at noon you passively see all around you out to this radius (still LOS-gated, so walls/solid props
+   * stop it). The live radius lerps from `playerNearAwarenessRadiusMeters` (night) to this with the resolved
+   * scene brightness. Must be >= the night floor (passiveRadiusFromAmbient throws otherwise).
+   */
+  passiveAwarenessRadiusMaxMeters: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'Passive awareness radius (m) at full daylight — the bright-midday ceiling; LOS-gated (T109/V72).',
+    default: 14,
+    min: 0,
+    max: 60,
   }),
   /**
    * Recently-seen memory window (s) — PLAYER PERCEPTION v2 (V62). A zombie that WAS revealed stays revealed for

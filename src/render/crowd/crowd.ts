@@ -53,11 +53,12 @@ import type { VisionCull } from './visionCull';
 import {
   composeLimbMatrix,
   packLimbInputs,
-  walkBob,
-  walkSwing,
+  limbGait,
   FLOATS_PER_LIMB_POSE,
   FLOATS_PER_MAT4,
   type LimbPartPlacement,
+  type LimbGait,
+  type LimbGaitConfig,
 } from './limbs';
 
 /** Base crowd flesh/clothing tint; per-instance variation modulates its brightness in the shader (V2). */
@@ -78,8 +79,8 @@ export interface CrowdSettings {
   readonly limbedBudget: number;
   /** Slots with simTier <= this are limbed figures; higher tiers stay the horde box. */
   readonly limbedMaxSimTier: number;
-  readonly limbSwingRadians: number;
-  readonly limbBobMeters: number;
+  /** Per-state limb gait tunables (swing/bob/reach/frequency by ZombieState + speed) (T111/V75). */
+  readonly gait: LimbGaitConfig;
 }
 
 export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
@@ -93,8 +94,22 @@ export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
     brightnessSpread: resolve(renderingConfig.crowdVariationBrightnessSpread, tier),
     limbedBudget: resolve(renderingConfig.crowdLimbedBudget, tier),
     limbedMaxSimTier: resolve(renderingConfig.crowdLimbedMaxSimTier, tier),
-    limbSwingRadians: resolve(renderingConfig.crowdLimbWalkSwingRadians, tier),
-    limbBobMeters: resolve(renderingConfig.crowdLimbBobMeters, tier),
+    // T111/V75 state-driven gait: walk swing/bob reuse the existing crowdLimbWalkSwingRadians/crowdLimbBobMeters;
+    // idle/chase/attack + the per-state frequencies + the speed reference are their own tunables.
+    gait: {
+      idleSwingRadians: resolve(renderingConfig.crowdLimbIdleSwingRadians, tier),
+      walkSwingRadians: resolve(renderingConfig.crowdLimbWalkSwingRadians, tier),
+      chaseSwingRadians: resolve(renderingConfig.crowdLimbChaseSwingRadians, tier),
+      idleFreqHz: resolve(renderingConfig.crowdLimbIdleFreqHz, tier),
+      walkFreqHz: resolve(renderingConfig.crowdLimbWalkFreqHz, tier),
+      chaseFreqHz: resolve(renderingConfig.crowdLimbChaseFreqHz, tier),
+      idleBobMeters: resolve(renderingConfig.crowdLimbIdleBobMeters, tier),
+      walkBobMeters: resolve(renderingConfig.crowdLimbBobMeters, tier),
+      chaseBobMeters: resolve(renderingConfig.crowdLimbChaseBobMeters, tier),
+      attackReachRadians: resolve(renderingConfig.crowdLimbAttackReachRadians, tier),
+      attackFreqHz: resolve(renderingConfig.crowdLimbAttackFreqHz, tier),
+      speedRefMetersPerSecond: resolve(renderingConfig.crowdLimbGaitSpeedRefMetersPerSecond, tier),
+    },
   };
 }
 
@@ -127,8 +142,8 @@ export class CrowdLimbs {
   private readonly severBits: readonly number[];
   private readonly budget: number;
   private readonly maxSimTier: number;
-  private readonly swingRadians: number;
-  private readonly bobMeters: number;
+  /** Per-state gait tunables (swing/bob/reach/frequency by ZombieState + speed) (T111/V75). */
+  private readonly gait: LimbGaitConfig;
   private readonly variationCount: number;
   private readonly scaleMin: number;
   private readonly scaleMax: number;
@@ -142,6 +157,18 @@ export class CrowdLimbs {
   private readonly fadeAttrs: InstancedBufferAttribute[] = [];
   private readonly anatomy: Uint32Array;
   private readonly phase: Float32Array;
+  /** Per-instance ZombieState + planar speed (T111/V75), compacted to the front by packLimbInputs. */
+  private readonly stateArr: Uint8Array;
+  private readonly speedArr: Float32Array;
+  /** Per-instance gait swing/bob/reach for this frame (precomputed once per figure, reused across parts). */
+  private readonly swingArr: Float32Array;
+  private readonly bobArr: Float32Array;
+  private readonly reachArr: Float32Array;
+  private readonly gaitScratch: LimbGait = { swing: 0, bob: 0, reach: 0 };
+  /** Per-SLOT gait phase accumulator (stable identity, seeded with per-slot offsets so figures are NOT in
+   *  lockstep). The SoA animPhase is sim-owned + unadvanced, so the limb tier owns its phase here (V3). Lazily
+   *  sized to the SoA slot count on first update. */
+  private slotPhase: Float32Array | null = null;
   private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
   private readonly posScratch = new Float32Array(3);
   private readonly mat4 = new Matrix4();
@@ -149,8 +176,7 @@ export class CrowdLimbs {
   constructor(settings: CrowdSettings, registry: ResourceRegistry, parent: Object3D) {
     this.budget = settings.limbedBudget;
     this.maxSimTier = settings.limbedMaxSimTier;
-    this.swingRadians = settings.limbSwingRadians;
-    this.bobMeters = settings.limbBobMeters;
+    this.gait = settings.gait;
     this.variationCount = settings.variationCount;
     this.scaleMin = settings.scaleMin;
     this.scaleMax = settings.scaleMax;
@@ -190,7 +216,7 @@ export class CrowdLimbs {
     this.meshes = meshes;
     this.material.transparent = true;
     this.material.opacityNode = attribute('instFade', 'float');
-    this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign }));
+    this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign, reachSign: p.reachSign }));
     this.severBits = CROWD_LIMB_PARTS.map((p) => {
       const region = LIMB_REGION[p.id];
       return region ? regionBit(region) : 0;
@@ -201,24 +227,61 @@ export class CrowdLimbs {
     this.fadeArr = new Float32Array(this.budget).fill(1);
     this.anatomy = new Uint32Array(this.budget);
     this.phase = new Float32Array(this.budget);
+    this.stateArr = new Uint8Array(this.budget);
+    this.speedArr = new Float32Array(this.budget);
+    this.swingArr = new Float32Array(this.budget);
+    this.bobArr = new Float32Array(this.budget);
+    this.reachArr = new Float32Array(this.budget);
   }
 
   /**
    * Compact the limbed-tier zombies and rebuild every part's instance matrices for this frame. Returns the
    * number of live limbed figures (also each part mesh's draw count). Severed parts get a zero (invisible)
-   * matrix but keep their instance slot so indices stay aligned across parts.
+   * matrix but keep their instance slot so indices stay aligned across parts. `dtSeconds` advances each
+   * figure's gait phase at its per-state rate (T111/V75).
    */
-  update(views: FieldViews, count: number, visibility?: VisionCull): number {
-    const { liveCount } = packLimbInputs(views, this.pose, this.scaleArr, this.anatomy, this.phase, {
-      count,
-      capacity: this.budget,
-      variationCount: this.variationCount,
-      scaleMin: this.scaleMin,
-      scaleMax: this.scaleMax,
-      maxSimTier: this.maxSimTier,
-      visibility,
-      outFade: this.fadeArr,
-    });
+  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull): number {
+    // Per-SLOT gait phase accumulator (T111/V75). Lazily allocated to the SoA slot count + seeded with a
+    // per-slot offset so figures never march in lockstep (mirrors the box tier's per-instance phase seed).
+    if (!this.slotPhase || this.slotPhase.length < count) {
+      const next = new Float32Array(count);
+      const denom = Math.max(1, this.variationCount);
+      for (let slot = 0; slot < count; slot++) next[slot] = variationSeed(slot, denom) / denom;
+      if (this.slotPhase) next.set(this.slotPhase.subarray(0, Math.min(this.slotPhase.length, count)));
+      this.slotPhase = next;
+    }
+
+    const { liveCount } = packLimbInputs(
+      views,
+      this.pose,
+      this.scaleArr,
+      this.anatomy,
+      this.phase,
+      this.stateArr,
+      this.speedArr,
+      this.slotPhase,
+      {
+        count,
+        capacity: this.budget,
+        variationCount: this.variationCount,
+        scaleMin: this.scaleMin,
+        scaleMax: this.scaleMax,
+        maxSimTier: this.maxSimTier,
+        visibility,
+        outFade: this.fadeArr,
+        dtSeconds,
+        gait: this.gait,
+      },
+    );
+
+    // Pre-pass: resolve each figure's state-driven swing/bob/reach ONCE (reused across all 6 parts). Writes
+    // into per-instance scratch arrays — allocation-free (the gait writes into a reused scratch object, V24).
+    for (let i = 0; i < liveCount; i++) {
+      const g = limbGait(this.gaitScratch, this.stateArr[i]!, this.speedArr[i]!, this.phase[i]!, this.gait);
+      this.swingArr[i] = g.swing;
+      this.bobArr[i] = g.bob;
+      this.reachArr[i] = g.reach;
+    }
 
     for (let part = 0; part < this.meshes.length; part++) {
       const mesh = this.meshes[part]!;
@@ -230,7 +293,6 @@ export class CrowdLimbs {
         this.posScratch[1] = this.pose[p + 1]!;
         this.posScratch[2] = this.pose[p + 2]!;
         const heading = this.pose[p + 3]!;
-        const ph = this.phase[i]!;
         const visible = bit === 0 || (this.anatomy[i]! & bit) === 0;
         composeLimbMatrix(
           this.matScratch,
@@ -239,8 +301,9 @@ export class CrowdLimbs {
           heading,
           this.scaleArr[i]!,
           placement,
-          walkSwing(ph, this.swingRadians),
-          walkBob(ph, this.bobMeters),
+          this.swingArr[i]!,
+          this.reachArr[i]!,
+          this.bobArr[i]!,
           visible,
         );
         this.mat4.fromArray(this.matScratch);
@@ -398,7 +461,7 @@ export class Crowd {
       limbedBudget: this.settings.limbedBudget,
       visibility,
     });
-    this.limbs.update(views, count, visibility);
+    this.limbs.update(views, count, dtSeconds, visibility);
     this.mesh.count = liveCount;
     // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
     // backend re-uploads the freshly compacted inputs this frame. The compute reads these next. (meta carries

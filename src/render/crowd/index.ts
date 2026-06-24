@@ -17,11 +17,15 @@ export {
   composeLimbMatrix,
   walkSwing,
   walkBob,
+  limbGait,
+  gaitPhaseRateHz,
   FLOATS_PER_LIMB_POSE,
   FLOATS_PER_MAT4,
   type LimbPackOptions,
   type LimbPackResult,
   type LimbPartPlacement,
+  type LimbGait,
+  type LimbGaitConfig,
 } from './limbs';
 export {
   RENDER_PATHS,

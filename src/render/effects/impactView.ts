@@ -33,6 +33,7 @@ import {
   type Scene,
 } from 'three';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
+import type { BodyAnchorResolver } from './bloodView';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -74,6 +75,7 @@ export interface ImpactSettings {
   readonly woundSizeMeters: number;
   readonly woundLifeSeconds: number;
   readonly woundFadeFraction: number;
+  readonly woundBodyRadiusMeters: number;
   readonly regionHeights: RegionHeights;
 }
 
@@ -115,6 +117,7 @@ export function resolveImpactSettings(tier: QualityTier): ImpactSettings {
     woundSizeMeters: resolve(renderingConfig.impactWoundSizeMeters, tier),
     woundLifeSeconds: resolve(renderingConfig.impactWoundLifeSeconds, tier),
     woundFadeFraction: resolve(renderingConfig.impactWoundFadeFraction, tier),
+    woundBodyRadiusMeters: resolve(renderingConfig.impactWoundBodyRadiusMeters, tier),
     regionHeights: {
       head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
       torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
@@ -200,6 +203,14 @@ export class ImpactSim {
   readonly wRot: Float32Array;
   readonly wVis: Float32Array; // 0..1 scale/visibility, recomputed each update
   private readonly wAge: Float32Array;
+  // Body-anchoring (T81 surface-stick): an entity-anchored wound stores a BODY-LOCAL offset + the struck
+  // entity; update() reprojects it to the body's CURRENT transform each frame so the mark follows the moving
+  // body (and the toppled corpse) instead of floating where it was hit. `wEntity < 0` = a static world wound.
+  private readonly wEntity: Float32Array;
+  private readonly wLX: Float32Array;
+  private readonly wLY: Float32Array;
+  private readonly wLZ: Float32Array;
+  private woundAnchors: BodyAnchorResolver | null = null;
   private wHead = 0;
   private wCount = 0;
 
@@ -257,6 +268,16 @@ export class ImpactSim {
     this.wRot = new Float32Array(W);
     this.wVis = new Float32Array(W);
     this.wAge = new Float32Array(W);
+    this.wEntity = new Float32Array(W).fill(-1); // -1 = static/world wound (not body-anchored)
+    this.wLX = new Float32Array(W);
+    this.wLY = new Float32Array(W);
+    this.wLZ = new Float32Array(W);
+  }
+
+  /** Inject the body-anchor resolver (T81 surface-stick) so entity-anchored wounds follow the struck body +
+   *  its toppled corpse. Until set (null), `woundOnBody` falls back to a static world mark at the body point. */
+  setBodyAnchors(resolver: BodyAnchorResolver | null): void {
+    this.woundAnchors = resolver;
   }
 
   get sparkCount(): number {
@@ -311,6 +332,62 @@ export class ImpactSim {
     this.wRot[i] = rnd() * Math.PI * 2;
     this.wVis[i] = 1;
     this.wAge[i] = 0;
+    this.wEntity[i] = -1; // static world wound (a recycled slot may have been anchored — reset it)
+  }
+
+  /**
+   * BODY hit, ANCHORED (T81 surface-stick): a dark wound that STICKS to the struck body `entity`. Placed on the
+   * region-height band, offset onto the body surface toward the shooter by a body-hugging radius, then
+   * reprojected to the body's live transform every frame (update) so it follows the moving body + its toppled
+   * corpse instead of floating where the shot landed. No-op if goreIntensity 0 (V29) or the body is unknown/gone.
+   */
+  woundOnBody(entity: number, region: AnatomyRegion, faceX: number, faceZ: number, ctx: ImpactIngestContext): void {
+    if (ctx.goreIntensity <= 0 || this.wx.length === 0) return;
+    const a = this.woundAnchors ? this.woundAnchors.resolve(entity) : null;
+    if (!a) return; // no resolver wired or the body already vanished — nothing to mark
+    const flen = Math.hypot(faceX, faceZ);
+    const fnx = flen > 1e-6 ? faceX / flen : 0;
+    const fnz = flen > 1e-6 ? faceZ / flen : 1;
+    const r = this.settings.woundBodyRadiusMeters;
+    const i = this.wHead;
+    this.wHead = (this.wHead + 1) % this.wx.length; // ring buffer — oldest recycled (V24)
+    if (this.wCount < this.wx.length) this.wCount++;
+    this.wnx[i] = fnx;
+    this.wny[i] = 0;
+    this.wnz[i] = fnz;
+    this.wRot[i] = rnd() * Math.PI * 2;
+    this.wVis[i] = 1;
+    this.wAge[i] = 0;
+    this.wEntity[i] = entity;
+    this.wLX[i] = fnx * r; // surface offset toward the shooter (hugs the limb)
+    this.wLY[i] = regionImpactHeight(region, this.settings.regionHeights);
+    this.wLZ[i] = fnz * r;
+    this.reprojectWound(i); // seed the world position now
+  }
+
+  /** Reproject an entity-anchored wound to the struck body's CURRENT transform (T81), lerping toward the
+   *  toppled-corpse placement by `lying` so it rides the body to the floor. Static (wEntity<0) wounds and
+   *  vanished bodies (resolve→null) are left where they are (the latter then fades out by age). */
+  private reprojectWound(i: number): void {
+    const e = this.wEntity[i]!;
+    if (e < 0) return;
+    const a = this.woundAnchors ? this.woundAnchors.resolve(e) : null;
+    if (!a) return;
+    const lx = this.wLX[i]!;
+    const ly = this.wLY[i]!;
+    const lz = this.wLZ[i]!;
+    const ux = a.x + lx;
+    const uy = a.y + ly;
+    const uz = a.z + lz;
+    const ch = Math.cos(a.heading);
+    const sh = Math.sin(a.heading);
+    const tx = a.x + ch * ly - sh * lx;
+    const ty = a.groundY;
+    const tz = a.z + sh * ly + ch * lx;
+    const t = a.lying < 0 ? 0 : a.lying > 1 ? 1 : a.lying;
+    this.wx[i] = ux + (tx - ux) * t;
+    this.wy[i] = uy + (ty - uy) * t;
+    this.wz[i] = uz + (tz - uz) * t;
   }
 
   private addHole(x: number, y: number, z: number, ux: number, uy: number, uz: number): void {
@@ -489,7 +566,9 @@ export class ImpactSim {
 
     // Bullet holes: persist at full size, then a gentle end-of-life shrink/fade before the ring buffer recycles.
     ageDecals(this.hAge, this.hVis, this.hCount, dt, s.holeLifeSeconds, s.holeFadeFraction);
-    // Wounds: same persistence + fade profile (their own life/fade tunables).
+    // Wounds: reproject the body-anchored ones to the struck body's live transform (T81 — so they ride the
+    // moving body + corpse, never floating where the shot landed), THEN age/fade by their lifetime profile.
+    for (let i = 0; i < this.wCount; i++) this.reprojectWound(i);
     ageDecals(this.wAge, this.wVis, this.wCount, dt, s.woundLifeSeconds, s.woundFadeFraction);
   }
 
@@ -633,9 +712,19 @@ export class ImpactView {
     }
   }
 
-  /** BODY hit — dark wound mark (T81). */
+  /** BODY hit — dark wound mark (T81), static world placement. */
   wound(x: number, baseY: number, z: number, region: AnatomyRegion, faceX: number, faceZ: number, ctx: ImpactIngestContext): void {
     this.sim.wound(x, baseY, z, region, faceX, faceZ, ctx);
+  }
+
+  /** BODY hit — dark wound that STICKS to the struck body + follows it (T81 surface-stick). */
+  woundOnBody(entity: number, region: AnatomyRegion, faceX: number, faceZ: number, ctx: ImpactIngestContext): void {
+    this.sim.woundOnBody(entity, region, faceX, faceZ, ctx);
+  }
+
+  /** Inject the body-anchor resolver so body wounds follow the struck body + corpse (T81). */
+  setBodyAnchors(resolver: BodyAnchorResolver | null): void {
+    this.sim.setBodyAnchors(resolver);
   }
 
   /** Advance the sim then mirror its SoA onto the instanced batches. */

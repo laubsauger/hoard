@@ -83,14 +83,33 @@ describe('GibSim — arc / tumble / land / settle / shrink (T76/V52)', () => {
 });
 
 describe('GibSim — hit-driven flecks + caps + accessibility (V24/V29/V8)', () => {
-  it('a strong hit above the energy threshold flings flecks; a weak hit does not', () => {
-    const strong = new GibSim(settings);
-    strong.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0)], ctx);
-    expect(strong.count).toBeGreaterThan(0);
+  it('flecks are PROBABILITY-gated: chance 1 flings, chance 0 never (most ordinary shots stay clean)', () => {
+    // chance 1 → a qualifying hit flings flecks every time.
+    const always = new GibSim({ ...settings, hitFleckChance: 1 });
+    always.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0)], ctx);
+    expect(always.count).toBeGreaterThan(0);
 
-    const weak = new GibSim(settings);
+    // chance 0 → never (an ordinary shot just sprays blood, no meat) even at full energy.
+    const never = new GibSim({ ...settings, hitFleckChance: 0 });
+    never.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0)], ctx);
+    expect(never.count).toBe(0);
+
+    // a weak hit below the energy threshold never flecks regardless of chance.
+    const weak = new GibSim({ ...settings, hitFleckChance: 1 });
     weak.consume([hitReaction(settings.hitFleckEnergyThreshold - 0.1, 1, 0), bloodSpray(0, 0, 0)], ctx);
     expect(weak.count).toBe(0);
+  });
+
+  it('a severed limb DROPS as a flung limb chunk at a decent probability (V17)', () => {
+    // Isolate the sever path (no hit-flecks): drop chance 1 → the small spray PLUS the limb chunk, so the
+    // count exceeds the spray-only minimum by at least the one limb.
+    const drops = new GibSim({ ...settings, hitFleckChance: 0, severLimbDropChance: 1 });
+    drops.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0), partDetached()], ctx);
+    expect(drops.count).toBeGreaterThanOrEqual(settings.severChunkCountMin + 1);
+    // drop chance 0 → only the small spray, never more than the max chunk count (the limb vanished).
+    const noDrop = new GibSim({ ...settings, hitFleckChance: 0, severLimbDropChance: 0 });
+    noDrop.consume([hitReaction(1, 1, 0), bloodSpray(0, 0, 0), partDetached()], ctx);
+    expect(noDrop.count).toBeLessThanOrEqual(settings.severChunkCountMax);
   });
 
   it('never exceeds the chunk pool cap (ring reuse)', () => {

@@ -258,15 +258,27 @@ export class NavGrid {
 
   /**
    * Can a body step one cell from (cx,cy) by (dx,dy) (each in -1..1, not both 0) without crossing an edge-wall?
-   * Cardinal: the single shared edge must be clear. Diagonal: BOTH perpendicular shared edges must be clear, so
-   * a diagonal never "cuts the corner" past two perpendicular partitions (block if EITHER is walled). Assumes
-   * the destination is in bounds (callers gate bounds + cell-blocked first). O(1).
+   * Cardinal: the single shared edge must be clear. Diagonal: NO corner-cut — every one of the four edges that
+   * meet the corner the diagonal slips past must be clear (block if ANY is walled), so a diagonal can never
+   * squeeze through a walled corner from either the origin OR the destination side. Reads the edge bitfield
+   * directly (no validation throws) — assumes the destination is in bounds (callers gate bounds + cell-blocked
+   * first). O(1), allocation-free — safe in the flow-field/steering/LOS hot loops.
    */
   canStep(cx: number, cy: number, dx: number, dy: number): boolean {
-    if (dx !== 0 && dy !== 0) {
-      return this.canCross(cx, cy, cx + dx, cy) && this.canCross(cx, cy, cx, cy + dy);
-    }
-    return this.canCross(cx, cy, cx + dx, cy + dy);
+    const w = this.width;
+    const e = this.edges;
+    const cell = cy * w + cx;
+    if (dx === 0) return (e[cell]! & (dy < 0 ? WALL_N : WALL_S)) === 0;
+    if (dy === 0) return (e[cell]! & (dx < 0 ? WALL_W : WALL_E)) === 0;
+    // diagonal: A=(cx,cy), B=(cx+dx,cy), C=(cx,cy+dy), D=(cx+dx,cy+dy). The four corner edges are A-B, A-C,
+    // B-D, C-D — all must be open or the diagonal would clip a partition.
+    const ex = dx < 0 ? WALL_W : WALL_E;
+    const ey = dy < 0 ? WALL_N : WALL_S;
+    if ((e[cell]! & ex) !== 0) return false; // A-B
+    if ((e[cell]! & ey) !== 0) return false; // A-C
+    if ((e[cy * w + (cx + dx)]! & ey) !== 0) return false; // B-D (B's edge toward D)
+    if ((e[(cy + dy) * w + cx]! & ex) !== 0) return false; // C-D (C's edge toward D)
+    return true;
   }
 
   /** Snapshot of currently-dirty tiles (the only tiles a rebuild must touch — V5). */

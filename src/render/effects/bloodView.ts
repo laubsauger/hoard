@@ -133,6 +133,8 @@ export interface BloodSettings {
   // ---- Bug A: zombie body-gore (follows the struck body to the corpse) ----
   readonly zombieGorePoolSize: number;
   readonly zombieGoreSplatsPerHit: number;
+  readonly zombieGoreBodyRadiusMeters: number;
+  readonly zombieGoreHeightJitterMeters: number;
   readonly regionHeights: RegionHeights;
 }
 
@@ -204,6 +206,8 @@ export function resolveBloodSettings(tier: QualityTier): BloodSettings {
     puddlePickupWetnessPerSecond: resolve(renderingConfig.bloodPuddlePickupWetnessPerSecond, tier),
     zombieGorePoolSize: resolve(renderingConfig.bloodZombieGorePoolSize, tier),
     zombieGoreSplatsPerHit: resolve(renderingConfig.bloodZombieGoreSplatsPerHit, tier),
+    zombieGoreBodyRadiusMeters: resolve(renderingConfig.bloodZombieGoreBodyRadiusMeters, tier),
+    zombieGoreHeightJitterMeters: resolve(renderingConfig.bloodZombieGoreHeightJitterMeters, tier),
     regionHeights: {
       head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
       torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
@@ -481,7 +485,7 @@ export class BloodSim {
           this.coatPlayer(e.x, e.z, goreColor('blood'), energy, ctx); // T79 — splatter gore onto the player body
           // Bug A — coat the STRUCK zombie body itself; the gore sticks to it and follows it to the floor.
           const entity = this.pending ? this.pending.entity : -1;
-          this.coatZombie(entity, goreColor('blood'), energy, ctx);
+          this.coatZombie(entity, goreColor('blood'), energy, ctx, region, dirX, dirZ);
           this.addWetness(e.x, e.z);
           this.lastImpact = { x: e.x, y, z: e.z, dirX, dirZ, fy: landY, entity };
           this.pending = null;
@@ -507,7 +511,7 @@ export class BloodSim {
               at.fy,
             );
             this.coatPlayer(at.x, at.z, goreColor('blood'), 1, ctx); // T79 — a sever near the player coats them
-            this.coatZombie(at.entity, goreColor('blood'), 1, ctx); // Bug A — sever spatters the body
+            this.coatZombie(at.entity, goreColor('blood'), 1, ctx, e.region, at.dirX, at.dirZ); // Bug A — sever spatters the body
             this.addWetness(at.x, at.z);
           }
           break;
@@ -691,25 +695,40 @@ export class BloodSim {
    *  each splat to the body's CURRENT transform (live, then the toppled corpse) via the injected resolver — so it
    *  follows the body to the floor instead of hanging where it was standing. No-op until a resolver is wired and
    *  for an unknown entity. Pooled + capped (V24); render-local RNG only (V2/V3). */
-  private coatZombie(entity: number, color: Color, energy: number, ctx: BloodIngestContext): void {
+  private coatZombie(
+    entity: number,
+    color: Color,
+    energy: number,
+    ctx: BloodIngestContext,
+    region: AnatomyRegion,
+    dirX: number,
+    dirZ: number,
+  ): void {
     const s = this.settings;
     if (!this.bodyAnchors || this.zgEntity.length === 0 || ctx.goreIntensity <= 0) return;
     if (entity < 0 || !this.bodyAnchors.resolve(entity)) return; // unknown/gone body — nothing to stick to
     let count = Math.max(1, Math.round(s.zombieGoreSplatsPerHit * (0.4 + energy * 0.8)));
     if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
     count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
-    const R = s.playerGoreBodyRadiusMeters;
-    const hRange = s.playerGoreBodyHeightMaxMeters - s.playerGoreBodyHeightMinMeters;
+    // Anchor coating gore to the SURFACE of the struck region, not a fat full-body cylinder (the float bug):
+    // a body-hugging radius (zombies are thin humanoids — the 0.5 m player radius left splats in mid-air) at
+    // the STRUCK region's height band (head/torso/leg), biased to the wound-facing hemisphere.
+    const R = s.zombieGoreBodyRadiusMeters;
+    const baseH = regionImpactHeight(region, s.regionHeights);
+    const jit = s.zombieGoreHeightJitterMeters;
     const bright = s.playerGoreBrightness;
+    const dl = Math.hypot(dirX, dirZ);
+    const srcAng = dl > 1e-6 ? Math.atan2(-dirZ / dl, -dirX / dl) : rnd() * Math.PI * 2; // toward the blood source
     for (let k = 0; k < count; k++) {
       const i = this.zgHead;
       this.zgHead = (this.zgHead + 1) % this.zgEntity.length;
       if (this.zgCount < this.zgEntity.length) this.zgCount++;
-      const ang = rnd() * Math.PI * 2;
+      const ang = srcAng + (rnd() - 0.5) * Math.PI; // ±90° around the wound side (never wraps to the far limb)
+      const r = R * (0.7 + rnd() * 0.5);
       this.zgEntity[i] = entity;
-      this.zgLX[i] = Math.cos(ang) * R;
-      this.zgLY[i] = s.playerGoreBodyHeightMinMeters + rnd() * hRange;
-      this.zgLZ[i] = Math.sin(ang) * R;
+      this.zgLX[i] = Math.cos(ang) * r;
+      this.zgLY[i] = Math.max(0.05, baseH + (rnd() - 0.5) * 2 * jit);
+      this.zgLZ[i] = Math.sin(ang) * r;
       this.zgSize[i] = s.playerGoreSizeMeters * (0.7 + rnd() * 0.9);
       this.zgAge[i] = 0;
       this.zgLife[i] = s.playerGoreLifeSeconds * (0.7 + rnd() * 0.6);

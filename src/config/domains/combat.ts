@@ -43,6 +43,13 @@ export const combatConfig = registerDomain('combat', {
     min: 1,
     max: 10_000,
   }),
+  // ---- Hit-location distribution (T21/V17): a top-down shot aims center-mass but SCATTERS across the body by
+  // accuracy. The runtime fire path rolls the struck region per body from these RELATIVE weights (deterministic,
+  // V26) so limbs + head actually get hit → dismemberment happens. Precise/targeted shots bypass the roll. ----
+  hitWeightHead: num({ owner: 'combat', unit: 'ratio', doc: 'Relative chance a scatter shot strikes the HEAD (head-kill if fatal). Low — a small target.', default: 0.1, min: 0, max: 1 }),
+  hitWeightTorso: num({ owner: 'combat', unit: 'ratio', doc: 'Relative chance a scatter shot strikes the TORSO (center mass) — the most likely region.', default: 0.56, min: 0, max: 1 }),
+  hitWeightArm: num({ owner: 'combat', unit: 'ratio', doc: 'Relative chance a scatter shot strikes an ARM (severable) — split L/R. Trimmed so dismemberment is a touch rarer.', default: 0.17, min: 0, max: 1 }),
+  hitWeightLeg: num({ owner: 'combat', unit: 'ratio', doc: 'Relative chance a scatter shot strikes a LEG (severable) — split L/R. Trimmed so dismemberment is a touch rarer.', default: 0.17, min: 0, max: 1 }),
   /** Head/neck destruction is fatal unless an archetype overrides (V17). */
   headFatalEnabled: bool({
     owner: 'combat',

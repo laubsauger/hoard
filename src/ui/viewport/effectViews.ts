@@ -125,6 +125,8 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
   // body down to the corpse instead of hanging mid-air. `runtime` is reassigned on load — the arrow reads
   // the live binding, so a reload re-targets automatically. null ⇒ the body is gone → that gore fades.
   bloodView.sim.setBodyAnchors({ resolve: (entity) => getRuntime().bodyAnchor(entity as unknown as EntityId) });
+  // Same body-anchor for dark WOUND marks (T81 surface-stick) so they ride the struck body + corpse, not float.
+  impactView.setBodyAnchors({ resolve: (entity) => getRuntime().bodyAnchor(entity as unknown as EntityId) });
   // Firearm range = the clean-miss tracer length. stopDistance < range ⇒ the shot stopped on structure
   // (a wall), not a clean miss to max range — that is the STRUCTURE-impact branch (V57). Range carries no
   // tier overrides, so resolving at the render tier matches the sim's authoritative value.

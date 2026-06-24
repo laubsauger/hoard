@@ -79,7 +79,9 @@ export function registerInput(args: RegisterInputArgs): () => void {
     const dx = hit ? hit.x - p.x : Math.cos(runtime.playerAim());
     const dz = hit ? hit.z - p.z : Math.sin(runtime.playerAim());
     runtime.aim(dx, dz);
-    const shot = runtime.fire(dx, dz, 'torsoUpper');
+    // Aim center-mass; the sim SCATTERS the struck region per body (rollHitLocation) so limbs/head get hit
+    // → dismemberment. The returned shot.region is the actual region struck (drives the wound mark below).
+    const shot = runtime.fire(dx, dz, 'torsoUpper', { rollHitLocation: true });
     bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
     // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
     // never draws through a wall on a miss into structure (V49/V53/B20).
@@ -96,11 +98,12 @@ export function registerInput(args: RegisterInputArgs): () => void {
     const ndz = dz / len;
     const stop = shot.stopDistanceMeters ?? firearmRangeMeters;
     if (shot.hit) {
-      // Struck body point = muzzle origin + aim*travel (XZ); region->height lifts it; the wound faces back
-      // toward the shooter (-aim). Zombie base sits on the ground (y=0).
-      const wx = p.x + ndx * stop;
-      const wz = p.z + ndz * stop;
-      impactView.wound(wx, 0, wz, shot.region ?? 'torsoUpper', -ndx, -ndz, impactCtx);
+      // Mark the wound ON the struck body (T81 surface-stick): anchored to the entity so it follows the moving
+      // body + its corpse instead of floating where the shot landed; region->height + the shooter-facing normal
+      // (-aim) place it on the surface. Falls through to nothing if the body already vanished (no anchor).
+      if (shot.targetEntity != null) {
+        impactView.woundOnBody(shot.targetEntity as unknown as number, shot.region ?? 'torsoUpper', -ndx, -ndz, impactCtx);
+      }
     } else if (stop < firearmRangeMeters) {
       // Structure stop: find the real wall surface the nav-grid blocker corresponds to (raycast to range
       // and take the first structure face), then spark + hole there oriented to its normal.

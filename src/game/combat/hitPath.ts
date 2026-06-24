@@ -135,6 +135,8 @@ export class CombatSystem {
   private readonly ammo: Partial<Record<WeaponId, { magazine: number; reserve: number }>> = {};
   /** Self-tracked monotonic tick, used only when no `deps.nowTick` source is supplied. */
   private internalTick = 0;
+  /** Monotonic per-resolved-hit nonce — seeds the deterministic hit-location roll (V26 replay-stable). */
+  private hitSeq = 0;
   /** A reload or swap is in flight until `busyUntilTick`; null when the weapon is ready. */
   private busyKind: 'reload' | 'swap' | null = null;
   /** Tick at which the in-flight reload/swap completes (deadline measured against `now()`). */
@@ -360,7 +362,36 @@ export class CombatSystem {
    * (V49/V53). Every other penetrated body / pellet is resolved as a side effect (authoritative SoA +
    * events). For ammo, sound and the timed melee window use the WeaponSystem (T18).
    */
-  fire(origin: ShotOrigin, dirX: number, dirZ: number, region: AnatomyRegion): ShotResult {
+  /**
+   * Deterministically roll the struck body region from the config hit-location weights (V26 — seeded by the
+   * authoritative tick + a per-hit nonce, so a replay re-rolls identically). Models accuracy scatter around
+   * center-mass so limbs + head get hit (→ dismemberment), without the player aiming a specific limb.
+   */
+  /** Next deterministic pseudo-random in [0,1) seeded by (authoritative tick, per-hit nonce) — replay-stable
+   *  (V26). Drives the per-shot aim jitter; the hit-location roll has its own draw. */
+  private nextRand01(): number {
+    const t = this.now() | 0;
+    const n = this.hitSeq++;
+    const h = (Math.imul(t ^ 0x85ebca6b, 2654435761) ^ Math.imul(n + 1, 374761393)) >>> 0;
+    return (h >>> 8) / 0x0100_0000;
+  }
+
+  private rollHitRegion(): AnatomyRegion {
+    const c = this.deps.combat;
+    const t = this.now() | 0;
+    const n = this.hitSeq++;
+    // Cheap integer hash of (tick, nonce) → two decorrelated streams: `r` picks the band, low bits pick L/R.
+    const h = (Math.imul(t ^ 0x9e3779b1, 2654435761) ^ Math.imul(n + 1, 40503)) >>> 0;
+    const r = (h >>> 8) / 0x0100_0000; // [0,1)
+    const total = c.hitWeightHead + c.hitWeightTorso + c.hitWeightArm + c.hitWeightLeg;
+    let x = r * (total > 0 ? total : 1);
+    if ((x -= c.hitWeightHead) < 0) return 'head';
+    if ((x -= c.hitWeightTorso) < 0) return 'torsoUpper';
+    if ((x -= c.hitWeightArm) < 0) return (h & 1) === 0 ? 'armLeft' : 'armRight';
+    return (h & 2) === 0 ? 'legLeft' : 'legRight';
+  }
+
+  fire(origin: ShotOrigin, dirX: number, dirZ: number, region: AnatomyRegion, opts: { rollHitLocation?: boolean } = {}): ShotResult {
     this.settle();
     const weapon = this.weaponRegistry[this.equippedId];
 
@@ -386,11 +417,20 @@ export class CombatSystem {
       state.magazine -= 1;
     }
 
-    const { ndx, ndz } = normalizeXZ(dirX, dirZ, 'firearm');
+    const { ndx: rawX, ndz: rawZ } = normalizeXZ(dirX, dirZ, 'firearm');
     const range = weapon.rangeMeters;
     const hitRadius = this.deps.weapons.firearmHitRadiusMeters;
     const resistance = this.deps.combat.bodyPenetrationResistance;
     const spreadRad = (weapon.spreadDegrees * Math.PI) / 180;
+    // Per-SHOT accuracy jitter: rotate the whole aim by a small random yaw so no shot is pixel-perfect (the
+    // pellet pattern fans around this jittered centre). Scatters the impact in the ground plane (both axes);
+    // body-height variety comes from the hit-location roll. Deterministic (V26). Zero spread → no jitter.
+    const accRad = (this.deps.weapons.firearmAccuracySpreadDegrees * Math.PI) / 180;
+    const yaw = accRad > 0 ? (this.nextRand01() - 0.5) * accRad : 0;
+    const jc = Math.cos(yaw);
+    const js = Math.sin(yaw);
+    const ndx = rawX * jc - rawZ * js;
+    const ndz = rawX * js + rawZ * jc;
 
     let primary: ShotResult | undefined;
     let centreStop = range;
@@ -415,7 +455,10 @@ export class CombatSystem {
       for (const h of hits) {
         if (budget <= 0) break;
         const falloff = Math.max(0, 1 - h.travel * weapon.damageFalloffPerMeter);
-        const shot = this.resolveHit(h.slot, region, px, pz, h.travel, {
+        // Scatter the struck region per body when the caller opted in (player/sim fire); a precise/targeted
+        // shot (tests, fireAtEntity) keeps the requested region. Rolling per body gives dismemberment variety.
+        const hitRegion = opts.rollHitLocation ? this.rollHitRegion() : region;
+        const shot = this.resolveHit(h.slot, hitRegion, px, pz, h.travel, {
           baseDamage: weapon.damage,
           armorPenetration: weapon.armorPenetration,
           tier: SimTier.Hero,

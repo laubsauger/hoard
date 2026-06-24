@@ -1,20 +1,42 @@
-// T72 / V2 / V3 / V13 / V17 — pure block-limbed crowd core: tier selection, pool cap, sever-hide,
-// and per-instance transform composition. No GPU/three; runs on plain typed arrays + the frozen SoA.
+// T72 / V2 / V3 / V13 / V17 / T111 / V75 — pure block-limbed crowd core: tier selection, pool cap,
+// sever-hide, per-instance transform composition, and the STATE-DRIVEN gait (idle/walk/chase/attack).
+// No GPU/three; runs on plain typed arrays + the frozen SoA.
 
 import { describe, it, expect } from 'vitest';
 import { allocateSoa, ZOMBIE_FIELDS } from '../../game/core/contracts/soa';
+import { ZombieState } from '../../game/simulation';
 import { regionBit } from '../../game/combat/anatomy';
 import {
   packLimbInputs,
   composeLimbMatrix,
   walkSwing,
   walkBob,
+  limbGait,
+  gaitPhaseRateHz,
   FLOATS_PER_LIMB_POSE,
   FLOATS_PER_MAT4,
   type LimbPartPlacement,
+  type LimbGait,
+  type LimbGaitConfig,
 } from './limbs';
 
 const CAP = 8;
+
+/** Reference gait config (mirrors the rendering-config defaults) for the pure-function tests. */
+const GAIT: LimbGaitConfig = {
+  idleSwingRadians: 0.05,
+  walkSwingRadians: 0.45,
+  chaseSwingRadians: 0.85,
+  idleFreqHz: 0.4,
+  walkFreqHz: 1.4,
+  chaseFreqHz: 2.6,
+  idleBobMeters: 0.012,
+  walkBobMeters: 0.05,
+  chaseBobMeters: 0.12,
+  attackReachRadians: 1.05,
+  attackFreqHz: 3.2,
+  speedRefMetersPerSecond: 2.5,
+};
 
 function makeSoa() {
   const soa = allocateSoa(ZOMBIE_FIELDS, CAP);
@@ -23,7 +45,9 @@ function makeSoa() {
     alive: soa.views['alive'] as Uint8Array,
     position: soa.views['position'] as Float32Array,
     heading: soa.views['heading'] as Float32Array,
+    velocity: soa.views['velocity'] as Float32Array,
     simTier: soa.views['simTier'] as Uint8Array,
+    state: soa.views['state'] as Uint8Array,
     anatomyFlags: soa.views['anatomyFlags'] as Uint32Array,
     animPhase: soa.views['animPhase'] as Float32Array,
   };
@@ -35,10 +59,22 @@ function out(cap: number) {
     scale: new Float32Array(cap),
     anatomy: new Uint32Array(cap),
     phase: new Float32Array(cap),
+    state: new Uint8Array(cap),
+    speed: new Float32Array(cap),
   };
 }
 
-const OPTS = { variationCount: 1, scaleMin: 1, scaleMax: 1, maxSimTier: 1 } as const;
+const OPTS = { variationCount: 1, scaleMin: 1, scaleMax: 1, maxSimTier: 1, dtSeconds: 0, gait: GAIT } as const;
+
+/** Call packLimbInputs with a fresh per-slot phase accumulator sized to the scanned slot count. */
+function pack(
+  views: ReturnType<typeof makeSoa>['soa']['views'],
+  o: ReturnType<typeof out>,
+  opts: Parameters<typeof packLimbInputs>[8],
+  phaseState: Float32Array = new Float32Array(opts.count),
+) {
+  return packLimbInputs(views, o.pose, o.scale, o.anatomy, o.phase, o.state, o.speed, phaseState, opts);
+}
 
 describe('packLimbInputs — tier selection (V13)', () => {
   it('promotes only hero/active tiers (simTier <= maxSimTier); horde/abstract are skipped', () => {
@@ -50,7 +86,7 @@ describe('packLimbInputs — tier selection (V13)', () => {
       s.position[i * 3] = i; // x = slot for identity check
     }
     const o = out(CAP);
-    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: 4, capacity: CAP, ...OPTS });
+    const res = pack(s.soa.views, o, { count: 4, capacity: CAP, ...OPTS });
     expect(res.liveCount).toBe(2);
     // Compacted to the front: instance 0 = slot 0 (x=0), instance 1 = slot 1 (x=1).
     expect(o.pose[0]).toBeCloseTo(0, 6);
@@ -63,7 +99,7 @@ describe('packLimbInputs — tier selection (V13)', () => {
     s.alive[1] = 1;
     s.simTier[1] = 1;
     const o = out(CAP);
-    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: 2, capacity: CAP, ...OPTS });
+    const res = pack(s.soa.views, o, { count: 2, capacity: CAP, ...OPTS });
     expect(res.liveCount).toBe(1);
   });
 
@@ -75,21 +111,39 @@ describe('packLimbInputs — tier selection (V13)', () => {
     }
     const budget = 3;
     const o = out(budget);
-    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: CAP, capacity: budget, ...OPTS });
+    const res = pack(s.soa.views, o, { count: CAP, capacity: budget, ...OPTS });
     expect(res.liveCount).toBe(budget);
   });
 
-  it('passes anatomyFlags and animPhase through per instance', () => {
+  it('passes anatomyFlags, state, and speed through per instance', () => {
     const s = makeSoa();
     s.alive[0] = 1;
     s.simTier[0] = 0;
     const flags = regionBit('armLeft') | regionBit('legRight');
     s.anatomyFlags[0] = flags;
-    s.animPhase[0] = 0.42;
+    s.state[0] = ZombieState.Pursue;
+    s.velocity[0] = 3; // vx
+    s.velocity[2] = 4; // vz → speed = 5
     const o = out(CAP);
-    packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: 1, capacity: CAP, ...OPTS });
+    pack(s.soa.views, o, { count: 1, capacity: CAP, ...OPTS });
     expect(o.anatomy[0]).toBe(flags);
-    expect(o.phase[0]).toBeCloseTo(0.42, 6);
+    expect(o.state[0]).toBe(ZombieState.Pursue);
+    expect(o.speed[0]).toBeCloseTo(5, 6);
+  });
+
+  it('advances each slot phase at the per-state rate, persisting across frames (T111/V75)', () => {
+    const s = makeSoa();
+    s.alive[0] = 1;
+    s.simTier[0] = 0;
+    s.state[0] = ZombieState.Pursue;
+    s.velocity[0] = GAIT.speedRefMetersPerSecond; // full speed → chase rate (2.6 Hz)
+    const o = out(CAP);
+    const phaseState = new Float32Array(CAP); // seeded 0
+    const opts = { count: 1, capacity: CAP, ...OPTS, dtSeconds: 0.5 };
+    pack(s.soa.views, o, opts, phaseState);
+    expect(o.phase[0]).toBeCloseTo(0.3, 5); // 2.6*0.5 = 1.3 → fract 0.3
+    pack(s.soa.views, o, opts, phaseState);
+    expect(o.phase[0]).toBeCloseTo(0.6, 5); // 1.3 + 1.3 = 2.6 → fract 0.6 (accumulator persists per slot)
   });
 
   it('vision-cone cull hides figures outside the wedge (T98)', () => {
@@ -98,7 +152,7 @@ describe('packLimbInputs — tier selection (V13)', () => {
     s.alive[0] = 1; s.simTier[0] = 0; s.position[0] = 5; s.position[2] = 0;
     s.alive[1] = 1; s.simTier[1] = 0; s.position[1 * 3] = -5; s.position[1 * 3 + 2] = 0;
     const o = out(CAP);
-    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, {
+    const res = pack(s.soa.views, o, {
       count: 2,
       capacity: CAP,
       ...OPTS,
@@ -114,20 +168,85 @@ describe('packLimbInputs — tier selection (V13)', () => {
     const s = makeSoa();
     for (let i = 0; i < 3; i++) { s.alive[i] = 1; s.simTier[i] = 0; s.position[i * 3] = i; }
     const o = out(2);
-    const res = packLimbInputs(s.soa.views, o.pose, o.scale, o.anatomy, o.phase, { count: 3, capacity: 2, ...OPTS });
+    const res = pack(s.soa.views, o, { count: 3, capacity: 2, ...OPTS });
     expect(res.liveCount).toBe(2);
     expect(o.pose[0]).toBeCloseTo(0, 6);
     expect(o.pose[FLOATS_PER_LIMB_POSE]).toBeCloseTo(1, 6);
   });
 });
 
+describe('limbGait — state-driven swing/bob/reach (T111/V75)', () => {
+  const fresh = (): LimbGait => ({ swing: 0, bob: 0, reach: 0 });
+
+  it('idle is near-still: swing within the idle band, no reach', () => {
+    const r = limbGait(fresh(), ZombieState.Idle, 0, 0.25, GAIT);
+    expect(Math.abs(r.swing)).toBeLessThanOrEqual(GAIT.idleSwingRadians + 1e-9);
+    expect(r.reach).toBe(0);
+  });
+
+  it('chase swing exceeds walk swing exceeds idle swing at full speed + same phase', () => {
+    const ref = GAIT.speedRefMetersPerSecond;
+    const idle = limbGait(fresh(), ZombieState.Idle, 0, 0.25, GAIT);
+    const walk = limbGait(fresh(), ZombieState.Wander, ref, 0.25, GAIT);
+    const chase = limbGait(fresh(), ZombieState.Pursue, ref, 0.25, GAIT);
+    expect(Math.abs(chase.swing)).toBeGreaterThan(Math.abs(walk.swing));
+    expect(Math.abs(walk.swing)).toBeGreaterThan(Math.abs(idle.swing));
+  });
+
+  it('chase bob is deeper than walk bob at full speed', () => {
+    const ref = GAIT.speedRefMetersPerSecond;
+    const walk = limbGait(fresh(), ZombieState.Wander, ref, 0.25, GAIT);
+    const chase = limbGait(fresh(), ZombieState.Pursue, ref, 0.25, GAIT);
+    expect(chase.bob).toBeGreaterThan(walk.bob);
+  });
+
+  it('locomotion swing scales with speed (a crawl swings less than a sprint)', () => {
+    const slow = limbGait(fresh(), ZombieState.Wander, 0.25 * GAIT.speedRefMetersPerSecond, 0.25, GAIT);
+    const fast = limbGait(fresh(), ZombieState.Wander, GAIT.speedRefMetersPerSecond, 0.25, GAIT);
+    expect(Math.abs(fast.swing)).toBeGreaterThan(Math.abs(slow.swing));
+  });
+
+  it('attack is a FORWARD arm reach, NOT the counter-swing (reach>0, legs within idle band)', () => {
+    for (const phase of [0, 0.25, 0.5, 0.75]) {
+      const r = limbGait(fresh(), ZombieState.Attack, 0, phase, GAIT);
+      expect(r.reach).toBeGreaterThan(0); // always reaching forward through the lunge
+      expect(Math.abs(r.swing)).toBeLessThanOrEqual(GAIT.idleSwingRadians + 1e-9); // legs planted
+    }
+  });
+
+  it('is deterministic — identical inputs give identical outputs', () => {
+    const a = limbGait(fresh(), ZombieState.Pursue, 1.7, 0.33, GAIT);
+    const b = limbGait(fresh(), ZombieState.Pursue, 1.7, 0.33, GAIT);
+    expect(b).toEqual(a);
+  });
+});
+
+describe('gaitPhaseRateHz — per-state stride frequency (T111/V75)', () => {
+  it('chase strides faster than walk at full speed', () => {
+    const ref = GAIT.speedRefMetersPerSecond;
+    expect(gaitPhaseRateHz(ZombieState.Pursue, ref, GAIT)).toBeGreaterThan(
+      gaitPhaseRateHz(ZombieState.Wander, ref, GAIT),
+    );
+  });
+  it('idle ticks at the slow breathing rate; a stopped walker falls back to that floor', () => {
+    expect(gaitPhaseRateHz(ZombieState.Idle, 0, GAIT)).toBeCloseTo(GAIT.idleFreqHz, 6);
+    expect(gaitPhaseRateHz(ZombieState.Wander, 0, GAIT)).toBeCloseTo(GAIT.idleFreqHz, 6);
+  });
+  it('walk frequency scales up with speed', () => {
+    expect(gaitPhaseRateHz(ZombieState.Wander, GAIT.speedRefMetersPerSecond, GAIT)).toBeGreaterThan(
+      gaitPhaseRateHz(ZombieState.Wander, 0.5, GAIT),
+    );
+  });
+});
+
 describe('composeLimbMatrix — transform composition (V2)', () => {
-  const torso: LimbPartPlacement = { offset: [0, 1.2, 0], swingSign: 0 };
-  const armRight: LimbPartPlacement = { offset: [0.34, 1.2, 0], swingSign: 1 };
+  const torso: LimbPartPlacement = { offset: [0, 1.2, 0], swingSign: 0, reachSign: 0 };
+  const armLeft: LimbPartPlacement = { offset: [-0.34, 1.2, 0], swingSign: -1, reachSign: -1 };
+  const armRight: LimbPartPlacement = { offset: [0.34, 1.2, 0], swingSign: 1, reachSign: -1 };
 
   it('composes translation from position + part offset (heading 0)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
-    composeLimbMatrix(m, 0, [3, 0, -7], 0, 1, torso, 0, 0, true);
+    composeLimbMatrix(m, 0, [3, 0, -7], 0, 1, torso, 0, 0, 0, true);
     expect(m[12]).toBeCloseTo(3, 6);
     expect(m[13]).toBeCloseTo(1.2, 6); // py + offset.y
     expect(m[14]).toBeCloseTo(-7, 6);
@@ -142,7 +261,7 @@ describe('composeLimbMatrix — transform composition (V2)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
     // heading = +90deg (moving +Z): the figure FACES +Z. armRight is a +X LATERAL offset, so it stays at the
     // figure's RIGHT SIDE (world +X) — NOT swung forward (that would be the sideways-walk bug).
-    composeLimbMatrix(m, 0, [0, 0, 0], Math.PI / 2, 1, armRight, 0, 0, true);
+    composeLimbMatrix(m, 0, [0, 0, 0], Math.PI / 2, 1, armRight, 0, 0, 0, true);
     expect(m[12]).toBeCloseTo(0.34, 5); // lateral arm at +X (the side of a +Z-facing figure)
     expect(m[14]).toBeCloseTo(0, 5); // NOT forward
     // local X (lateral) maps to world +X when facing +Z.
@@ -152,26 +271,46 @@ describe('composeLimbMatrix — transform composition (V2)', () => {
 
   it('applies uniform scale to the basis and offset', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
-    composeLimbMatrix(m, 0, [0, 0, 0], 0, 2, torso, 0, 0, true);
+    composeLimbMatrix(m, 0, [0, 0, 0], 0, 2, torso, 0, 0, 0, true);
     expect(m[2]).toBeCloseTo(-2, 6); // scaled lateral axis (heading 0 → local X points along -Z), scaled ×2
     expect(m[13]).toBeCloseTo(2.4, 6); // offset.y * scale
   });
 
   it('adds the vertical walk bob to y', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
-    composeLimbMatrix(m, 0, [0, 0, 0], 0, 1, torso, 0, 0.1, true);
+    composeLimbMatrix(m, 0, [0, 0, 0], 0, 1, torso, 0, 0, 0.1, true);
     expect(m[13]).toBeCloseTo(1.3, 6); // 1.2 + bob
+  });
+
+  it('walk counter-swings the arms (opposite local-X rotation L vs R); attack reaches BOTH forward (T111/V75)', () => {
+    const ml = new Float32Array(FLOATS_PER_MAT4);
+    const mr = new Float32Array(FLOATS_PER_MAT4);
+    // WALK: swing only (reach 0). out[9] = -sin(sw); swingSign differs → opposite signs (counter-swing).
+    composeLimbMatrix(ml, 0, [0, 0, 0], 0, 1, armLeft, 0.3, 0, 0, true);
+    composeLimbMatrix(mr, 0, [0, 0, 0], 0, 1, armRight, 0.3, 0, 0, true);
+    expect(Math.sign(ml[9]!)).toBe(-Math.sign(mr[9]!));
+    expect(ml[9]).not.toBeCloseTo(0, 3);
+    // ATTACK: reach only (swing 0). reachSign is the SAME on both arms → same-sign rotation (both reach forward).
+    const al = new Float32Array(FLOATS_PER_MAT4);
+    const ar = new Float32Array(FLOATS_PER_MAT4);
+    composeLimbMatrix(al, 0, [0, 0, 0], 0, 1, armLeft, 0, 0.5, 0, true);
+    composeLimbMatrix(ar, 0, [0, 0, 0], 0, 1, armRight, 0, 0.5, 0, true);
+    expect(Math.sign(al[9]!)).toBe(Math.sign(ar[9]!));
+    expect(al[9]).toBeCloseTo(ar[9]!, 6);
+    // Forward reach (positive magnitude, reachSign -1 → sw<0 → sin(sw)<0 → out[9] = -sin(sw) > 0): the arm's
+    // hand swings toward local +Z / the facing direction.
+    expect(al[9]).toBeGreaterThan(0);
   });
 
   it('zeroes the whole matrix when the part is severed (dismemberment hide, V17)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4).fill(9);
-    composeLimbMatrix(m, 0, [1, 2, 3], 0.5, 1, armRight, 0.4, 0.05, false);
+    composeLimbMatrix(m, 0, [1, 2, 3], 0.5, 1, armRight, 0.4, 0, 0.05, false);
     for (let i = 0; i < FLOATS_PER_MAT4; i++) expect(m[i]).toBe(0);
   });
 
   it('writes at the given base element offset', () => {
     const m = new Float32Array(FLOATS_PER_MAT4 * 2);
-    composeLimbMatrix(m, FLOATS_PER_MAT4, [5, 0, 0], 0, 1, torso, 0, 0, true);
+    composeLimbMatrix(m, FLOATS_PER_MAT4, [5, 0, 0], 0, 1, torso, 0, 0, 0, true);
     expect(m[FLOATS_PER_MAT4 + 12]).toBeCloseTo(5, 6);
     expect(m[FLOATS_PER_MAT4 + 15]).toBeCloseTo(1, 6);
   });

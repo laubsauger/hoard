@@ -100,10 +100,11 @@ describe('persistence partition (V11 — only settings + session persist)', () =
 });
 
 describe('audio volume buses (master / sound / music) — settings store', () => {
-  it('exposes three independent volume primitives with sensible defaults', () => {
+  it('exposes three independent volume primitives; master MUTED by default (headless-safe)', () => {
     const s = createSettingsStore().getState();
-    expect(s.masterVolume).toBeGreaterThan(0);
-    expect(s.masterVolume).toBeLessThanOrEqual(1);
+    // Sound is off by default (master 0) so headless/CDP + fresh sessions are silent; player raises it.
+    expect(s.masterVolume).toBe(0);
+    // The bus levels under master are preserved so unmuting restores a sensible mix.
     expect(s.sfxVolume).toBe(0.8);
     expect(s.musicVolume).toBe(0.5);
   });
