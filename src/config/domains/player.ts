@@ -51,6 +51,15 @@ export const playerConfig = registerDomain('player', {
     min: 1,
     max: 4,
   }),
+  /** Crouch speed multiplier applied to the walk speed while crouching (the sneak stance) — slow + quiet (V86). */
+  playerCrouchSpeedMultiplier: num({
+    owner: 'player',
+    unit: 'ratio',
+    doc: 'Multiplier on the walk speed while crouching (the sneak stance): a slow, quiet, low-profile crawl (V86).',
+    default: 0.5,
+    min: 0.1,
+    max: 1,
+  }),
   /** Rendered player body capsule height (m). */
   bodyHeightMeters: num({
     owner: 'player',

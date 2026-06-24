@@ -275,9 +275,14 @@ export class GameRuntime {
    * (which must shatter the pane first). Built once (no per-call alloc).
    */
   readonly sightScene: LosScene;
-  /** V85: nav cells occupied ONLY by a solid SUB-EYE-HEIGHT prop (a waist-high fence) — SIGHT passes OVER them
-   *  (you see over a low fence) while nav + projectiles still stop there. Consumed by `sightScene` only. */
-  private readonly seeOverCells = new Set<number>();
+  /** V85/V86: per nav-cell OCCLUDER HEIGHT (m) for cells blocked by a SOLID prop — the MAX prop height on that
+   *  cell. `sightScene` treats such a cell as TRANSPARENT iff its height is below the CURRENT observer eye height
+   *  (`playerEyeHeight()`): a standing player sees over a 1 m fence; a crouched one (lower eye) does not — and is
+   *  symmetrically HIDDEN behind it. Walls (not props) are absent here → always occlude. Built once at scene-gen. */
+  private readonly propSightHeightByCell = new Map<number, number>();
+  /** V86: true while the player holds the sneak/crouch stance (lowers eye height + move speed). Set each frame
+   *  from input by `setCrouch` so the eye height is correct even when standing still (not only while moving). */
+  private playerCrouching = false;
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
   /** Resolved world config — here only for the authored wall height (glass-shatter burst origin, T108). */
@@ -331,32 +336,28 @@ export class GameRuntime {
       navGrid: this.scene.navGrid,
       isWindowOpening: (cx, cy) => this.isWindowOpening(cx, cy),
     };
-    // V85: SEE-OVER cells — cells a solid but SUB-EYE-HEIGHT prop (a waist-high fence) occupies. Built ONCE from
-    // the scene props + the SAME `fenceMissingChance` the scene-gen used (so the see-over cells match the visible
-    // + nav-blocking pickets), MINUS any cell a TALL prop also occupies (a fence touching a car still blocks
-    // sight). SIGHT passes over these; nav + projectiles (losScene) still stop at them.
+    // V85/V86: per-cell OCCLUDER HEIGHT for prop-blocked cells — the MAX prop height on each cell. Built ONCE from
+    // the scene props + the SAME `fenceMissingChance` the scene-gen used (so the heights match the visible + nav-
+    // blocking pickets). A cell shared by a low fence + a tall car keeps the MAX (the car), so it still occludes.
+    // Walls are NOT props → absent here → always occlude. The sight test compares this to the LIVE eye height.
     {
-      const eyeH = this.perception.eyeHeightMeters;
       const fenceMiss = this.worldCfg.fenceMissingChance;
       const grid = this.scene.navGrid;
-      const inBounds = (cx: number, cy: number): boolean => cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
-      const tall = new Set<number>();
       for (const prop of this.scene.props ?? []) {
-        if (!propOccludesSight(prop.kind, eyeH)) continue;
-        for (const c of propBlockedCells(prop, fenceMiss)) if (inBounds(c.cx, c.cy)) tall.add(grid.index(c.cx, c.cy));
-      }
-      for (const prop of this.scene.props ?? []) {
-        for (const c of propSeeOverCells(prop, eyeH, fenceMiss)) {
-          if (!inBounds(c.cx, c.cy)) continue;
+        const h = PROP_SOLIDITY[prop.kind].heightMeters;
+        for (const c of propBlockedCells(prop, fenceMiss)) {
+          if (c.cx < 0 || c.cy < 0 || c.cx >= grid.width || c.cy >= grid.height) continue;
           const idx = grid.index(c.cx, c.cy);
-          if (!tall.has(idx)) this.seeOverCells.add(idx);
+          const prev = this.propSightHeightByCell.get(idx);
+          if (prev === undefined || h > prev) this.propSightHeightByCell.set(idx, h);
         }
       }
     }
-    // V84/V85: the SEE-THROUGH + SEE-OVER scene — sight + light pass through GLASSED windows (glass is transparent;
-    // only a boarded-shut 2-board window occludes) AND OVER sub-eye-height obstacles (a low fence). Player vision,
-    // zombie sight + the flashlight clamp use this. The `isWindowOpening` field is the generic LosScene "ray
-    // passes" predicate (here the see-through one); the see-over low obstacles ride on `isWalkableWorld`.
+    // V84/V85/V86: the SEE-THROUGH + SEE-OVER scene — sight + light pass through GLASSED windows (glass is
+    // transparent; only a boarded-shut 2-board window occludes) AND OVER any prop SHORTER than the CURRENT eye
+    // height (a standing player sees over a 1 m fence; a crouched one does not — and is hidden behind it). Player
+    // vision, zombie sight + the flashlight clamp use this; every query is player-referenced, so the one dynamic
+    // `playerEyeHeight()` threshold gates both what the player sees AND whether a crouched player is seen.
     {
       const grid = this.scene.navGrid;
       const cs = grid.settings.navCellSize;
@@ -366,7 +367,8 @@ export class GameRuntime {
           const cx = Math.floor(x / cs);
           const cy = Math.floor(z / cs);
           if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
-          return this.seeOverCells.has(grid.index(cx, cy)); // blocked only by a low fence → sight passes OVER
+          const h = this.propSightHeightByCell.get(grid.index(cx, cy));
+          return h !== undefined && h < this.playerEyeHeight(); // a prop shorter than the eye → sight passes OVER it
         },
         navGrid: grid,
         isWindowOpening: (cx, cy) => this.isWindowSeeThrough(cx, cy),
@@ -736,6 +738,20 @@ export class GameRuntime {
   }
 
   /**
+   * V86: set the CROUCH (sneak) stance from input each frame. Called every frame (not only while moving) so the
+   * eye height is correct while standing still too. Sprint takes precedence — a sprinting player is not crouched.
+   */
+  setCrouch(crouching: boolean): void {
+    this.playerCrouching = crouching;
+  }
+
+  /** V86: the player's CURRENT eye height (m) — crouched or standing. The dynamic see-over threshold (`sightScene`):
+   *  it gates BOTH what the player can see over AND whether a crouched player is hidden behind low cover. */
+  playerEyeHeight(): number {
+    return this.playerCrouching ? this.perception.crouchEyeHeightMeters : this.perception.eyeHeightMeters;
+  }
+
+  /**
    * Move the player by a normalized intent over `dtSeconds` at the configured walk speed. The engine
    * validates against walkable nav cells (V1: UI issues intent, engine authorizes) and slides along walls
    * rather than sticking. Returns true if the player actually moved.
@@ -756,7 +772,15 @@ export class GameRuntime {
     const len = Math.hypot(dirX, dirZ);
     if (len === 0 || dtSeconds <= 0) return false;
     const sprinting = this.playerSurvival.applyStamina(sprint, dtSeconds);
-    const speed = this.playerCfg.moveSpeedMetersPerSecond * (sprinting ? this.playerCfg.playerSprintSpeedMultiplier : 1);
+    // V86: stance speed — sprint (fast, gated by stamina) > walk > crouch (slow). Sprint takes precedence over
+    // crouch (you cannot sprint crouched), matching the noise precedence below.
+    const crouching = !sprinting && sneak;
+    const stanceMult = sprinting
+      ? this.playerCfg.playerSprintSpeedMultiplier
+      : crouching
+        ? this.playerCfg.playerCrouchSpeedMultiplier
+        : 1;
+    const speed = this.playerCfg.moveSpeedMetersPerSecond * stanceMult;
     const stepX = (dirX / len) * speed * dtSeconds;
     const stepZ = (dirZ / len) * speed * dtSeconds;
     const ox = this.playerPos.x;

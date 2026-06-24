@@ -93,6 +93,10 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
       const bindNow = inputStore.getState().bindings;
       const sprint = keys.has(bindNow.sprint);
       const sneak = keys.has(bindNow.sneak);
+      // V86: publish the CROUCH stance every frame (even when standing still) so the player eye height — which
+      // drives both what the player sees over AND whether a crouched player is hidden behind low cover — tracks
+      // the held key. Sprint takes precedence (you cannot sprint crouched).
+      runtime.setCrouch(sneak && !sprint);
       if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint, sneak);
       const hit = aim.worldPoint(camera);
       if (hit) {
