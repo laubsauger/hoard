@@ -3,6 +3,7 @@
 export {
   buildTestBlock,
   isWalkableRadius,
+  segmentCrossesWall,
   hasLineOfSight,
   rayDistanceToWall,
   castVisibilityFan,

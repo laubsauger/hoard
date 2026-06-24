@@ -141,6 +141,51 @@ describe('FlowField shared field (V15)', () => {
     expect(field.distance[start]!).toBeGreaterThan(9);
   });
 
+  it('does NOT flow across an interior edge-wall — routes through the doorway instead', () => {
+    // two 6x3 rooms split by a full-height interior partition at the cx=2|cx=3 seam, with a doorway gap at
+    // cy=1. Every cell stays walkable; only the cross-edges are walled. A field targeting the right room must
+    // reach the left room ONLY via the doorway, so the left cells route to the door, not straight across.
+    const g = grid(6, 3);
+    for (let cy = 0; cy < 3; cy++) {
+      if (cy === 1) continue; // doorway gap
+      g.setWallBetween(2, cy, 3, cy);
+    }
+    const target = g.index(5, 1);
+    const field = new FlowField(g, target, 'ground', g.navRevision);
+    const left = g.index(1, 0);
+    expect(field.isReachable(left)).toBe(true);
+    // a wall sits directly east of (2,0); the path from (1,0) must detour through the doorway row → its
+    // cost-to-target strictly exceeds the straight-line manhattan distance (4) it would have with no wall.
+    expect(field.distance[left]!).toBeGreaterThan(4);
+    // walking the flow from a left cell must converge on the target through the door, never crossing the wall.
+    let cx = 0;
+    let cy = 0;
+    let crossed = false;
+    for (let s = 0; s < 100; s++) {
+      const cell = g.index(cx, cy);
+      if (cell === target) break;
+      const [dx, dz] = field.directionAt(cell);
+      const sx = Math.sign(Math.round(dx));
+      const sy = Math.sign(Math.round(dz));
+      if (!g.canStep(cx, cy, sx, sy)) crossed = true; // would step across a walled edge — must never happen
+      cx += sx;
+      cy += sy;
+    }
+    expect(crossed).toBe(false);
+    expect(g.index(cx, cy)).toBe(target);
+  });
+
+  it('a sealed interior room (all four edges walled, no doorway) is unreachable from outside it', () => {
+    const g = grid(5, 5);
+    // wall the cell (2,2) off on all four edges — it becomes its own island though it stays walkable.
+    g.setEdgeWall(2, 2, 'n', true);
+    g.setEdgeWall(2, 2, 's', true);
+    g.setEdgeWall(2, 2, 'e', true);
+    g.setEdgeWall(2, 2, 'w', true);
+    const field = new FlowField(g, g.index(0, 0), 'ground', g.navRevision);
+    expect(field.isReachable(g.index(2, 2))).toBe(false);
+  });
+
   it('throws when the target cell is blocked (no silent fallback)', () => {
     const g = grid(8, 8);
     g.block(4, 4);

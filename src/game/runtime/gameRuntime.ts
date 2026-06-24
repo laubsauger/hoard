@@ -65,6 +65,7 @@ import { CombatSystem, type ShotResult } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
+  segmentCrossesWall,
   lootableContainerCells,
   DoorSystem,
   WindowSystem,
@@ -602,17 +603,19 @@ export class GameRuntime {
     const oz = this.playerPos.z;
     const nx = ox + stepX;
     const nz = oz + stepZ;
-    // T58/V42: radius-aware so the player body never clips half into a wall.
+    // T58/V42: radius-aware so the player body never clips half into a wall. The edge-wall test additionally
+    // rejects a step crossing an interior partition between two walkable cells (must use the doorway).
     const r = this.playerCfg.bodyRadiusMeters;
+    const grid = this.scene.navGrid;
     let moved = false;
-    if (isWalkableRadius(this.scene, nx, nz, r)) {
+    if (isWalkableRadius(this.scene, nx, nz, r) && !segmentCrossesWall(grid, ox, oz, nx, nz)) {
       this.playerPos = { x: nx, y: this.playerPos.y, z: nz };
       moved = true;
-    } else if (isWalkableRadius(this.scene, nx, oz, r)) {
+    } else if (isWalkableRadius(this.scene, nx, oz, r) && !segmentCrossesWall(grid, ox, oz, nx, oz)) {
       // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
       this.playerPos = { x: nx, y: this.playerPos.y, z: oz };
       moved = true;
-    } else if (isWalkableRadius(this.scene, ox, nz, r)) {
+    } else if (isWalkableRadius(this.scene, ox, nz, r) && !segmentCrossesWall(grid, ox, oz, ox, nz)) {
       this.playerPos = { x: ox, y: this.playerPos.y, z: nz };
       moved = true;
     }
@@ -1063,8 +1066,8 @@ export class GameRuntime {
 
   /** Fire one firearm shot immediately (deterministic). Combat is resolved authoritatively now, and the
    *  gunshot emits a sound stimulus at the muzzle so the horde is drawn to the noise (sound attraction). */
-  fire(dirX: number, dirZ: number, region: AnatomyRegion): ShotResult {
-    const result = this.combat.fire(this.playerPos, dirX, dirZ, region);
+  fire(dirX: number, dirZ: number, region: AnatomyRegion, opts: { rollHitLocation?: boolean } = {}): ShotResult {
+    const result = this.combat.fire(this.playerPos, dirX, dirZ, region, opts);
     // Only a round that actually fired makes noise — a dry click (empty mag) doesn't draw the horde (T74).
     if (result.firedRounds === undefined || result.firedRounds > 0) this.emitGunfire();
     return result;
@@ -1358,7 +1361,7 @@ export class GameRuntime {
   private stepQueuedShots(): void {
     let shot = this.pendingShots.shift();
     while (shot) {
-      this.combat.fire(shot.origin, shot.dirX, shot.dirZ, shot.region);
+      this.combat.fire(shot.origin, shot.dirX, shot.dirZ, shot.region, { rollHitLocation: true });
       this.audio.hearEvent('gunfire', shot.origin.x, shot.origin.z, this.clock.tick);
       shot = this.pendingShots.shift();
     }

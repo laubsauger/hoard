@@ -170,6 +170,47 @@ export function buildingsOf(
 const LOS_STEP_METERS = 1;
 
 /**
+ * True when the straight segment (x0,z0)→(x1,z1) crosses an interior EDGE-wall (a walled cell edge). Walks
+ * the segment in fine sub-cell steps tracking the cell it is in; when it enters a new cell, the transition
+ * is gated on `NavGrid.canStep` — a walled cardinal edge (or a corner-cut past a perpendicular edge-wall on
+ * a diagonal transition) returns true. Cells stay walkable, so this is the cross-edge test that cell-blocking
+ * (`isWalkableWorld`) cannot express. Out-of-bounds transitions are left to the cell-block test. Determinism
+ * (V26): pure function of the grid + endpoints, no RNG, allocation-free.
+ */
+export function segmentCrossesWall(
+  navGrid: NavGrid,
+  x0: number,
+  z0: number,
+  x1: number,
+  z1: number,
+): boolean {
+  const cs = navGrid.settings.navCellSize;
+  const dx = x1 - x0;
+  const dz = z1 - z0;
+  const dist = Math.hypot(dx, dz);
+  if (dist === 0) return false;
+  // quarter-cell steps: a sample never jumps more than one cell in either axis, so every crossed edge is seen.
+  const steps = Math.max(1, Math.ceil(dist / (cs * 0.25)));
+  let pcx = Math.floor(x0 / cs);
+  let pcy = Math.floor(z0 / cs);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const cx = Math.floor((x0 + dx * t) / cs);
+    const cy = Math.floor((z0 + dz * t) / cs);
+    if (cx === pcx && cy === pcy) continue;
+    const sx = Math.sign(cx - pcx);
+    const sy = Math.sign(cy - pcy);
+    // only test the edge when BOTH cells are in bounds; exterior/boundary occlusion is cell-blocking's job.
+    const fromIn = pcx >= 0 && pcy >= 0 && pcx < navGrid.width && pcy < navGrid.height;
+    const toIn = cx >= 0 && cy >= 0 && cx < navGrid.width && cy < navGrid.height;
+    if (fromIn && toIn && !navGrid.canStep(pcx, pcy, sx, sy)) return true;
+    pcx = cx;
+    pcy = cy;
+  }
+  return false;
+}
+
+/**
  * Line-of-sight (T68/V47): true when NO blocked cell lies on the segment between (x0,z0) and (x1,z1) — a
  * zombie cannot see the player through a wall/closed door. Endpoints are excluded so the observer's and
  * target's own cells never block. Walks the segment sampling the scene's `isWalkableWorld`.

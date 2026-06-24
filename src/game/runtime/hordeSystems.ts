@@ -27,7 +27,7 @@ import { limbConsequences, type ConsequenceConfig } from '@/game/combat';
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
-import { isWalkableRadius, hasLineOfSight, type TestBlock, type Vec3 } from '@/game/scene';
+import { isWalkableRadius, hasLineOfSight, segmentCrossesWall, type TestBlock, type Vec3 } from '@/game/scene';
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
@@ -222,18 +222,21 @@ export class HordeSimulation {
       }
       const nx = pos[0] + dirX * effSpeed * dt;
       const nz = pos[2] + dirZ * effSpeed * dt;
-      // T58/V42: radius-aware static collision + wall-slide so a body never clips half into a wall.
+      // T58/V42: radius-aware static collision + wall-slide so a body never clips half into a wall. The
+      // edge-wall test additionally rejects a step that would cross an interior partition between two walkable
+      // cells (the flow field already routes the body to the doorway; this stops the final-step clip-through).
+      const grid = scene.navGrid;
       let mx = pos[0];
       let mz = pos[2];
       let moved = false;
-      if (isWalkableRadius(scene, nx, nz, agentRadius)) {
+      if (isWalkableRadius(scene, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
         mx = nx;
         mz = nz;
         moved = true;
-      } else if (isWalkableRadius(scene, nx, pos[2], agentRadius)) {
+      } else if (isWalkableRadius(scene, nx, pos[2], agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, pos[2])) {
         mx = nx;
         moved = true;
-      } else if (isWalkableRadius(scene, pos[0], nz, agentRadius)) {
+      } else if (isWalkableRadius(scene, pos[0], nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], pos[0], nz)) {
         mz = nz;
         moved = true;
       }

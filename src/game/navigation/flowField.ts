@@ -121,6 +121,9 @@ export class FlowField {
         if (nx < 0 || ny < 0 || nx >= grid.width || ny >= grid.height) continue;
         const ncell = ny * grid.width + nx;
         if (grid.isBlocked(ncell)) continue;
+        // Interior partition (edge-wall): the field does NOT flow across a walled edge, so paths route
+        // through DOORWAYS. A diagonal is blocked if either perpendicular edge is walled (no corner-cut).
+        if (!grid.canStep(cx, cy, nb.dx, nb.dy)) continue;
         const step = grid.getCost(ncell) * (nb.diag ? SQRT2 : 1);
         const nd = key + step;
         if (nd < this.distance[ncell]!) {
@@ -144,6 +147,8 @@ export class FlowField {
         const nx = cx + nb.dx;
         const ny = cy + nb.dy;
         if (nx < 0 || ny < 0 || nx >= grid.width || ny >= grid.height) continue;
+        // Don't point the flow vector across an interior wall — the gradient must follow a crossable edge.
+        if (!grid.canStep(cx, cy, nb.dx, nb.dy)) continue;
         const ncell = ny * grid.width + nx;
         const d = this.distance[ncell]!;
         if (d < bestDist) {
