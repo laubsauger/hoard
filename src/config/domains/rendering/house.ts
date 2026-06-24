@@ -213,8 +213,8 @@ export const houseFields = {
   }),
   housePorchHeightMeters: num({
     owner: 'rendering', unit: 'meters',
-    doc: 'Height of a front-porch roof above its deck (post length) (T87).',
-    default: 2.4, min: 1, max: 5,
+    doc: 'Height of a front-porch roof above its deck (post length) (T87). Must clear the door leaf top (wall × doorLeafHeightFraction ≈ 2.46 m at a 3 m wall) so an open door swings UNDER the porch roof instead of z-fighting its underside.',
+    default: 2.75, min: 1, max: 5,
   }),
   houseChimneyMeters: num({
     owner: 'rendering', unit: 'meters',
