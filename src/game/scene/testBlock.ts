@@ -190,19 +190,43 @@ export interface TestBlock {
  * boarded/obstructed cell. Cheap 5-sample approximation; the integrator rejects or slides on failure so
  * bodies never clip half into a wall. Composes the scene's own `isWalkableWorld` (one source of truth).
  */
+/**
+ * True when a body of radius `r` centred at (x,z) does NOT poke across a WALLED cell EDGE (thin wall) — every
+ * cardinal extent stays on the SAME side of each wall. Without this the cell-only radius test let a body's
+ * centre approach a walled edge while its radius clipped INTO the thin wall (you could step a body-width into a
+ * wall before it x-rayed). 4 cardinal extents suffice (axis-aligned → each names ONE cardinal neighbour);
+ * boundary/out-of-range extents are the cell-block's job, not the edge's.
+ */
+export function circleClearsEdges(grid: NavGrid, x: number, z: number, r: number): boolean {
+  const { cx: ccx, cy: ccy } = grid.worldToCell(x, z);
+  const inb = (cx: number, cy: number): boolean => cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
+  const probe = (px: number, pz: number): boolean => {
+    const { cx: ncx, cy: ncy } = grid.worldToCell(px, pz);
+    if (ncx === ccx && ncy === ccy) return true; // extent stays in centre cell — no edge crossed
+    if (!inb(ccx, ccy) || !inb(ncx, ncy)) return true; // boundary handled by cell-walkability, not edge test
+    return grid.canStep(ccx, ccy, ncx - ccx, ncy - ccy); // walled edge between = body overlaps the wall
+  };
+  return probe(x + r, z) && probe(x - r, z) && probe(x, z + r) && probe(x, z - r);
+}
+
 export function isWalkableRadius(
-  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  scene: Pick<TestBlock, 'isWalkableWorld'> & { readonly navGrid?: NavGrid },
   x: number,
   z: number,
   r: number,
 ): boolean {
-  return (
-    scene.isWalkableWorld(x, z) &&
-    scene.isWalkableWorld(x + r, z) &&
-    scene.isWalkableWorld(x - r, z) &&
-    scene.isWalkableWorld(x, z + r) &&
-    scene.isWalkableWorld(x, z - r)
-  );
+  if (
+    !scene.isWalkableWorld(x, z) ||
+    !scene.isWalkableWorld(x + r, z) ||
+    !scene.isWalkableWorld(x - r, z) ||
+    !scene.isWalkableWorld(x, z + r) ||
+    !scene.isWalkableWorld(x, z - r)
+  ) {
+    return false;
+  }
+  // Edge-walls (thin partitions/exterior): a real scene carries the nav grid → also keep the body off walled
+  // edges. Narrow mocks (only isWalkableWorld, no navGrid) skip this → cell-only, back-compat.
+  return scene.navGrid === undefined || circleClearsEdges(scene.navGrid, x, z, r);
 }
 
 /**
@@ -228,7 +252,8 @@ export function gridWalkableRadius(grid: NavGrid, x: number, z: number, r: numbe
     gridWalkableWorld(grid, x + r, z) &&
     gridWalkableWorld(grid, x - r, z) &&
     gridWalkableWorld(grid, x, z + r) &&
-    gridWalkableWorld(grid, x, z - r)
+    gridWalkableWorld(grid, x, z - r) &&
+    circleClearsEdges(grid, x, z, r) // body must not poke across a walled edge (thin wall) either
   );
 }
 
