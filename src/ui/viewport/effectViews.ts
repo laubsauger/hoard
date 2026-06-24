@@ -135,6 +135,8 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
     if (!a) return null;
     const slot = rt.slotOf(entity as unknown as EntityId);
     (a as { reveal?: number }).reveal = slot !== undefined ? scene.crowdRevealOf(slot) : 1;
+    // V102: also carry the per-instance SIZE scale so gore sits at the right HEIGHT on a small/large zombie.
+    (a as { scale?: number }).scale = slot !== undefined ? scene.crowdScaleOf(slot) : 1;
     return a;
   };
   bloodView.sim.setBodyAnchors({ resolve: bodyAnchorWithReveal });

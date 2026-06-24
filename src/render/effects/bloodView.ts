@@ -163,6 +163,10 @@ export interface BodyAnchor {
    *  splat fades WITH a vision-culled/faded zombie instead of floating at full opacity. Absent ⇒ 1 (a static
    *  world wound, or no reveal source). The resolver fills it from the render-side per-slot reveal. */
   readonly reveal?: number;
+  /** V102: the body's per-instance SIZE scale (T123 crowd variation). Body-anchored gore multiplies region
+   *  HEIGHT + face-normal offset by it so a wound on a SMALLER zombie sits lower/tighter and on a LARGER one
+   *  higher/wider — not a fixed offset that floats off a short body. Absent ⇒ 1 (static world wound). */
+  readonly scale?: number;
 }
 
 /** Render-side, read-only resolver of a struck body's current transform by entity id (Bug A). */
@@ -723,15 +727,17 @@ export class BloodSim {
   ): void {
     const s = this.settings;
     if (!this.bodyAnchors || this.zgEntity.length === 0 || ctx.goreIntensity <= 0) return;
-    if (entity < 0 || !this.bodyAnchors.resolve(entity)) return; // unknown/gone body — nothing to stick to
+    const anchor0 = entity < 0 ? null : this.bodyAnchors.resolve(entity);
+    if (!anchor0) return; // unknown/gone body — nothing to stick to
+    const sc = anchor0.scale ?? 1; // V102: this zombie's per-instance SIZE (T123) — scale region radius + height to fit
     let count = Math.max(1, Math.round(s.zombieGoreSplatsPerHit * (0.4 + energy * 0.8)));
     if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
     count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
     // Anchor coating gore to the SURFACE of the struck region, not a fat full-body cylinder (the float bug):
     // the body-hugging radius is the silhouette half-width AT the struck band (narrow head, wide torso, narrow
     // leg — a constant radius left splats floating off the thin humanoid), biased to the wound-facing hemisphere.
-    const R = regionBodyRadius(region, s.regionRadii);
-    const baseH = regionImpactHeight(region, s.regionHeights);
+    const R = regionBodyRadius(region, s.regionRadii) * sc;
+    const baseH = regionImpactHeight(region, s.regionHeights) * sc;
     const jit = s.zombieGoreHeightJitterMeters;
     const bright = s.playerGoreBrightness;
     const dl = Math.hypot(dirX, dirZ);

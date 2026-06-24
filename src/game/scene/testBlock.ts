@@ -162,6 +162,16 @@ export interface TestBlock {
    *  templated thin-wall house each entry is an EDGE-door (inner room cell + `edgeDir`); legacy blocks emit
    *  bare cell-doors. */
   readonly exitCells: readonly ExitCell[];
+  /** T135: INTERIOR doors promoted to interactive (a deterministic SUBSET of each house's interior doorways —
+   *  most rooms stay open-gap for flow, some get a real openable/closable leaf for surprise + tension). Each is
+   *  an EDGE-door (inner room cell + `edgeDir`), fed into the runtime DoorSystem ALONGSIDE `exitCells` (these do
+   *  NOT count as building exits, so the exit-count invariant is untouched) and rendered as door leaves. A door
+   *  whose edge starts WALLED reads as CLOSED. Absent/empty ⇒ no interior doors (legacy blocks). */
+  readonly interiorDoors?: readonly ExitCell[];
+  /** T135: the cell a single CAPTIVE zombie is spawned in at game start — a back room of the player's house,
+   *  sealed behind a CLOSED interior door (in `interiorDoors`) so the opening beat is a contained threat the
+   *  player must open the door to face. Null/absent ⇒ no scripted captive (the rest of the horde is outside). */
+  readonly captiveZombieCell?: CellXY | null;
   /** P0: the room-based houses generated from floor-plan templates (placeHouse). Present for the templated
    *  district; absent for the bare GATE-0 / M1 blocks. The renderer (P0c) builds walls/doors/windows from
    *  each house's `wallEdges`; loot/AI read rooms-as-regions via `roomAt`. */

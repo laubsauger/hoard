@@ -69,12 +69,13 @@ export const playerConfig = registerDomain('player', {
     min: 0.5,
     max: 3,
   }),
-  /** Rendered player body capsule radius (m). */
+  /** Player body capsule radius (m) — drives BOTH the rendered avatar capsule AND the radius-aware movement
+   *  collision (movePlayer / door-trap guard). */
   bodyRadiusMeters: num({
     owner: 'player',
     unit: 'meters',
-    doc: 'Rendered radius of the player avatar capsule.',
-    default: 0.35,
+    doc: 'Radius of the player avatar capsule + the radius-aware movement collision. LOWERED 0.35→0.28 (0.56 m body width): after the nav grid refined 2 m→1 m a single-cell doorway is only ~1 m wide, so a 0.7 m-wide body left ~0.3 m slack and snagged on the frame on any off-centre approach (the "doors too huge / always getting stuck" report). 0.28 clears a 1 m doorway comfortably while staying a believable human footprint.',
+    default: 0.28,
     min: 0.1,
     max: 1,
   }),

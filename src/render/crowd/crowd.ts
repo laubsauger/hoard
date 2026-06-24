@@ -48,7 +48,7 @@ import {
 } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
-import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, computeFigureMask, variationSeed, variationHash01, variationTint } from './packing';
+import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, computeFigureMask, variationSeed, variationScale, variationHash01, variationTint } from './packing';
 import type { VisionCull } from './visionCull';
 import { RiggedCrowd } from './rigged';
 import {
@@ -585,5 +585,14 @@ export class Crowd {
     (this.metaBuffer.value as { needsUpdate: boolean }).needsUpdate = true;
     this.dtUniform.value = dtSeconds;
     return liveCount;
+  }
+
+  /** V102: the per-instance SIZE scale this crowd renders zombie `slot` at — the SAME `variationScale` the
+   *  packing applies (T123/V88). Body-anchored gore (wounds/blood) reads it so a wound on a SMALLER/LARGER
+   *  zombie sits at the right height + scale on the mesh, not a fixed offset that floats above a short one /
+   *  sinks into a tall one. Pure + stable per slot (V26). */
+  scaleOf(slot: number): number {
+    const c = Math.max(1, this.settings.variationCount);
+    return variationScale(variationSeed(slot, c), c, this.settings.scaleMin, this.settings.scaleMax);
   }
 }

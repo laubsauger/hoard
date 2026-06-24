@@ -136,8 +136,6 @@ export function clipPhaseRateHz(entry: ClipTableEntry): number {
 
 /** Nominal gait cycles per metre travelled, used to pace IN-PLACE locomotion clips (no baked root stride). */
 export const GAIT_CYCLES_PER_METER = 0.55;
-/** Below this planar speed (m/s) a locomotion clip plays at its NATURAL rate (avoids freezing a momentarily-stopped mover). */
-export const MIN_LOCOMOTION_SPEED = 0.05;
 /** A baked clip stride below this (m) is treated as IN-PLACE (no usable root motion) → fall back to the nominal pace. */
 export const MIN_STRIDE_METERS = 0.3;
 /** Upper clamp on the baked stride used for cadence (m). An EXAGGERATED leaping clip (e.g. the runner's
@@ -145,8 +143,18 @@ export const MIN_STRIDE_METERS = 0.3;
  *  believable zombie speed. Capping the effective stride keeps the legs cycling at a run-like rate (a hair of
  *  foot-slide is far less jarring than slow-mo). Normal walk/run clips (stride ≲ this) are unaffected. */
 export const MAX_STRIDE_METERS = 2.4;
-/** Clamp on the speed-coupled cadence (Hz) so a fast mover's legs never blur into a buzz. */
+/** Absolute clamp on the speed-coupled cadence (Hz) so a fast mover's legs never blur into a buzz. */
 export const MAX_GAIT_RATE_HZ = 4;
+/** Floor on the moving gait as a FRACTION of the clip's natural rate. The foot-matched cadence (speed/stride) of a
+ *  slow shambler on a fast-authored clip (standard/bloated `Running`) would otherwise play at ~0.5× = SLOW-MOTION;
+ *  flooring it keeps the clip near its authored speed (a touch of foot-slide reads better than slow-mo). */
+export const MIN_GAIT_RATE_FRACTION = 0.8;
+/** Ceiling on the moving gait as a FRACTION of the clip's natural rate — couples to speed but never windmills. */
+export const MAX_GAIT_RATE_FRACTION = 1.7;
+/** Below this planar speed (m/s) the gait EASES toward frozen (linear ramp from 0 at standstill to full at this
+ *  speed). A zombie wedged in a horde (state Pursue, speed≈0) must NOT keep cycling its run clip on the spot —
+ *  the legs slow to a shuffle/halt instead of sprinting in place (the worst horde artifact). */
+export const STOP_RAMP_SPEED = 0.5;
 
 /** Whether a ZombieState is LOCOMOTION (the gait cadence should track ground speed) vs a stationary/one-off pose. */
 export function isLocomotionState(state: number): boolean {
@@ -161,18 +169,27 @@ export function isFrozenIdle(map: ClipStateMap, state: number): boolean {
 }
 
 /**
- * Phase rate (Hz) that keeps the gait cadence MATCHED to the member's ground speed so the feet don't slide or
- * windmill (T128). For a moving locomotion state: if the clip baked a real forward STRIDE (root motion), one
- * cycle covers `strideMeters` of ground, so cadence = speed / stride (exact foot match); for an in-place clip
- * (no root stride) fall back to the nominal `GAIT_CYCLES_PER_METER`. Stationary / one-off states (idle/attack/
- * stagger/down) and near-stopped movers play at the clip's NATURAL rate. Clamped to `MAX_GAIT_RATE_HZ`. PURE.
+ * Phase rate (Hz) that couples the gait cadence to the member's ground speed — "to a degree" (T128). For a moving
+ * locomotion state the foot-matched cadence is speed / clip-stride (one cycle covers the baked stride; in-place
+ * clips fall back to the nominal `GAIT_CYCLES_PER_METER`), but it is then CLAMPED to a believable BAND around the
+ * clip's natural rate: a slow shambler on a fast-authored `Running` clip never drops into SLOW-MOTION (the
+ * `MIN_GAIT_RATE_FRACTION` floor) and a fast runner never WINDMILLS (the `MAX_*` ceilings). Below `STOP_RAMP_SPEED`
+ * the gait EASES linearly toward frozen, so a zombie wedged in a horde (Pursue, speed≈0) slows to a shuffle/halt
+ * instead of sprinting on the spot. Stationary / one-off states (idle/attack/stagger/down) play at the NATURAL
+ * rate. PURE + deterministic (V26).
  */
 export function locomotionRateHz(isLocomotion: boolean, speed: number, strideMeters: number, naturalRateHz: number): number {
-  if (!isLocomotion || speed <= MIN_LOCOMOTION_SPEED) return naturalRateHz;
+  if (!isLocomotion) return naturalRateHz; // idle/attack/stagger/down — authored cadence, not speed-coupled
   // Cap an exaggerated baked stride so a leaping clip doesn't slow-mo at zombie speeds (see MAX_STRIDE_METERS).
   const effStride = Math.min(strideMeters, MAX_STRIDE_METERS);
-  const rate = effStride > MIN_STRIDE_METERS ? speed / effStride : speed * GAIT_CYCLES_PER_METER;
-  return Math.min(rate, MAX_GAIT_RATE_HZ);
+  const footRate = effStride > MIN_STRIDE_METERS ? speed / effStride : speed * GAIT_CYCLES_PER_METER;
+  // Keep the foot-matched cadence within a believable band of the clip's natural rate (no slow-mo, no buzz).
+  const lo = naturalRateHz * MIN_GAIT_RATE_FRACTION;
+  const hi = Math.min(naturalRateHz * MAX_GAIT_RATE_FRACTION, MAX_GAIT_RATE_HZ);
+  const banded = Math.max(lo, Math.min(footRate, hi));
+  // Near-stopped (stuck in a horde): ramp the cadence DOWN to ~0 so the legs don't windmill while wedged.
+  const ramp = speed >= STOP_RAMP_SPEED ? 1 : speed / STOP_RAMP_SPEED;
+  return banded * ramp;
 }
 
 /** Advance a normalized phase by `rateHz·dt` and wrap to [0,1). PURE; dt should be >= 0 (guarded against negatives). */

@@ -24,8 +24,8 @@ export const weatherConfig = registerDomain('weather', {
   startTimeOfDay: num({
     owner: 'weather',
     unit: 'ratio',
-    doc: 'Day fraction the scenario starts at (0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk).',
-    default: 0.35,
+    doc: 'Day fraction the scenario starts at (0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk). Starts MID-NIGHT (~01:12): the moon is near peak elevation, so the open street reads in cold moonlit silhouette while roof-shadowed interiors go near-black without the flashlight.',
+    default: 0.05,
     min: 0,
     max: 1,
   }),

@@ -119,6 +119,8 @@ interface DistrictBuild {
   readonly groundRects: GroundRect[];
   readonly props: PropInstance[];
   readonly exitCells: ExitCell[];
+  /** T135: interior doorways promoted to interactive edge-doors (a deterministic subset; see TestBlock). */
+  readonly interiorDoors: ExitCell[];
   readonly houses: PlacedHouse[];
   readonly furniture: PlacedFurniture[];
   readonly windowSeeds: WindowPlacement[];
@@ -126,6 +128,8 @@ interface DistrictBuild {
   readonly boardedFraction: number;
   /** Picked when stamping the player's house — the interior cell the player starts in (sheltered). */
   playerCell: CellXY | null;
+  /** T135: the cell a single captive zombie spawns in (player-house back room behind a closed interior door). */
+  captiveZombieCell: CellXY | null;
 }
 
 /** A sheltered player-start cell: the interior-edge MIDPOINT on the side OPPOSITE the front door (so the
@@ -388,12 +392,14 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     groundRects: [],
     props: [],
     exitCells: [],
+    interiorDoors: [],
     houses: [],
     furniture: [],
     windowSeeds: [],
     houseVar: resolveHouseVariation(tier),
     boardedFraction: worldCfg.houseWindowBoardedFraction,
     playerCell: null,
+    captiveZombieCell: null,
   };
 
   // ---- ground paint: asphalt base under everything ----
@@ -480,6 +486,8 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     groundRects: build.groundRects,
     props: build.props,
     exitCells: build.exitCells,
+    interiorDoors: build.interiorDoors,
+    captiveZombieCell: build.captiveZombieCell,
     placedHouses: houses,
     placedFurniture: build.furniture,
     windowSeeds: build.windowSeeds,

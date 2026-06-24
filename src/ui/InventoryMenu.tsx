@@ -1,13 +1,14 @@
 // T62 / V1 / V11 — inventory menu. Dual-pane (player ↔ nearby container) over the inventory-view store.
 // `I` toggles it, `Esc` closes. Click an item to transfer the stack (loot from the container → player, or
 // store player → container). Reads narrow store selectors; never per-frame world state. Item names come
-// from the T83 catalog. Seeded with real loot (T84) on first open until the sim publishes live inventory.
+// from the T83 catalog. The player + container contents are the sim's LIVE inventory (runtime.inventorySnapshot()
+// published by GameViewport) — NO UI mock seed; a container shows only when actually opened via the loot verb.
 
 import { useEffect } from 'react';
 import { useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
 import { inventoryViewStore, type ContainerView } from '../stores/inventoryView';
-import { buildDefaultCatalog, ITEM, rollLoot } from '../game/inventory';
+import { buildDefaultCatalog } from '../game/inventory';
 
 const CATALOG = buildDefaultCatalog();
 function itemName(id: number): string {
@@ -25,17 +26,6 @@ function itemCategory(id: number): string {
   }
 }
 
-/** Seeded PRNG (mulberry32) so the demo loot is stable. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 function weightOf(slots: ContainerView['slots']): number {
   return slots.reduce((w, s) => {
@@ -45,22 +35,6 @@ function weightOf(slots: ContainerView['slots']): number {
       return w;
     }
   }, 0);
-}
-
-/** First-open seed: a starting player kit + a lootable kitchen cupboard (real T84 loot). */
-function seedIfEmpty(): void {
-  if (inventoryViewStore.getState().containers.length > 0) return;
-  const playerSlots = [
-    { item: ITEM.KitchenKnife, count: 1 },
-    { item: ITEM.Bandage, count: 2 },
-    { item: ITEM.WaterBottle, count: 1 },
-  ];
-  const cupboardSlots = rollLoot('kitchen', mulberry32(0xc0ffee)).map((s) => ({ item: s.item as number, count: s.count }));
-  inventoryViewStore.getState().setContainers([
-    { container: 'player', capacity: 12, weight: weightOf(playerSlots), slots: playerSlots },
-    { container: 'Kitchen Cupboard', capacity: 50, weight: weightOf(cupboardSlots), slots: cupboardSlots },
-  ]);
-  inventoryViewStore.getState().setOpenContainer('Kitchen Cupboard');
 }
 
 function Pane({
@@ -104,9 +78,13 @@ export function InventoryMenu() {
     const onKey = (e: KeyboardEvent): void => {
       if (e.code === 'KeyI') {
         e.preventDefault();
-        seedIfEmpty();
         const cur = uiStore.getState().activePanel;
-        // Manual inventory: NOT anchored to a world container, so it is not proximity-gated (item A).
+        // Manual inventory (T62): PLAYER-only. The real player + container contents are the sim's
+        // `runtime.inventorySnapshot()` (GameViewport publishes it live) — there is NO mock seed. Clear the open
+        // container + loot anchor so manual `I` shows ONLY the player and never a stale / auto-picked container
+        // (the scene's real "Kitchen Cupboard" was being grabbed by the otherName fallback). A real container
+        // shows only via the "Open / Loot" verb, which sets the open container + anchor (engineHandle.loot).
+        inventoryViewStore.getState().setOpenContainer(null);
         inventoryViewStore.getState().setLootAnchor(null);
         uiStore.getState().openPanel(cur === 'inventory' ? 'none' : 'inventory');
       } else if (e.code === 'Escape' && uiStore.getState().activePanel === 'inventory') {
@@ -120,7 +98,9 @@ export function InventoryMenu() {
 
   if (!open) return null;
   const player = containers.find((c) => c.container === 'player');
-  const otherName = openContainer ?? containers.find((c) => c.container !== 'player')?.container ?? '';
+  // Show the OPEN container only (the looted one, set by the Open/Loot verb). NO fallback to "first non-player
+  // container" — that auto-picked the scene's real "Kitchen Cupboard" so manual `I` always showed it.
+  const otherName = openContainer ?? '';
   const other = containers.find((c) => c.container === otherName);
 
   return (

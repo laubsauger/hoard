@@ -495,6 +495,12 @@ export class BlockScene {
     return this.visionConeCullOn ? this.visionCull.revealOf(slot) : 1;
   }
 
+  /** V102: the per-instance SIZE scale the crowd renders zombie `slot` at (T123 variation). Body-anchored gore
+   *  reads it so a wound/splat sits at the right HEIGHT + scale on a smaller/larger zombie, not a fixed offset. */
+  crowdScaleOf(slot: number): number {
+    return this.crowd.scaleOf(slot);
+  }
+
   /** The live accessibility params (test/diagnostics — proves settings propagate into the scene). */
   get accessibilityParams(): RenderAccessibility {
     return this.accessibility;

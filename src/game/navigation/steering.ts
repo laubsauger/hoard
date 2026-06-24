@@ -95,8 +95,8 @@ export function sampleFlowDirection(field: FlowField, wx: number, wz: number, ou
     out.z = az / wsum;
     return out;
   }
-  // No reachable corner: fall back to the body's own cell direction (the coarse pre-interpolation heading) so
-  // the body still gets a heading rather than freezing in an otherwise-reachable spot.
+  // No reachable corner. Try the body's own cell direction (the coarse pre-interpolation heading) so the body
+  // still gets a heading in an otherwise-reachable spot.
   out.x = 0;
   out.z = 0;
   const bx = Math.floor(wx / cs);
@@ -106,7 +106,20 @@ export function sampleFlowDirection(field: FlowField, wx: number, wz: number, ou
     if (field.isReachable(cell)) {
       out.x = field.dir[cell * 2]!;
       out.z = field.dir[cell * 2 + 1]!;
+      return out;
     }
+  }
+  // The body sits in a region the field NEVER reached — e.g. an outside zombie alerted by gunfire to a target
+  // SEALED behind walls (a closed/boarded house). It can't know the exact source, so it BEELINES toward the
+  // target's world position to investigate the AREA; the radius-collision + stuck-escape then wall-follow it
+  // AROUND the structure to the nearest point it can reach (the doorway, the perimeter) instead of freezing in
+  // place "not knowing where to go" (T134/V101). Pure fn of the field + position (V26).
+  const bxv = ((field.targetCell % w) + 0.5) * cs - wx;
+  const bzv = (Math.floor(field.targetCell / w) + 0.5) * cs - wz;
+  const bl = Math.hypot(bxv, bzv);
+  if (bl > 0) {
+    out.x = bxv / bl;
+    out.z = bzv / bl;
   }
   return out;
 }

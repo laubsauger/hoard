@@ -350,7 +350,10 @@ export class ImpactSim {
     const flen = Math.hypot(faceX, faceZ);
     const fnx = flen > 1e-6 ? faceX / flen : 0;
     const fnz = flen > 1e-6 ? faceZ / flen : 1;
-    const r = this.settings.woundBodyRadiusMeters;
+    // V102: scale the region HEIGHT + body-hug radius by this zombie's per-instance SIZE (T123) so a wound on a
+    // SMALLER body sits lower/tighter and on a LARGER body higher/wider — not a fixed offset that floats off.
+    const sc = a.scale ?? 1;
+    const r = this.settings.woundBodyRadiusMeters * sc;
     const i = this.wHead;
     this.wHead = (this.wHead + 1) % this.wx.length; // ring buffer — oldest recycled (V24)
     if (this.wCount < this.wx.length) this.wCount++;
@@ -362,7 +365,7 @@ export class ImpactSim {
     this.wAge[i] = 0;
     this.wEntity[i] = entity;
     this.wLX[i] = fnx * r; // surface offset toward the shooter (hugs the limb)
-    this.wLY[i] = regionImpactHeight(region, this.settings.regionHeights);
+    this.wLY[i] = regionImpactHeight(region, this.settings.regionHeights) * sc;
     this.wLZ[i] = fnz * r;
     this.reprojectWound(i); // seed the world position now
   }

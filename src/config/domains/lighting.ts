@@ -35,8 +35,8 @@ export const lightingConfig = registerDomain('lighting', {
   minAmbientIntensity: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Hard floor on ambient fill so a night spawn never crushes the scene to black (B6 viewable-night floor).',
-    default: 0.12,
+    doc: 'Hard floor on ambient fill so a night spawn never crushes the scene to black (B6 viewable-night floor). LOWERED for the moonlit-night opening so roof-shadowed interiors + moon-shadowed exterior faces go genuinely dark (close to pitch black, flashlight-dependent) while moon-facing surfaces still catch the directional moonlight.',
+    default: 0.07,
     min: 0,
     max: 2,
   }),
@@ -148,8 +148,8 @@ export const lightingConfig = registerDomain('lighting', {
   nightExposureBoostStops: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Extra exposure stops applied at full darkness (scene-brightness 0) so a night scene stays viewable after tone mapping (B6).',
-    default: 1.5,
+    doc: 'Extra exposure stops applied at full darkness (scene-brightness 0) so a night scene stays just viewable after tone mapping (B6). LOWERED for the moonlit-night opening: the old +1.5 lifted the night street ~2× into flat grey; +0.6 keeps a faint floor (never crushed to pure black) while the open ground reads genuinely dark — picked out by the moon directional + the flashlight, not washed flat.',
+    default: 0.6,
     min: 0,
     max: 6,
   }),
@@ -158,8 +158,8 @@ export const lightingConfig = registerDomain('lighting', {
   interiorExposureStops: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Exposure compensation (stops) applied when fully inside an enclosed interior AT NIGHT (the darkest case). Faded toward zero in daylight by interiorExposureDaylightFalloff — see that field for why.',
-    default: 1.2,
+    doc: 'Exposure compensation (stops) applied when fully inside an enclosed interior AT NIGHT. Faded toward zero in daylight by interiorExposureDaylightFalloff — see that field. LOWERED so a roof-shadowed night interior stays NEAR-BLACK without the flashlight (the intended PZ-style "the torch is your only light indoors"): the old +1.2 over-brightened the interior so it read brighter than the moonlit street (inversion bug). A small residual lift keeps you from 100% blind while the flashlight remains the dominant interior light.',
+    default: 0.25,
     min: 0,
     max: 6,
   }),

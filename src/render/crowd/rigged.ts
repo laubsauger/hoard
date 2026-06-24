@@ -23,8 +23,9 @@ import {
   DataTexture,
   DynamicDrawUsage,
   FloatType,
-  InstancedBufferAttribute,
+  InstancedInterleavedBuffer,
   InstancedMesh,
+  InterleavedBufferAttribute,
   Matrix4,
   NearestFilter,
   RGBAFormat,
@@ -86,6 +87,23 @@ const TEXELS_PER_BONE = 4;
 const RIGGED_HEIGHT_METERS = 1.8;
 /** Fallback flesh tint if a GLB ships no albedo map (should not happen — Meshy bakes one into emissive). */
 const RIGGED_FALLBACK_COLOR = 0x6e6a52;
+/** T133 — per-instance render data is INTERLEAVED into ONE instanced vertex buffer (1 slot, 3 attributes) instead
+ *  of 3 separate slots. three r184 cannot bind a storage buffer in the VERTEX stage (it mis-binds as a uniform —
+ *  see `crowd.ts`), so per-instance data must be vertex attributes; interleaving keeps the rigged pass at 6/8
+ *  vertex-buffer slots (5 mesh + 1 instance) with headroom for normal-map tangents / future per-instance effect
+ *  channels (damage flash, wetness, bloodiness pack into the spare iBlend.zw, NOT a new slot). Layout (floats):
+ *  [0..3] iPose [px,py,pz,heading] · [4..7] iAnim [frameRow,scale,fade,seed] · [8..11] iBlend [fromRow,weight,_,_]. */
+const FLOATS_PER_INSTANCE = 12;
+const INST_POSE = 0;
+const INST_ANIM = 4;
+const INST_BLEND = 8;
+/** Corpse per-instance interleave (1 slot, 2 attributes): [0..3] iPose · [4..7] iCorpse [scale,pitch,fallYaw,seed]. */
+const FLOATS_PER_CORPSE_INSTANCE = 8;
+const CORPSE_INST_POSE = 0;
+const CORPSE_INST_ANIM = 4;
+/** T132 — state crossfade duration (s): on a clip change the body blends from a frozen FROM-pose to the new clip
+ *  over this window instead of popping. Short (a snappy transition reads as reactive, not floaty). */
+const STATE_BLEND_SECONDS = 0.18;
 /** Per-instance gait-cadence jitter (±fraction) so members don't all stride in identical-rate lockstep (T128). */
 const CADENCE_JITTER_SPREAD = 0.14;
 /** Salt for the per-slot cadence-jitter hash (decorrelated from the colour/scale variation channels). */
@@ -116,23 +134,20 @@ interface ArchetypeSlot {
   readonly table: ClipTable;
   /** Per-clip ground stride (m) captured at bake — paces playback to the member's speed (T128). */
   readonly strideByName: ReadonlyMap<string, number>;
-  /** Per-instance [posX, posY, posZ, headingRadians]. */
-  readonly poseArr: Float32Array;
-  /** Per-instance [frameRow, scale, revealAlpha, variationSeed]. */
-  readonly animArr: Float32Array;
-  readonly poseAttr: InstancedBufferAttribute;
-  readonly animAttr: InstancedBufferAttribute;
+  /** T133 — INTERLEAVED per-instance data (one vertex-buffer slot, 3 attributes): iPose@0, iAnim@4, iBlend@8.
+   *  iPose [px,py,pz,heading] · iAnim [frameRow,scale,revealAlpha,seed] · iBlend [fromFrameRow,targetWeight,_,_]
+   *  (T132 crossfade — shader skins the TARGET clip + a frozen FROM-pose, mixes by targetWeight). */
+  readonly instArr: Float32Array;
+  readonly instBuf: InstancedInterleavedBuffer;
   live: number;
   // ---- T131/V99 CORPSE layer: a SECOND InstancedMesh per archetype, reusing this bake (bone texture + albedo +
   // skinning), drawn from the corpse POOL (frozen frame + impact topple). Separate geometry/attrs so it never
   // double-draws the live crowd. ----
   readonly corpseMesh: InstancedMesh;
-  /** Per-corpse [posX, posY, posZ, headingRadians]. */
-  readonly corpsePoseArr: Float32Array;
-  /** Per-corpse [scale, topplePitch, fallYaw, variationSeed]. */
-  readonly corpseAnimArr: Float32Array;
-  readonly corpsePoseAttr: InstancedBufferAttribute;
-  readonly corpseAnimAttr: InstancedBufferAttribute;
+  /** T133 — INTERLEAVED per-corpse data (one slot, 2 attributes): iPose@0 [px,py,pz,heading] · iCorpse@4
+   *  [scale, topplePitch, fallYaw, variationSeed]. */
+  readonly corpseArr: Float32Array;
+  readonly corpseBuf: InstancedInterleavedBuffer;
   corpseLive: number;
 }
 
@@ -276,39 +291,49 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
     const skinWeight = attribute<'vec4'>('skinWeight', 'vec4');
     const pose = attribute<'vec4'>('iPose', 'vec4'); // [posX, posY, posZ, heading]
     const anim = attribute<'vec4'>('iAnim', 'vec4'); // [frameRow, scale, fade, seed]
-    const row = int(anim.x);
+    const blend = attribute<'vec4'>('iBlend', 'vec4'); // [fromFrameRow, targetWeight, 0, 0] — T132 crossfade
 
-    const boneColumns = (boneIdx: ReturnType<typeof int>) => {
-      const c = boneIdx.mul(TEXELS_PER_BONE);
-      return mat4(
-        textureLoad(boneTex, ivec2(c, row)),
-        textureLoad(boneTex, ivec2(c.add(1), row)),
-        textureLoad(boneTex, ivec2(c.add(2), row)),
-        textureLoad(boneTex, ivec2(c.add(3), row)),
-      );
-    };
-    const m0 = boneColumns(int(skinIndex.x));
-    const m1 = boneColumns(int(skinIndex.y));
-    const m2 = boneColumns(int(skinIndex.z));
-    const m3 = boneColumns(int(skinIndex.w));
-
+    // Standard linear-blend skinning at a given bone-texture ROW (the 4 influencing bones, weighted). Returns the
+    // skinned local POSITION + NORMAL. Called for the TARGET clip row and the frozen FROM-pose row, then mixed.
     const p4 = vec4(positionLocal, 1.0);
-    const skinned = m0
-      .mul(p4)
-      .mul(skinWeight.x)
-      .add(m1.mul(p4).mul(skinWeight.y))
-      .add(m2.mul(p4).mul(skinWeight.z))
-      .add(m3.mul(p4).mul(skinWeight.w));
-    const local = skinned.xyz;
+    const n4 = vec4(normalLocal, 0.0); // w=0 → each bone's 3×3 rotation applies to the normal (no translation)
+    const skinAt = (row: ReturnType<typeof int>) => {
+      const boneColumns = (boneIdx: ReturnType<typeof int>) => {
+        const c = boneIdx.mul(TEXELS_PER_BONE);
+        return mat4(
+          textureLoad(boneTex, ivec2(c, row)),
+          textureLoad(boneTex, ivec2(c.add(1), row)),
+          textureLoad(boneTex, ivec2(c.add(2), row)),
+          textureLoad(boneTex, ivec2(c.add(3), row)),
+        );
+      };
+      const m0 = boneColumns(int(skinIndex.x));
+      const m1 = boneColumns(int(skinIndex.y));
+      const m2 = boneColumns(int(skinIndex.z));
+      const m3 = boneColumns(int(skinIndex.w));
+      const pos = m0
+        .mul(p4)
+        .mul(skinWeight.x)
+        .add(m1.mul(p4).mul(skinWeight.y))
+        .add(m2.mul(p4).mul(skinWeight.z))
+        .add(m3.mul(p4).mul(skinWeight.w)).xyz;
+      const nrm = m0
+        .mul(n4)
+        .xyz.mul(skinWeight.x)
+        .add(m1.mul(n4).xyz.mul(skinWeight.y))
+        .add(m2.mul(n4).xyz.mul(skinWeight.z))
+        .add(m3.mul(n4).xyz.mul(skinWeight.w));
+      return { pos, nrm };
+    };
 
-    // Skin the normal by the same blend, using w=0 so each bone matrix's 3×3 rotation applies (no translation).
-    const n4 = vec4(normalLocal, 0.0);
-    const n = m0
-      .mul(n4)
-      .xyz.mul(skinWeight.x)
-      .add(m1.mul(n4).xyz.mul(skinWeight.y))
-      .add(m2.mul(n4).xyz.mul(skinWeight.z))
-      .add(m3.mul(n4).xyz.mul(skinWeight.w));
+    // T132 STATE CROSSFADE: skin the target clip + the frozen from-pose, then lerp by the target weight (w=1 →
+    // fully target, so a non-transitioning member pays only the lerp, visually unchanged). Killing the pose POP
+    // when a member switches idle↔walk↔run↔attack. mix(b, a, w) = b + (a−b)·w.
+    const w = blend.y;
+    const a = skinAt(int(anim.x));
+    const b = skinAt(int(blend.x));
+    const local = b.pos.add(a.pos.sub(b.pos).mul(w));
+    const n = b.nrm.add(a.nrm.sub(b.nrm).mul(w));
 
     // Instance transform — SAME facing convention as the box/limb crowd: yaw maps the rig's local +Z forward to
     // the SoA heading, i.e. facing = heading - 90° (atan2(dirZ,dirX)); uniform per-instance scale; translate to pose.
@@ -343,16 +368,15 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
   material.opacityNode = attribute<'vec4'>('iAnim', 'vec4').z;
   track(material as unknown as Disposable, 'material', `crowd.rigged.${key}.mat`);
 
-  // Per-instance attributes (instanced vertex buffers): pose + anim. Within the WebGPU 8-vertex-buffer budget
-  // (position+normal+uv+skinIndex+skinWeight + iPose+iAnim = 7).
-  const poseArr = new Float32Array(budget * 4);
-  const animArr = new Float32Array(budget * 4);
-  const poseAttr = new InstancedBufferAttribute(poseArr, 4);
-  const animAttr = new InstancedBufferAttribute(animArr, 4);
-  poseAttr.setUsage(DynamicDrawUsage);
-  animAttr.setUsage(DynamicDrawUsage);
-  geometry.setAttribute('iPose', poseAttr);
-  geometry.setAttribute('iAnim', animAttr);
+  // T133 — all per-instance data INTERLEAVED into ONE instanced vertex buffer (1 slot, 3 attributes): the mesh
+  // already uses 5 vertex buffers (position+normal+uv+skinIndex+skinWeight), so this lands at 6/8 with headroom.
+  // (Storage buffers are not vertex-stage bindable on three r184, so per-instance data has to be attributes.)
+  const instArr = new Float32Array(budget * FLOATS_PER_INSTANCE);
+  const instBuf = new InstancedInterleavedBuffer(instArr, FLOATS_PER_INSTANCE);
+  instBuf.setUsage(DynamicDrawUsage);
+  geometry.setAttribute('iPose', new InterleavedBufferAttribute(instBuf, 4, INST_POSE));
+  geometry.setAttribute('iAnim', new InterleavedBufferAttribute(instBuf, 4, INST_ANIM));
+  geometry.setAttribute('iBlend', new InterleavedBufferAttribute(instBuf, 4, INST_BLEND));
 
   const inst = new InstancedMesh(geometry, material, budget);
   inst.count = 0;
@@ -374,10 +398,8 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
     mesh: inst,
     table,
     strideByName,
-    poseArr,
-    animArr,
-    poseAttr,
-    animAttr,
+    instArr,
+    instBuf,
     live: 0,
     ...corpseSlot,
   };
@@ -389,13 +411,10 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
  * (position/normal/uv/skinIndex/skinWeight) but carries its OWN per-corpse instance attributes — so the corpse
  * pool draws independently of the live crowd (no double-draw). The skinning math mirrors the live `positionNode`
  * but, after the facing yaw, applies the per-instance impact TOPPLE (Rodrigues about a horizontal axis through the
- * feet) — front shot tips onto the back, side topples sideways. Within the WebGPU 8-vertex-buffer budget
- * (position+normal+uv+skinIndex+skinWeight + iPose+iCorpse = 7). Every GPU resource is registry-tracked (V24).
+ * feet) — front shot tips onto the back, side topples sideways. Per-corpse data is INTERLEAVED into one instanced
+ * buffer (T133), so this is 6/8 vertex-buffer slots (5 mesh + 1 instance). Every GPU resource is registry-tracked (V24).
  */
-type CorpseLayer = Pick<
-  ArchetypeSlot,
-  'corpseMesh' | 'corpsePoseArr' | 'corpseAnimArr' | 'corpsePoseAttr' | 'corpseAnimAttr' | 'corpseLive'
->;
+type CorpseLayer = Pick<ArchetypeSlot, 'corpseMesh' | 'corpseArr' | 'corpseBuf' | 'corpseLive'>;
 
 function buildCorpseLayer(
   key: ArchetypeKey,
@@ -416,14 +435,13 @@ function buildCorpseLayer(
   const geo = liveGeo.clone();
   if (geo.getAttribute('iPose')) geo.deleteAttribute('iPose');
   if (geo.getAttribute('iAnim')) geo.deleteAttribute('iAnim');
-  const poseArr = new Float32Array(cap * 4);
-  const animArr = new Float32Array(cap * 4);
-  const poseAttr = new InstancedBufferAttribute(poseArr, 4);
-  const animAttr = new InstancedBufferAttribute(animArr, 4);
-  poseAttr.setUsage(DynamicDrawUsage);
-  animAttr.setUsage(DynamicDrawUsage);
-  geo.setAttribute('iPose', poseAttr);
-  geo.setAttribute('iCorpse', animAttr);
+  if (geo.getAttribute('iBlend')) geo.deleteAttribute('iBlend'); // T132 live-only attr — corpse pose is static
+  // T133 — interleave the corpse's pose + topple into ONE instanced buffer (iPose@0, iCorpse@4): 1 slot, 2 attrs.
+  const corpseArr = new Float32Array(cap * FLOATS_PER_CORPSE_INSTANCE);
+  const corpseBuf = new InstancedInterleavedBuffer(corpseArr, FLOATS_PER_CORPSE_INSTANCE);
+  corpseBuf.setUsage(DynamicDrawUsage);
+  geo.setAttribute('iPose', new InterleavedBufferAttribute(corpseBuf, 4, CORPSE_INST_POSE));
+  geo.setAttribute('iCorpse', new InterleavedBufferAttribute(corpseBuf, 4, CORPSE_INST_ANIM));
   track(geo as unknown as Disposable, 'geometry', `corpse.rigged.${key}.geo`);
 
   const material = new MeshStandardNodeMaterial({ name: `corpse.rigged.${key}` });
@@ -529,10 +547,8 @@ function buildCorpseLayer(
 
   return {
     corpseMesh: mesh,
-    corpsePoseArr: poseArr,
-    corpseAnimArr: animArr,
-    corpsePoseAttr: poseAttr,
-    corpseAnimAttr: animAttr,
+    corpseArr,
+    corpseBuf,
     corpseLive: 0,
   };
 }
@@ -557,6 +573,13 @@ export class RiggedCrowd {
   private corpseCapacity = 0;
   /** Per-SLOT normalized clip phase (stable identity, seeded so figures are not in lockstep). Lazily sized to SoA count. */
   private slotPhase: Float32Array | null = null;
+  /** T132 state-crossfade per-SLOT bookkeeping (lazily sized with slotPhase). `slotClipId` is the current clip's
+   *  unique startRow (−1 = never drawn); a CHANGE snapshots `slotLastRow` as the frozen FROM-pose and resets
+   *  `slotBlend` to 0; `slotBlend` eases 0→1 (target weight). A freshly-seen member starts at blend 1 (no fade). */
+  private slotClipId: Int32Array | null = null;
+  private slotBlend: Float32Array | null = null;
+  private slotFromRow: Float32Array | null = null;
+  private slotLastRow: Float32Array | null = null;
 
   constructor(settings: CrowdSettings, private readonly parent: Object3D) {
     this.settings = settings;
@@ -616,22 +639,23 @@ export class RiggedCrowd {
       const seed = variationSeed((c.entity >>> 0) ^ CORPSE_SEED_SALT, this.variationCount);
       const scale = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
       const i = slot.corpseLive;
-      const p = i * 4;
-      slot.corpsePoseArr[p] = c.x;
-      slot.corpsePoseArr[p + 1] = c.y;
-      slot.corpsePoseArr[p + 2] = c.z;
-      slot.corpsePoseArr[p + 3] = c.heading;
-      slot.corpseAnimArr[p] = scale;
-      slot.corpseAnimArr[p + 1] = t.pitch;
-      slot.corpseAnimArr[p + 2] = t.fallYaw;
-      slot.corpseAnimArr[p + 3] = seed;
+      const b = i * FLOATS_PER_CORPSE_INSTANCE;
+      const pp = b + CORPSE_INST_POSE;
+      const pa = b + CORPSE_INST_ANIM;
+      slot.corpseArr[pp] = c.x;
+      slot.corpseArr[pp + 1] = c.y;
+      slot.corpseArr[pp + 2] = c.z;
+      slot.corpseArr[pp + 3] = c.heading;
+      slot.corpseArr[pa] = scale;
+      slot.corpseArr[pa + 1] = t.pitch;
+      slot.corpseArr[pa + 2] = t.fallYaw;
+      slot.corpseArr[pa + 3] = seed;
       slot.corpseLive++;
     }
 
     let total = 0;
     for (const slot of this.slots.values()) {
-      slot.corpsePoseAttr.needsUpdate = true;
-      slot.corpseAnimAttr.needsUpdate = true;
+      slot.corpseBuf.needsUpdate = true;
       slot.corpseMesh.count = slot.corpseLive;
       total += slot.corpseLive;
     }
@@ -653,8 +677,29 @@ export class RiggedCrowd {
       for (let s = 0; s < count; s++) next[s] = variationSeed(s, denom) / denom;
       if (this.slotPhase) next.set(this.slotPhase.subarray(0, Math.min(this.slotPhase.length, count)));
       this.slotPhase = next;
+      // T132 — grow the crossfade bookkeeping in lockstep. New slots start "never drawn" (clipId −1, blend 1) so a
+      // first appearance shows its clip directly (no fade from a garbage pose); existing slots keep their state.
+      const clipId = new Int32Array(count).fill(-1);
+      const blendW = new Float32Array(count).fill(1);
+      const fromRow = new Float32Array(count);
+      const lastRow = new Float32Array(count);
+      if (this.slotClipId) {
+        const keep = Math.min(this.slotClipId.length, count);
+        clipId.set(this.slotClipId.subarray(0, keep));
+        blendW.set(this.slotBlend!.subarray(0, keep));
+        fromRow.set(this.slotFromRow!.subarray(0, keep));
+        lastRow.set(this.slotLastRow!.subarray(0, keep));
+      }
+      this.slotClipId = clipId;
+      this.slotBlend = blendW;
+      this.slotFromRow = fromRow;
+      this.slotLastRow = lastRow;
     }
     const slotPhase = this.slotPhase;
+    const slotClipId = this.slotClipId!;
+    const slotBlend = this.slotBlend!;
+    const slotFromRow = this.slotFromRow!;
+    const slotLastRow = this.slotLastRow!;
 
     for (const slot of this.slots.values()) slot.live = 0;
 
@@ -705,25 +750,44 @@ export class RiggedCrowd {
       const jitter = 1 + (variationHash01(s, CADENCE_SALT) - 0.5) * 2 * CADENCE_JITTER_SPREAD;
       const ph = advancePhase(slotPhase[s]!, rate * jitter, dtSeconds);
       slotPhase[s] = ph;
+      const targetRow = phaseToFrameRow(entry, ph);
+
+      // T132 state crossfade: on a clip CHANGE, freeze the last drawn frame as the FROM-pose + restart the blend;
+      // ease the target weight 0→1 over STATE_BLEND_SECONDS so the body morphs between poses instead of popping.
+      const clipId = entry.startRow; // unique per clip within this archetype (the slot's archetype is fixed)
+      if (slotClipId[s]! >= 0 && slotClipId[s]! !== clipId) {
+        slotFromRow[s] = slotLastRow[s]!;
+        slotBlend[s] = 0;
+      }
+      slotClipId[s] = clipId;
+      const w = Math.min(1, slotBlend[s]! + dtSeconds / STATE_BLEND_SECONDS);
+      slotBlend[s] = w;
+      slotLastRow[s] = targetRow;
 
       const seed = variationSeed(s, this.variationCount);
       const i = slot.live;
-      const p = i * 4;
-      slot.poseArr[p] = position[s * 3]!;
-      slot.poseArr[p + 1] = position[s * 3 + 1]!;
-      slot.poseArr[p + 2] = position[s * 3 + 2]!;
-      slot.poseArr[p + 3] = heading[s]!;
-      slot.animArr[p] = phaseToFrameRow(entry, ph);
-      slot.animArr[p + 1] = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
-      slot.animArr[p + 2] = fade;
-      slot.animArr[p + 3] = seed;
+      const b = i * FLOATS_PER_INSTANCE;
+      const pp = b + INST_POSE;
+      const pa = b + INST_ANIM;
+      const pb = b + INST_BLEND;
+      slot.instArr[pp] = position[s * 3]!;
+      slot.instArr[pp + 1] = position[s * 3 + 1]!;
+      slot.instArr[pp + 2] = position[s * 3 + 2]!;
+      slot.instArr[pp + 3] = heading[s]!;
+      slot.instArr[pa] = targetRow;
+      slot.instArr[pa + 1] = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
+      slot.instArr[pa + 2] = fade;
+      slot.instArr[pa + 3] = seed;
+      slot.instArr[pb] = slotFromRow[s]!; // from-pose frame row
+      slot.instArr[pb + 1] = w; // target weight (1 = fully on the new clip)
+      slot.instArr[pb + 2] = 0; // spare — future per-instance effect channel (damage flash / wetness)
+      slot.instArr[pb + 3] = 0;
       slot.live++;
     }
 
     let total = 0;
     for (const slot of this.slots.values()) {
-      slot.poseAttr.needsUpdate = true;
-      slot.animAttr.needsUpdate = true;
+      slot.instBuf.needsUpdate = true;
       slot.mesh.count = slot.live;
       total += slot.live;
     }

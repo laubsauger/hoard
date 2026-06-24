@@ -19,7 +19,9 @@ import {
   isLocomotionState,
   locomotionRateHz,
   MAX_GAIT_RATE_HZ,
-  GAIT_CYCLES_PER_METER,
+  MIN_GAIT_RATE_FRACTION,
+  MAX_GAIT_RATE_FRACTION,
+  STOP_RAMP_SPEED,
   type ClipStateMap,
 } from './riggedAnim';
 
@@ -138,21 +140,31 @@ describe('isLocomotionState', () => {
 });
 
 describe('locomotionRateHz', () => {
-  const natural = 2; // a fast natural clip rate to prove locomotion overrides it
-  it('non-locomotion / near-stopped plays at the natural clip rate (idle still animates)', () => {
+  const natural = 2; // a natural clip rate to band the speed-coupled cadence around
+  it('non-locomotion states play at the natural clip rate (idle/attack/stagger animate normally)', () => {
     expect(locomotionRateHz(false, 5, 1.5, natural)).toBe(natural);
-    expect(locomotionRateHz(true, 0, 1.5, natural)).toBe(natural); // stopped
+    expect(locomotionRateHz(false, 0, 1.5, natural)).toBe(natural);
   });
-  it('a moving locomotion clip WITH a baked stride paces cadence to speed / stride (foot match)', () => {
-    expect(locomotionRateHz(true, 3, 1.5, natural)).toBeCloseTo(2); // 3 m/s over a 1.5 m stride → 2 cycles/s
-    // a SLOW mover on a stride clip cadences slowly (fixes the "run anim too fast for the movement" report)
-    expect(locomotionRateHz(true, 0.6, 1.5, 5)).toBeCloseTo(0.4);
+  it('a STUCK locomotion member (wedged in a horde, speed≈0) ramps the gait toward frozen, NOT the natural rate', () => {
+    expect(locomotionRateHz(true, 0, 1.5, natural)).toBe(0); // fully stopped → no sprint-in-place
+    // half the ramp speed → roughly half the floored gait (eases in, no snap between frozen and full)
+    const lo = natural * MIN_GAIT_RATE_FRACTION;
+    expect(locomotionRateHz(true, STOP_RAMP_SPEED / 2, 1.5, natural)).toBeCloseTo(lo * 0.5);
   });
-  it('an in-place clip (tiny stride) falls back to the nominal cycles-per-metre pace', () => {
-    expect(locomotionRateHz(true, 2, 0.05, natural)).toBeCloseTo(2 * GAIT_CYCLES_PER_METER);
+  it('a moving locomotion clip foot-matches speed / stride, banded around the natural rate', () => {
+    // 3 m/s over a 1.5 m stride → 2 cycles/s, inside the band [1.6, 3.4] → unchanged
+    expect(locomotionRateHz(true, 3, 1.5, natural)).toBeCloseTo(2);
   });
-  it('clamps a very fast mover to MAX_GAIT_RATE_HZ', () => {
-    expect(locomotionRateHz(true, 100, 1.5, natural)).toBe(MAX_GAIT_RATE_HZ);
+  it('floors a SLOW mover on a fast clip at MIN_GAIT_RATE_FRACTION·natural (kills the slow-mo run)', () => {
+    // speed 0.6 / stride 1.5 = 0.4 cycles/s would be slow-mo vs a natural-5 clip → floored to 0.8·5 = 4
+    expect(locomotionRateHz(true, 0.6, 1.5, 5)).toBeCloseTo(5 * MIN_GAIT_RATE_FRACTION);
+  });
+  it('an in-place clip (tiny stride) also respects the natural-rate floor', () => {
+    // 2·0.55 = 1.1 would dip below the floor 1.6 → floored
+    expect(locomotionRateHz(true, 2, 0.05, natural)).toBeCloseTo(natural * MIN_GAIT_RATE_FRACTION);
+  });
+  it('clamps a very fast mover to the natural-rate ceiling (capped by MAX_GAIT_RATE_HZ)', () => {
+    expect(locomotionRateHz(true, 100, 1.5, natural)).toBeCloseTo(Math.min(natural * MAX_GAIT_RATE_FRACTION, MAX_GAIT_RATE_HZ));
   });
 });
 
