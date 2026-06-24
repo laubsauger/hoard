@@ -103,14 +103,24 @@ function roomLayouts(placed: PlacedHouse): RoomLayout[] {
  * loot container source (for the loot pass). Windows on exterior edges are honoured by furnishRoom (a tall piece
  * won't back onto a window); door cells are kept clear; the placer guarantees a walkable path in every room.
  */
-export function furnishHouse(placed: PlacedHouse, houseIndex: number, seed: number): PlacedFurniture[] {
+export function furnishHouse(
+  placed: PlacedHouse,
+  houseIndex: number,
+  seed: number,
+  reservedCells: readonly Cell[] = [],
+): PlacedFurniture[] {
   const out: PlacedFurniture[] = [];
   for (const room of roomLayouts(placed)) {
+    // Reserved cells inside this room (e.g. the sheltered player spawn) are treated like door cells — never
+    // furnished and kept walkable — so the player never spawns standing inside a solid piece (V42 collision).
+    const reservedHere = reservedCells.filter(
+      (c) => c.cx >= room.bounds.minCx && c.cx <= room.bounds.maxCx && c.cy >= room.bounds.minCy && c.cy <= room.bounds.maxCy,
+    );
     const pieces = furnishRoom({
       type: room.type,
       bounds: room.bounds,
       seed,
-      doorCells: room.doorCells,
+      doorCells: [...room.doorCells, ...reservedHere],
       windows: room.windows,
       exteriorEdges: room.exteriorEdges,
     });

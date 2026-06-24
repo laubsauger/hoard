@@ -377,17 +377,22 @@ const RANCH_3BED: HouseTemplate = {
 
 /**
  * 3) BUNGALOW-2BED — compact, deeper-than-wide bungalow, 5x6 cells (~10 m x 12 m), for street variety. Public
- * front (living + open kitchen/dining), private back (2 beds flanking a short hall + bathroom).
+ * front (living + open kitchen/dining), private back (2 bedrooms + a bathroom off bedroom 1).
  *
  *   cx:  0    1    2    3    4
  *   cy0  liv  liv  liv  liv  liv
  *   cy1  liv  liv  liv  liv  liv
  *   cy2  liv  liv  liv  liv  liv
- *   cy3  bed1 bed1 H    bed2 bed2
- *   cy4  bed1 bed1 H    bed2 bed2
- *   cy5  bed1 bed1 bth  bed2 bed2
+ *   cy3  bed1 bed1 bed1 bed2 bed2
+ *   cy4  bed1 bed1 bed1 bed2 bed2
+ *   cy5  bath bath bath bed2 bed2
  *
- * House polish #2 — the living + kitchen merge into ONE open-plan great room across the front; 5 rooms total.
+ * House polish #2/#4 — the OLD layout wedged a 1-cell-wide HALL + a 1-cell BATHROOM down the centre column, so
+ * the cutaway showed two interior partitions one cell apart (a redundant double-wall slot — every segment legal,
+ * but the corridor read as a spurious extra wall down the middle). Reworked so both bedrooms open straight off
+ * the open-plan great room and the bathroom is a full 3-cell room across the back behind bedroom 1: the rooms
+ * now share ONE party wall on the cx2|cx3 seam instead of flanking a 1-cell corridor — the redundant central
+ * partition is gone, no 1-cell rooms remain. 4 rooms total; still tiles 5x6 exactly + every room reachable.
  */
 const BUNGALOW_2BED: HouseTemplate = {
   id: 'bungalow-2bed',
@@ -399,27 +404,25 @@ const BUNGALOW_2BED: HouseTemplate = {
       storey: 0,
       rooms: [
         r('living', 0, 0, 4, 2), // 0 open-plan living / kitchen across the front
-        r('bedroom', 0, 3, 1, 5), // 1 bedroom 1
-        r('bedroom', 3, 3, 4, 5), // 2 bedroom 2
-        r('hall', 2, 3, 2, 4), // 3 hall
-        r('bathroom', 2, 5, 2, 5), // 4 bathroom
+        r('bedroom', 0, 3, 2, 4), // 1 bedroom 1 (left back, over the bathroom)
+        r('bathroom', 0, 5, 2, 5), // 2 bathroom across the back-left, off bedroom 1
+        r('bedroom', 3, 3, 4, 5), // 3 bedroom 2 (right back, full depth)
       ],
       doors: [
         { fromRoom: 0, toRoom: null, edge: 'n', atCell: { cx: 1, cy: 0 } }, // front door (living)
-        { fromRoom: 0, toRoom: 3, edge: 's', atCell: { cx: 2, cy: 2 } }, // living -> hall
-        { fromRoom: 3, toRoom: 1, edge: 'w', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 1
-        { fromRoom: 3, toRoom: 2, edge: 'e', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 2
-        { fromRoom: 3, toRoom: 4, edge: 's', atCell: { cx: 2, cy: 4 } }, // hall -> bathroom
+        { fromRoom: 0, toRoom: 1, edge: 's', atCell: { cx: 1, cy: 2 } }, // living -> bedroom 1
+        { fromRoom: 0, toRoom: 3, edge: 's', atCell: { cx: 3, cy: 2 } }, // living -> bedroom 2
+        { fromRoom: 1, toRoom: 2, edge: 's', atCell: { cx: 1, cy: 4 } }, // bedroom 1 -> bathroom
       ],
       windows: [
         { room: 0, edge: 'n', atCell: { cx: 0, cy: 0 } },
         { room: 0, edge: 'w', atCell: { cx: 0, cy: 1 } },
         { room: 0, edge: 'n', atCell: { cx: 4, cy: 0 } },
         { room: 0, edge: 'e', atCell: { cx: 4, cy: 1 } },
-        { room: 1, edge: 'w', atCell: { cx: 0, cy: 4 } },
-        { room: 1, edge: 's', atCell: { cx: 0, cy: 5 } },
-        { room: 2, edge: 'e', atCell: { cx: 4, cy: 4 } },
-        { room: 2, edge: 's', atCell: { cx: 4, cy: 5 } },
+        { room: 1, edge: 'w', atCell: { cx: 0, cy: 3 } },
+        { room: 2, edge: 's', atCell: { cx: 1, cy: 5 } },
+        { room: 3, edge: 'e', atCell: { cx: 4, cy: 4 } },
+        { room: 3, edge: 's', atCell: { cx: 3, cy: 5 } },
       ],
       stairsCell: null,
     },

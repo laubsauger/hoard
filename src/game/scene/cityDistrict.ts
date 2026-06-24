@@ -190,12 +190,23 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const houseIndex = b.houses.length;
   b.houses.push(placed);
 
+  // The player's house reserves its sheltered SPAWN cell BEFORE furnishing so no furniture (esp. a SOLID piece)
+  // lands on it — otherwise the player could spawn standing inside a bathtub/bed (V42 collision would trap them).
+  const front = placed.doors.find((dr) => dr.front);
+  const isPlayerHouse = i === PLAYER_COL && j === PLAYER_ROW;
+  const reserved: CellXY[] = [];
+  if (isPlayerHouse && front) {
+    const spawn = shelteredPlayerCell(originCx, originCy, w, d, front.dir);
+    reserved.push(spawn);
+    b.playerCell = spawn;
+  }
+
   // --- furniture (P1b): furnish every room of this house, in WORLD cells, off a deterministic per-house seed
   // (the placer mixes in each room's type + bounds, so one seed varies layouts per room — V26). SOLID pieces are
   // marked blocked in the nav grid below (after stamping), exactly like prop solidity; the renderer + loot pass
   // read the same list off the scene contract.
   const houseSeed = (Math.imul(originCx + 1, 0x27d4eb2f) ^ Math.imul(originCy + 1, 0x165667b1)) | 0;
-  for (const piece of furnishHouse(placed, houseIndex, houseSeed)) b.furniture.push(piece);
+  for (const piece of furnishHouse(placed, houseIndex, houseSeed, reserved)) b.furniture.push(piece);
 
   // --- exterior walls as THIN edge-walls: for every perimeter room-cell OUTER face (a footprint-boundary face,
   // i.e. the neighbour one step out is OUTSIDE the room map), wall the shared edge against the open street. Both
@@ -225,16 +236,12 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   // --- front door: an exterior EDGE-door on the door's room cell. The player's house starts SHELTERED (its door
   // edge left WALLED → closed) so the beelining horde mills at the wall; every other house's door edge is CLEARED
   // (open). exitCells carries the INNER room cell + edgeDir so the runtime builds an edge-door. Only the FRONT
-  // door is an exit cell (count == buildings, T80).
-  const front = placed.doors.find((dr) => dr.front);
-  const isPlayerHouse = i === PLAYER_COL && j === PLAYER_ROW;
+  // door is an exit cell (count == buildings, T80). The sheltered playerCell was reserved + set above (before
+  // furnishing) so no furniture lands on it.
   if (front) {
     const outer = ringCellFor(front.cx, front.cy, front.dir);
     if (!isPlayerHouse) b.navGrid.setWallBetween(front.cx, front.cy, outer.cx, outer.cy, false);
     b.exitCells.push({ cx: front.cx, cy: front.cy, edgeDir: front.dir });
-    // the player starts DEEP in the house — the interior cell farthest from the (closed) front door — so the
-    // start is genuinely sheltered and the lootable corner lands clear of the door.
-    if (isPlayerHouse) b.playerCell = shelteredPlayerCell(originCx, originCy, w, d, front.dir);
   }
 
   // --- windows: each placed window is an exterior EDGE-window. Its edge stays a wall (V26 sealed); occlusion +

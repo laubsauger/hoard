@@ -127,4 +127,18 @@ describe('furniture in the district (nav)', () => {
     const grid = block.navGrid;
     expect(grid.isBlocked(grid.index(block.playerCell.cx, block.playerCell.cy))).toBe(false);
   });
+
+  it('never furnishes the sheltered spawn cell (reserved before furnishing — no piece lands on it)', () => {
+    // The spawn can fall in a furnished room (e.g. a bathroom whose toilet/bathtub are SOLID). The reserve pass
+    // must keep that exact cell clear of ANY piece, so the player never spawns standing inside furniture.
+    const { block } = buildCityDistrict();
+    const spawn = block.playerCell;
+    for (const p of block.placedFurniture ?? []) {
+      for (let dy = 0; dy < p.footprint.d; dy++) {
+        for (let dx = 0; dx < p.footprint.w; dx++) {
+          expect(p.cx + dx === spawn.cx && p.cy + dy === spawn.cy).toBe(false);
+        }
+      }
+    }
+  });
 });
