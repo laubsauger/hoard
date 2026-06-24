@@ -71,6 +71,8 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
   // Play the RELOAD sample on the rising edge of the weapon's reloading state — covers BOTH a manual reload (R)
   // AND an automatic reload (the mag emptied), with no per-call-site wiring.
   let lastReloading = false;
+  // Play one final death grunt on the transition into death.
+  let playerWasDead = false;
   const moveSpeedKeys = (): { x: number; z: number } => {
     const yaw = camera.state.yawDeg * DEG2RAD;
     const fwdX = -Math.sin(yaw);
@@ -268,6 +270,10 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     const reloading = runtime.ammoStatus().reloading;
     if (reloading && !lastReloading) gameAudio.reload();
     lastReloading = reloading;
+    // One death grunt on the alive→dead transition.
+    const dead = runtime.isPlayerDead();
+    if (dead && !playerWasDead) gameAudio.grunt();
+    playerWasDead = dead;
     // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
     host.setToneMapping(scene.toneMappingMode, scene.currentExposure);
     // Assemble per-instance crowd transforms + advance animation phase on the GPU (V2) before the
