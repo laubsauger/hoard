@@ -9,6 +9,7 @@
 
 import { useEffect, useRef } from 'react';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { assetUrl } from '../assetUrl';
 import {
   RendererHost,
   detectQualityTier,
@@ -140,13 +141,13 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // in when it resolves (cancellation-guarded). Every GLB GPU resource is tracked in the host registry for
       // disposal (V24). A failed load is reported (not silently swallowed) and leaves the avatar root empty.
       void new GLTFLoader()
-        .loadAsync('/meshes/ranger.glb')
+        .loadAsync(assetUrl('meshes/ranger.glb'))
         .then((gltf) => {
           if (cancelled || !scene) return;
           scene.attachPlayerAvatar(gltf);
         })
         .catch((err) => {
-          console.error('[player] failed to load /meshes/ranger.glb — avatar will not render', err);
+          console.error('[player] failed to load meshes/ranger.glb — avatar will not render', err);
         });
 
       // T128: load the three RIGGED zombie archetype GLBs in the BACKGROUND, in parallel, then bake each into a
@@ -155,9 +156,9 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // load is cancellation-guarded; a failure is logged (the limbed fallback keeps drawing). GPU resources are
       // tracked for disposal (V24).
       for (const [key, url] of [
-        ['standard', '/meshes/zombie-standard.glb'],
-        ['runner', '/meshes/zombie-runner.glb'],
-        ['bloated', '/meshes/zombie-bloated.glb'],
+        ['standard', assetUrl('meshes/zombie-standard.glb')],
+        ['runner', assetUrl('meshes/zombie-runner.glb')],
+        ['bloated', assetUrl('meshes/zombie-bloated.glb')],
       ] as const) {
         void new GLTFLoader()
           .loadAsync(url)

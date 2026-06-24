@@ -15,6 +15,10 @@ const crossOriginIsolation = {
 };
 
 export default defineConfig({
+  // Deployed as a GitHub Pages PROJECT site at https://laubsauger.github.io/hoard/ — assets must resolve under
+  // the `/hoard/` sub-path. `BASE_URL` becomes `/hoard/` in the build (`/` in dev), which assetUrl() prefixes
+  // onto runtime asset paths. Override at build time with VITE_BASE for a different host (e.g. a custom domain).
+  base: process.env.VITE_BASE ?? '/hoard/',
   plugins: [react(), crossOriginIsolation],
   resolve: {
     alias: {
