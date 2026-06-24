@@ -292,6 +292,8 @@ export class BlockScene {
       visibility: this.visibility,
       cutawayDepth: this.cutawayDepth,
       wallPanelThickness: this.wallPanelThickness,
+      houseWindowStride: this.world.houseWindowStride,
+      windowBoardedFraction: this.windowBoardedFraction,
       clapboardSpacing: this.clapboardSpacing,
       roofOverhang: this.roofOverhang,
       chimneyMeters: this.chimneyMeters,
@@ -313,6 +315,7 @@ export class BlockScene {
       doorLeafWidthFraction: this.structures.doorLeafWidthFraction,
       doorOpenSwingRadians: this.structures.doorOpenSwingRadians,
       maxBoardsPerWindow: this.structures.maxBoardsPerWindow,
+      wallPanelThickness: this.wallPanelThickness,
     });
     this.doorLeaves.push(...openings.doorLeaves);
     this.windowMeshes.push(...openings.windowMeshes);

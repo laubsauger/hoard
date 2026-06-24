@@ -9,6 +9,12 @@ import { buildingsOf, doorAxis, windowPlacements } from '../../../game/scene';
 import type { BuildContext } from './buildContext';
 import type { DoorLeaf, OpeningHandles, WindowMesh } from './handles';
 import type { HouseStyleResolver } from './houseStyle';
+import {
+  wallShellThicknessMeters,
+  windowOpeningHeightMeters,
+  windowOpeningSpanMeters,
+  windowSillHeights,
+} from './windowGeometry';
 
 export interface OpeningConfig {
   readonly buildingWallHeightMeters: number;
@@ -21,6 +27,8 @@ export interface OpeningConfig {
   readonly doorLeafWidthFraction: number;
   readonly doorOpenSwingRadians: number;
   readonly maxBoardsPerWindow: number;
+  /** Wall panel thickness — the pane/void span the FULL wall depth so the window reads from both sides. */
+  readonly wallPanelThickness: number;
 }
 
 export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolver, cfg: OpeningConfig): OpeningHandles {
@@ -48,13 +56,20 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   const winFrameMat = res.mat('window.frame', { color: 0xcfc7b4, roughness: 0.85 });
   const voidMat = res.mat('window.void', { color: 0x0c0d0e, roughness: 1 });
   const boardMat = res.mat('window.board', { color: 0x6b5640, roughness: 0.95 });
-  const winH = cfg.buildingWallHeightMeters * 0.42; // taller, residential-scale (was a small slit)
-  const winSpan = cs * 0.85; // wide picture window filling most of the cell — reads as a real opening to see through
-  // shared window geometries (thickness on local X; the caller rotates for N/S walls).
-  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(0.08, winH, winSpan));
-  const frameGeo = res.geo('window.frame.geo', new BoxGeometry(0.05, winH + 0.16, winSpan + 0.18));
-  const voidGeo = res.geo('window.void.geo', new BoxGeometry(0.04, winH, winSpan));
-  const boardGeo = res.geo('window.board.geo', new BoxGeometry(0.06, winH * 0.26, winSpan + 0.1));
+  const th = wallShellThicknessMeters(cfg.wallPanelThickness, cs); // wall depth the opening is punched through
+  const winH = windowOpeningHeightMeters(cfg.buildingWallHeightMeters); // matches the houseBuilder wall punch
+  const winSpan = windowOpeningSpanMeters(cs); // wide picture window — matches the houseBuilder wall punch
+  // Shared window geometries (thickness on local X; the caller rotates for N/S walls). The pane + void now
+  // span the FULL wall depth `th` and are CENTRED in the opening (not a thin slab on the inside face) so the
+  // window is visible AND see-through from BOTH sides. The frame is a HOLLOW trim ring (rails + stiles) lapped
+  // onto the jamb — a solid slab would re-fill the punched hole and kill the see-through.
+  const frameBorder = 0.08; // trim bar width
+  const frameDepth = th + 0.04; // proud of both wall faces so the trim reads from inside + outside
+  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(th, winH, winSpan));
+  const voidGeo = res.geo('window.void.geo', new BoxGeometry(th, winH, winSpan));
+  const frameRailGeo = res.geo('window.frame.rail.geo', new BoxGeometry(frameDepth, frameBorder, winSpan + frameBorder * 2)); // top/bottom
+  const frameStileGeo = res.geo('window.frame.stile.geo', new BoxGeometry(frameDepth, winH, frameBorder)); // left/right
+  const boardGeo = res.geo('window.board.geo', new BoxGeometry(frameDepth, winH * 0.26, winSpan + 0.1));
 
   // ---- DOORS (T46): the wall panel at a door cell is OMITTED (buildHouses) so a real doorway GAP exists.
   // Here we frame it (posts + lintel), fill the wall ABOVE the header back up to the building height (so a tall
@@ -149,23 +164,29 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   const buildWindowUnit = (navCell: number, wx: number, sillY: number, wz: number, ns: boolean): void => {
     const rotY = ns ? Math.PI / 2 : 0;
     const yc = sillY + winH / 2;
-    const make = (geo: BufferGeometry, mat: MeshStandardMaterial, dx: number, dy: number, rz = 0): Mesh => {
+    // `dx` offsets along the wall NORMAL (depth), `runOff` along the wall RUN (span); the geometry's local Z is
+    // the run, so rotY maps it to world X (N/S walls) or leaves it on world Z (E/W walls). `dy` is vertical.
+    const make = (geo: BufferGeometry, mat: MeshStandardMaterial, dx: number, dy: number, runOff = 0, rz = 0): Mesh => {
       const m = new Mesh(geo, mat);
-      m.position.set(wx + (ns ? 0 : dx), yc + dy, wz + (ns ? dx : 0));
+      m.position.set(wx + (ns ? runOff : dx), yc + dy, wz + (ns ? dx : runOff));
       m.rotation.y = rotY;
       m.rotation.z = rz;
       m.castShadow = true;
       group.add(m);
       return m;
     };
-    make(frameGeo, winFrameMat, -0.01, 0); // painted frame trim — always present
-    const pane = make(paneGeo, glassMat, 0.02, 0);
-    const voidMesh = make(voidGeo, voidMat, 0.0, 0); // dark opening behind the glass / boards
+    // painted frame trim — a hollow ring around the opening (rails top/bottom, stiles left/right), always present.
+    make(frameRailGeo, winFrameMat, 0, winH / 2 + frameBorder / 2);
+    make(frameRailGeo, winFrameMat, 0, -(winH / 2 + frameBorder / 2));
+    make(frameStileGeo, winFrameMat, 0, 0, winSpan / 2 + frameBorder / 2);
+    make(frameStileGeo, winFrameMat, 0, 0, -(winSpan / 2 + frameBorder / 2));
+    const pane = make(paneGeo, glassMat, 0, 0); // glass centred in the opening, full wall depth, see-through
+    const voidMesh = make(voidGeo, voidMat, 0, 0); // dark opening behind the glass / boards (full wall depth)
     // up to maxBoards crossing weathered planks; syncWindows shows them by the live board count.
     const boards: Mesh[] = [];
     for (let bI = 0; bI < maxBoards; bI++) {
       const sign = bI % 2 === 0 ? 1 : -1;
-      boards.push(make(boardGeo, boardMat, 0.03, sign * winH * (0.18 - bI * 0.03), sign * (0.18 - bI * 0.04)));
+      boards.push(make(boardGeo, boardMat, 0, sign * winH * (0.18 - bI * 0.03), 0, sign * (0.18 - bI * 0.04)));
     }
     windowMeshes.push({ navCell, pane, voidMesh, boards });
   };
@@ -177,8 +198,7 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   });
   for (const p of placements) {
     const bWallH = wallH * Math.max(1, p.storeys);
-    const sillH = cfg.buildingWallHeightMeters * 0.45; // ground-floor sill height (consistent)
-    const sills = bWallH > cfg.buildingWallHeightMeters * 1.1 ? [sillH, sillH + cfg.buildingWallHeightMeters] : [sillH];
+    const sills = windowSillHeights(cfg.buildingWallHeightMeters, bWallH); // matches the houseBuilder wall punch
     const navCell = grid.index(p.cx, p.cy);
     for (const sy of sills) buildWindowUnit(navCell, p.x, sy, p.z, p.ns);
   }

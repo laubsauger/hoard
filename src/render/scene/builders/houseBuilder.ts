@@ -23,9 +23,15 @@ import {
   buildingsOf,
   roofHoles,
   hash01,
+  windowPlacements,
   type HouseStyle,
   type CellRect,
 } from '../../../game/scene';
+import {
+  windowOpeningHeightMeters,
+  windowOpeningSpanMeters,
+  windowSillHeights,
+} from './windowGeometry';
 import type { NavGrid } from '../../../game/navigation';
 import {
   resolveCutawayDepthOffset,
@@ -48,6 +54,10 @@ export interface HouseConfig {
   /** Cutaway depth-offset settings (polygon offset / render order for fading upper walls + roofs). */
   readonly cutawayDepth: CutawayDepthSettings;
   readonly wallPanelThickness: number;
+  /** Place a window on every Nth eligible facade cell (world.houseWindowStride) — same source openingsBuilder uses. */
+  readonly houseWindowStride: number;
+  /** Fraction of facade windows that start boarded over (world.houseWindowBoardedFraction). */
+  readonly windowBoardedFraction: number;
   readonly clapboardSpacing: number;
   readonly roofOverhang: number;
   readonly chimneyMeters: number;
@@ -117,6 +127,28 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
   const doorNav = new Set<number>();
   for (const e of ts.exitCells) doorNav.add(grid.index(e.cx, e.cy));
 
+  // T108: a WINDOW cell is a real SEE-THROUGH opening — the wall panel there is PUNCHED (sill + header +
+  // jamb reveals) so a hole the size of the window goes clean through the full wall thickness, and the glass/
+  // void built by openingsBuilder sits IN that hole. Both builders derive the window cells from the SAME
+  // windowPlacements() (identical opts) so the punch and the pane align exactly (V26 — no divergence, no RNG).
+  const storeyH = cfg.world.buildingWallHeightMeters;
+  const winH = windowOpeningHeightMeters(storeyH);
+  const winSpan = windowOpeningSpanMeters(navCellSize);
+  interface WindowCell {
+    readonly ns: boolean; // wall runs along X (faces ±Z) — punch the 'x' run; else punch the 'z' run
+    readonly bands: ReadonlyArray<readonly [number, number]>; // [sillBottom, headerTop] openings (one per storey sill)
+  }
+  const winByNav = new Map<number, WindowCell>();
+  for (const p of windowPlacements(ts, {
+    houseVar: styleResolver.variation,
+    stride: cfg.houseWindowStride,
+    boardedFraction: cfg.windowBoardedFraction,
+  })) {
+    const bWallH = storeyH * Math.max(1, p.storeys);
+    const bands = windowSillHeights(storeyH, bWallH).map((sy) => [sy, sy + winH] as const);
+    winByNav.set(grid.index(p.cx, p.cy), { ns: p.ns, bands });
+  }
+
   // The exposed edges of a blocked cell (neighbor open or out of bounds): where a real wall face lives.
   const edges = (cx: number, cy: number): { dx: number; dz: number; along: 'x' | 'z' }[] => {
     const open = (nx: number, ny: number): boolean =>
@@ -140,7 +172,6 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     const wallH = cfg.world.buildingWallHeightMeters * Math.max(1, style.storeys);
     const baseH = Math.min(baseHeightCap, wallH);
     const upperH = Math.max(0, wallH - baseH);
-    const upperBottomY = baseH + upperOffset.verticalInsetMeters;
 
     const b = bld.bounds;
     const centerX = ((b.minCx + b.maxCx + 1) / 2) * navCellSize;
@@ -180,44 +211,84 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
         if (faces.some((f) => f.along === 'z')) orientations.push('z');
         if (orientations.length === 0) orientations.push('x');
         const sectionObjs: Object3D[] = [];
+        const win = winByNav.get(idx);
+        let segIdx = 0; // unique geo key per emitted sub-panel (section path caches geometry by key)
 
-        for (const along of orientations) {
-          if (sc !== undefined) {
-            // Destructible section: individual hideable meshes that stay opaque (do NOT fade with cutaway).
-            const baseGeo = res.geo(`section.base.${bi}.${cx}.${cy}.${along}`, along === 'x'
-              ? new BoxGeometry(navCellSize, baseH, th)
-              : new BoxGeometry(th, baseH, navCellSize));
-            const base = new Mesh(baseGeo, sectionMat);
-            base.position.set(wx, baseH / 2, wz);
-            base.castShadow = true;
-            base.receiveShadow = true;
-            wallsGroup.add(base);
-            sectionObjs.push(base);
-            if (upperH > 0) {
-              const upperGeo = res.geo(`section.upper.${bi}.${cx}.${cy}.${along}`, along === 'x'
-                ? new BoxGeometry(navCellSize, upperH, th)
-                : new BoxGeometry(th, upperH, navCellSize));
-              const upper = new Mesh(upperGeo, sectionMat);
-              upper.position.set(wx, upperBottomY + upperH / 2, wz);
-              upper.castShadow = true;
-              wallsGroup.add(upper);
-              sectionObjs.push(upper);
-            }
-          } else {
-            // Plain wall: accrue into the merged base batch + the directional upper batch for this house.
-            const baseBox = along === 'x'
-              ? new BoxGeometry(navCellSize, baseH, th)
-              : new BoxGeometry(th, baseH, navCellSize);
-            baseBox.translate(wx, baseH / 2, wz);
-            baseParts.push(baseBox);
-            if (upperH > 0) {
-              const upperBox = along === 'x'
-                ? new BoxGeometry(navCellSize, upperH, th)
-                : new BoxGeometry(th, upperH, navCellSize);
-              upperBox.translate(wx, upperBottomY + upperH / 2, wz);
-              upperDir(upperWallOutwardNormal(along, faces, wx, wz, centerX, centerZ)).boxes.push(upperBox);
+        // Emit ONE wall sub-panel of run length `runLen` (centred on the cell, shifted by `runOff` along the
+        // run) spanning vertical [yB, yT]. Clips into the base band [0, baseH] (opaque, retained) and the upper
+        // band [baseH, wallH] (rendered shifted up by the cutaway vertical inset; fades per-side). Section cells
+        // route to individual hideable meshes; plain walls accrue into the merged base + directional upper batch.
+        // Called once with the full [0, wallH] panel for a solid cell, or as sill/header/reveal pieces around a
+        // punched window — the base/upper split is identical either way (a window may straddle baseHeightCap).
+        const emitWallBox = (along: 'x' | 'z', runOff: number, runLen: number, yB: number, yT: number): void => {
+          if (yT - yB <= 1e-4 || runLen <= 1e-4) return;
+          const px = along === 'x' ? wx + runOff : wx;
+          const pz = along === 'x' ? wz : wz + runOff;
+          const mkGeo = (h: number): BoxGeometry =>
+            along === 'x' ? new BoxGeometry(runLen, h, th) : new BoxGeometry(th, h, runLen);
+          // base portion: [yB, yT] ∩ [0, baseH]
+          const bTop = Math.min(yT, baseH);
+          if (yB < bTop) {
+            const h = bTop - yB;
+            const cyB = (yB + bTop) / 2;
+            if (sc !== undefined) {
+              const m = new Mesh(res.geo(`section.base.${bi}.${cx}.${cy}.${along}.${segIdx}`, mkGeo(h)), sectionMat);
+              m.position.set(px, cyB, pz);
+              m.castShadow = true;
+              m.receiveShadow = true;
+              wallsGroup.add(m);
+              sectionObjs.push(m);
+            } else {
+              const box = mkGeo(h);
+              box.translate(px, cyB, pz);
+              baseParts.push(box);
             }
           }
+          // upper portion: [yB, yT] ∩ [baseH, wallH], shifted up by the cutaway vertical inset (V58 reveal lift)
+          if (upperH > 0) {
+            const uB = Math.max(yB, baseH);
+            const uT = Math.min(yT, wallH);
+            if (uB < uT) {
+              const h = uT - uB;
+              const cyU = (uB + uT) / 2 + upperOffset.verticalInsetMeters;
+              if (sc !== undefined) {
+                const m = new Mesh(res.geo(`section.upper.${bi}.${cx}.${cy}.${along}.${segIdx}`, mkGeo(h)), sectionMat);
+                m.position.set(px, cyU, pz);
+                m.castShadow = true;
+                wallsGroup.add(m);
+                sectionObjs.push(m);
+              } else {
+                const box = mkGeo(h);
+                box.translate(px, cyU, pz);
+                upperDir(upperWallOutwardNormal(along, faces, wx, wz, centerX, centerZ)).boxes.push(box);
+              }
+            }
+          }
+          segIdx++;
+        };
+
+        for (const along of orientations) {
+          // T108: punch the window only in the run that carries this cell's facade (ns → X-run, else Z-run).
+          const punch = win !== undefined && ((win.ns && along === 'x') || (!win.ns && along === 'z'));
+          if (!punch) {
+            emitWallBox(along, 0, navCellSize, 0, wallH); // solid full-height panel (unchanged)
+            continue;
+          }
+          // jamb reveals beside the narrower-than-cell opening (full height), then the centre column with a real
+          // hole at each window band — sill below + header above (+ wall between a two-storey pair).
+          const openHalf = winSpan / 2;
+          const revealW = (navCellSize - winSpan) / 2;
+          if (revealW > 1e-4) {
+            emitWallBox(along, -(openHalf + revealW / 2), revealW, 0, wallH);
+            emitWallBox(along, openHalf + revealW / 2, revealW, 0, wallH);
+          }
+          let yCursor = 0;
+          for (const [yb, yt] of [...win.bands].sort((a, b) => a[0] - b[0])) {
+            const holeBottom = Math.max(0, Math.min(yb, wallH));
+            if (holeBottom > yCursor) emitWallBox(along, 0, winSpan, yCursor, holeBottom);
+            yCursor = Math.max(yCursor, Math.min(yt, wallH));
+          }
+          if (yCursor < wallH) emitWallBox(along, 0, winSpan, yCursor, wallH);
         }
         if (sc !== undefined) sectionMeshes.push({ cell: sc, objects: sectionObjs });
       }
@@ -277,8 +348,6 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     const maxX = (b.maxCx + 1) * cs;
     const minZ = b.minCy * cs;
     const maxZ = (b.maxCy + 1) * cs;
-    const rw = maxX - minX;
-    const rd = maxZ - minZ;
     const cxw = (minX + maxX) / 2;
     const czw = (minZ + maxZ) / 2;
     const proud = 0.012; // nearly flush with the wall plane (polygon offset keeps it off the wall, no 4 cm gap)
@@ -311,13 +380,56 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       box.translate(x, y, z);
       arr.push(box);
     };
+    // T108: the cladding must BREAK at each window opening so the punched hole reads clean through the siding
+    // too (not a lap line running across the glass). Gather this building's windows per side (run-axis centre +
+    // vertical bands), derived from the SAME winByNav as the wall punch, so cladding + wall + pane all agree.
+    const half = winSpan / 2;
+    const sideWindowsOf = (cells: Array<readonly [number, number]>, wantNs: boolean): { center: number; bands: ReadonlyArray<readonly [number, number]> }[] => {
+      const out: { center: number; bands: ReadonlyArray<readonly [number, number]> }[] = [];
+      for (const [cxx, cyy] of cells) {
+        const w = winByNav.get(grid.index(cxx, cyy));
+        if (w && w.ns === wantNs) out.push({ center: wantNs ? (cxx + 0.5) * cs : (cyy + 0.5) * cs, bands: w.bands });
+      }
+      return out;
+    };
+    const colCells = (cx0: number): Array<readonly [number, number]> => {
+      const a: Array<readonly [number, number]> = [];
+      for (let cyy = b.minCy; cyy <= b.maxCy; cyy++) a.push([cx0, cyy]);
+      return a;
+    };
+    const rowCells = (cy0: number): Array<readonly [number, number]> => {
+      const a: Array<readonly [number, number]> = [];
+      for (let cxx = b.minCx; cxx <= b.maxCx; cxx++) a.push([cxx, cy0]);
+      return a;
+    };
+    const winsN = sideWindowsOf(rowCells(b.minCy), true);
+    const winsS = sideWindowsOf(rowCells(b.maxCy), true);
+    const winsW = sideWindowsOf(colCells(b.minCx), false);
+    const winsE = sideWindowsOf(colCells(b.maxCx), false);
+    // The remaining run segments of [lo, hi] after removing the window openings active at line band [y±h/2].
+    const segmentsAt = (lo: number, hi: number, wins: { center: number; bands: ReadonlyArray<readonly [number, number]> }[], y: number, h: number): [number, number][] => {
+      const blocked = wins
+        .filter((w) => w.bands.some(([yb, yt]) => yb < y + h / 2 && yt > y - h / 2))
+        .map((w) => [w.center - half, w.center + half] as [number, number])
+        .filter((iv) => iv[1] > lo && iv[0] < hi)
+        .sort((a2, b2) => a2[0] - b2[0]);
+      const out: [number, number][] = [];
+      let cur = lo;
+      for (const [bl, bh] of blocked) {
+        const s = Math.max(bl, lo);
+        if (s > cur) out.push([cur, s]);
+        cur = Math.max(cur, Math.min(bh, hi));
+      }
+      if (cur < hi) out.push([cur, hi]);
+      return out;
+    };
     for (let k = 0; k <= lines; k++) {
       const y = (k / lines) * (wallH - 0.1) + 0.05;
       const h = k === 0 ? 0.18 : k === lines ? 0.12 : lineH; // fat skirt + fascia
-      add(sides[0]!.boxes, rw + proud * 2, h, lineT, cxw, y, minZ - proud);
-      add(sides[1]!.boxes, rw + proud * 2, h, lineT, cxw, y, maxZ + proud);
-      add(sides[2]!.boxes, lineT, h, rd + proud * 2, minX - proud, y, czw);
-      add(sides[3]!.boxes, lineT, h, rd + proud * 2, maxX + proud, y, czw);
+      for (const [s, e] of segmentsAt(minX - proud, maxX + proud, winsN, y, h)) add(sides[0]!.boxes, e - s, h, lineT, (s + e) / 2, y, minZ - proud);
+      for (const [s, e] of segmentsAt(minX - proud, maxX + proud, winsS, y, h)) add(sides[1]!.boxes, e - s, h, lineT, (s + e) / 2, y, maxZ + proud);
+      for (const [s, e] of segmentsAt(minZ - proud, maxZ + proud, winsW, y, h)) add(sides[2]!.boxes, lineT, h, e - s, minX - proud, y, (s + e) / 2);
+      for (const [s, e] of segmentsAt(minZ - proud, maxZ + proud, winsE, y, h)) add(sides[3]!.boxes, lineT, h, e - s, maxX + proud, y, (s + e) / 2);
     }
     for (const s of sides) buildSide(s.key, s.normal, s.centerX, s.centerZ, s.boxes);
     // corner boards (vertical trim) — solid, at the building corners (not part of a single side's fade).
