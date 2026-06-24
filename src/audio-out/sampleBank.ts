@@ -25,7 +25,7 @@ export const SFX_BANKS = {
   footstepWood: ['wood-creak'],
   doorOpen: ['door/door-open'],
   doorClose: ['door/door-close'],
-  windowBreak: ['window-breaking'],
+  windowBreak: ['window/window-'], // 6 separated smash variants (the source clip held several)
   containerOpen: ['cardboard-box-open'],
   knock: ['books-banging'],
   zombie: ['zombie/screams/'], // several moans/screams
