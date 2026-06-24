@@ -121,6 +121,12 @@ function claddingColorNode(
   return base.mul(float(1).sub(seamDark));
 }
 
+/** Interior partition tint: the house wall colour lightened toward plaster white, so room dividers read as
+ *  painted interior walls while still belonging to the house (V59). Pure. */
+function interiorWallColor(wallColorHex: number): number {
+  return new Color(wallColorHex).lerp(new Color(0xffffff), 0.6).getHex();
+}
+
 export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver, cfg: HouseConfig): HouseHandles {
   const { root, res, navCellSize } = ctx;
   const fadeSurfaces: FadeSurface[] = [];
@@ -355,10 +361,15 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
         const bb = upperGeoMerged.boundingBox;
         const sideCenterX = bb ? (bb.min.x + bb.max.x) / 2 : 0;
         const sideCenterZ = bb ? (bb.min.z + bb.max.z) / 2 : 0;
-        fadeSurfaces.push({ object: upperWall, material: upperMat, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, buildingIndex: bi, centerX: sideCenterX, centerZ: sideCenterZ, opacity: 1 });
+        // XZ half-extents of this side's merged shell → the X-RAY BUBBLE measures its radius to the wall's NEAREST
+        // point (V74), so a long wall fades when the player nears either end, not only when near its centre.
+        const sideHalfX = bb ? (bb.max.x - bb.min.x) / 2 : 0;
+        const sideHalfZ = bb ? (bb.max.z - bb.min.z) / 2 : 0;
+        fadeSurfaces.push({ object: upperWall, material: upperMat, kind: 'upperWall', outwardNormal: g.normal, heightMeters: wallH, buildingIndex: bi, centerX: sideCenterX, centerZ: sideCenterZ, halfX: sideHalfX, halfZ: sideHalfZ, opacity: 1 });
       }
     }
 
+    buildInteriorWalls(bi, style, wallH);
     buildRoofAssembly(b, bi, wallH, style, roofOffset);
     buildPorch(b, bi, style);
     collectIvy(b, style, grid, ivyMatrices);
@@ -369,6 +380,44 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
   buildDebris(debrisMatrices, debrisColors);
 
   return { fadeSurfaces, sectionMeshes };
+
+  /**
+   * P0c — INTERIOR PARTITION WALLS from the placed floor-plan (PlacedHouse.wallEdges). The exterior shell +
+   * doors + windows already render from the blocked perimeter ring (the placed house's exterior, 1:1); this
+   * adds the room dividers so the cutaway reveals a MULTI-ROOM interior instead of one open box. Each interior
+   * wallEdge is a solid full-height panel centred on the shared cell face; an edge a DOOR opens is omitted
+   * (the doorway gap). Solid + opaque (NOT a fade surface) so partitions stay readable once the roof fades —
+   * they are the room dividers the player should see. Districts without templates (cityBlock) skip this.
+   */
+  function buildInteriorWalls(bi: number, style: HouseStyle, wallH: number): void {
+    const house = ts.placedHouses?.[bi];
+    if (!house) return;
+    const cs = navCellSize;
+    // doorway gaps: the interior edges a door opens are left out (open passage between rooms).
+    const doorEdgeKeys = new Set<string>();
+    for (const door of house.doors) if (!door.exterior) doorEdgeKeys.add(door.edge.key);
+    const boxes: BoxGeometry[] = [];
+    for (const edge of house.wallEdges) {
+      if (edge.kind !== 'interior') continue; // exterior shell already rendered from the ring
+      if (doorEdgeKeys.has(edge.key)) continue; // doorway gap
+      if (edge.outerCx === null || edge.outerCy === null) continue;
+      // world centre of the shared face = midpoint of the two adjacent cell centres.
+      const cxw = ((edge.innerCx + edge.outerCx + 1) / 2) * cs;
+      const czw = ((edge.innerCy + edge.outerCy + 1) / 2) * cs;
+      // 'z' run (cells differ in cx) → thin in X, full span in Z; 'x' run → thin in Z, full span in X.
+      const box = edge.along === 'z' ? new BoxGeometry(th, wallH, cs) : new BoxGeometry(cs, wallH, th);
+      box.translate(cxw, wallH / 2, czw);
+      boxes.push(box);
+    }
+    const merged = res.mergeBoxes(`wallInterior.geo.${bi}`, boxes);
+    if (!merged) return;
+    // plaster-ish interior divider tint, derived from the house tint so it sits with the building (V59).
+    const mat = res.mat(`wallInterior.${bi}`, { color: interiorWallColor(style.wallColor), roughness: 0.95 });
+    const mesh = new Mesh(merged, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    wallsGroup.add(mesh);
+  }
 
   /** Shaped roof (gable / hip / flat) + chimney + decay holes, grouped so the whole assembly is the building's
    *  cutaway fade surface (V20). A collapsed house sags its roof. */
@@ -428,7 +477,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     group.position.set(cxw, wallH, czw);
     if (style.collapsed) group.rotation.z = (hash01(style.seed, 80) < 0.5 ? 1 : -1) * 0.14; // sagging caved roof
     root.add(group);
-    fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, opacity: 1 });
+    // Half-extents = the roof footprint half-dimensions, so the X-RAY BUBBLE (V74) measures its radius to the
+    // footprint's NEAREST point: a player anywhere INSIDE the footprint has distance 0 and so always reveals its
+    // roof (preserves V20 "see the room you stand in"), regardless of the bubble radius or footprint size.
+    fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, halfX: rw / 2, halfZ: rd / 2, opacity: 1 });
   }
 
   /** A covered front porch at the house's street door: deck + posts + a low shed roof. Always visible (it sits
