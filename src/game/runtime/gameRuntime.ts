@@ -331,8 +331,10 @@ export class GameRuntime {
     this.partition = opts.partition ?? { district: 0, sector: 0 };
     this.rand = mulberry32(opts.scatterSeed ?? 1);
     // T46: doors are the scene's front-door OPENINGS. Initial open/closed is read from the authored nav grid
-    // (a blocked door cell starts closed, an open gap starts open) so sim state matches the geometry.
-    this.doorSystem = new DoorSystem(this.scene.navGrid, this.scene.exitCells);
+    // (a blocked door cell starts closed, an open gap starts open) so sim state matches the geometry. T135: the
+    // interactive INTERIOR doors (a subset of doorways) feed the SAME system — they are not building exits, so the
+    // exit-count invariant is untouched; a closed one (e.g. the captive room) reads 'closed' from its walled edge.
+    this.doorSystem = new DoorSystem(this.scene.navGrid, [...this.scene.exitCells, ...(this.scene.interiorDoors ?? [])]);
     // T108: windows on a deterministic subset of facade cells. Seeded from the SAME placements the renderer
     // dresses (windowPlacements) with the initial glass/board state derived from the house seed — so a window
     // that renders boarded/smashed also simulates that way (V26). Windows govern projectile occlusion + render
@@ -1593,6 +1595,17 @@ export class GameRuntime {
       out.push(this.spawnZombie({ x, y: 0, z }, this.pickSpawnArchetype(i)));
     }
     return out;
+  }
+
+  /** T135: spawn the single CAPTIVE zombie the scene authored — sealed in a back room of the player's house
+   *  behind a CLOSED interior door, so the opening beat is a contained threat the player must open the door to
+   *  face. No-op (returns null) when the scene authored no captive (the rest of the horde is outside). Standard
+   *  archetype (a runner sealed in a room would be a brutal first encounter). */
+  spawnCaptiveZombie(): EntityId | null {
+    const cell = this.scene.captiveZombieCell;
+    if (!cell) return null;
+    const c = this.scene.cellCenter(cell);
+    return this.spawnZombie({ x: c.x, y: 0, z: c.z }, 0);
   }
 
   /**

@@ -163,6 +163,7 @@ describe('generic player↔camera occlusion — wallBetweenPlayerAndCamera (V66)
 
 describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free segment-vs-AABB', () => {
   const radius = settings.xrayRadiusMeters;
+  const roofRadius = settings.roofXrayRadiusMeters;
   const margin = settings.sightlineMarginMeters;
 
   it('resolves a sane positive x-ray radius from config', () => {
@@ -179,6 +180,7 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free
       player,
       camera,
       radiusMeters,
+      roofRadiusMeters: roofRadius, // irrelevant for a wall (outwardNormal non-null), but the field is required
       sightlineMarginMeters: margin,
     });
 
@@ -219,6 +221,7 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free
         player: { x: 0, z: 9 },
         camera: { x: 0, z: 20 },
         radiusMeters: radius,
+        roofRadiusMeters: roofRadius,
         sightlineMarginMeters: margin,
       });
     expect(interior({ x: 0, z: 0 })).toBe(true); // degenerate normal — still fades (between)
@@ -230,20 +233,26 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free
     expect(wall({ x: 30, z: 9 }, { x: 30, z: 20 })).toBe(false);
   });
 
-  it('fades a ROOF from above when the player is under/near its footprint within the radius', () => {
+  it('fades a ROOF only when the player is INSIDE / at the footprint (tight roof radius), NOT from across the street', () => {
     const roof = (player: VecXZ): boolean =>
       surfaceInXrayField({
         outwardNormal: null,
         surfaceCenter: { x: 0, z: 0 },
-        surfaceHalfExtent: { x: 4, z: 4 },
+        surfaceHalfExtent: { x: 4, z: 4 }, // an 8×8 footprint, edge at x=±4
         player,
         camera: { x: 0, z: 30 },
-        radiusMeters: radius,
+        radiusMeters: radius, // wide WALL bubble — must NOT be what gates the roof
+        roofRadiusMeters: roofRadius, // tight roof radius gates it instead
         sightlineMarginMeters: margin,
       });
-    expect(roof({ x: 0, z: 0 })).toBe(true);
-    expect(roof({ x: 3, z: 3 })).toBe(true);
-    expect(roof({ x: 4 + radius + 5, z: 0 })).toBe(false);
+    expect(roof({ x: 0, z: 0 })).toBe(true); // inside the footprint → reveals
+    expect(roof({ x: 3, z: 3 })).toBe(true); // still inside → reveals
+    // Just past the edge but within the tight roof radius (at the threshold) → still reveals.
+    expect(roof({ x: 4 + roofRadius * 0.5, z: 0 })).toBe(true);
+    // Across the street: well outside the tight roof radius but INSIDE the wide wall bubble → must STAY solid
+    // (the bug was the roof dissolving here, baring the whole interior without entering).
+    expect(roof({ x: 4 + roofRadius + 2, z: 0 })).toBe(false);
+    expect(roof({ x: 4 + radius - 1, z: 0 })).toBe(false); // within the WALL radius, but a roof doesn't use it
   });
 
   it('uses the NEAREST point of the footprint: a player inside a LARGE roof footprint still reveals it (V20)', () => {
@@ -252,9 +261,10 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free
         outwardNormal: null,
         surfaceCenter: { x: 0, z: 0 },
         surfaceHalfExtent: { x: 20, z: 20 },
-        player: { x: 18, z: 18 },
+        player: { x: 18, z: 18 }, // inside the footprint → nearest point 0 → reveals regardless of roof radius
         camera: { x: 0, z: 60 },
         radiusMeters: radius,
+        roofRadiusMeters: roofRadius,
         sightlineMarginMeters: margin,
       }),
     ).toBe(true);

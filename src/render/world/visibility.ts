@@ -45,6 +45,9 @@ export interface VisibilitySettings {
    * `surfaceInXrayField`.
    */
   readonly xrayRadiusMeters: number;
+  /** TIGHTER bubble radius (m) for ROOFS — a roof reveals the whole interior, so it fades only when the player
+   *  is essentially inside the footprint, not from across the street. See `surfaceInXrayField`. */
+  readonly roofXrayRadiusMeters: number;
   /** Grazing margin (m) for the normal-free sightline test in `surfaceInXrayField` — a thin wall the player→
    *  camera segment just clips still counts as occluding. */
   readonly sightlineMarginMeters: number;
@@ -59,6 +62,7 @@ export function resolveVisibilitySettings(tier: QualityTier): VisibilitySettings
     minOpacity: resolve(renderingConfig.cutawayMinOpacity, tier),
     occluderLateralSpanMeters: resolve(renderingConfig.cutawayOccluderLateralSpanMeters, tier),
     xrayRadiusMeters: resolve(renderingConfig.cutawayXrayRadiusMeters, tier),
+    roofXrayRadiusMeters: resolve(renderingConfig.cutawayRoofXrayRadiusMeters, tier),
     sightlineMarginMeters: resolve(renderingConfig.cutawaySightlineMarginMeters, tier),
   };
 }
@@ -187,8 +191,12 @@ export interface XrayFieldInput {
   readonly player: VecXZ;
   /** Camera world-XZ. */
   readonly camera: VecXZ;
-  /** X-ray bubble radius (m): the surface's nearest point must be within this of the player to fade. */
+  /** X-ray bubble radius (m) for WALLS: the surface's nearest point must be within this of the player to fade. */
   readonly radiusMeters: number;
+  /** SEPARATE, TIGHTER radius (m) for ROOFS — a roof reveals the WHOLE interior, so it must fade only when the
+   *  player is essentially INSIDE the footprint (at the threshold), NOT from across the street like the wall
+   *  bubble would. Measured to the footprint's nearest AABB point (0 when the player stands inside). */
+  readonly roofRadiusMeters: number;
   /** Grazing margin (m) added to the wall footprint for the sightline test, so a thin wall the player→camera
    *  line just clips still counts as occluding (the "sightline" is really a thin cone around the body). */
   readonly sightlineMarginMeters: number;
@@ -247,9 +255,13 @@ export function surfaceInXrayField(input: XrayFieldInput): boolean {
   const dz = Math.abs(input.player.z - input.surfaceCenter.z) - ez;
   const nx = dx > 0 ? dx : 0;
   const nz = dz > 0 ? dz : 0;
-  if (nx * nx + nz * nz > input.radiusMeters * input.radiusMeters) return false;
+  // ROOFS use a TIGHTER radius (reveal only when the player is essentially inside the footprint) so they don't
+  // dissolve from across the street and lay the whole interior bare; WALLS use the wider player bubble.
+  const isRoof = input.outwardNormal === null;
+  const effRadius = isRoof ? input.roofRadiusMeters : input.radiusMeters;
+  if (nx * nx + nz * nz > effRadius * effRadius) return false;
   // (b) IN THE WAY: a roof occludes from above; a wall occludes only when the player→camera sightline crosses it.
-  if (input.outwardNormal === null) return true;
+  if (isRoof) return true;
   const m = input.sightlineMarginMeters;
   return segmentIntersectsAabbXZ(
     input.player.x, input.player.z, input.camera.x, input.camera.z,

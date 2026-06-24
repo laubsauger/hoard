@@ -658,10 +658,17 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     roof.castShadow = true;
     group.add(roof);
 
+    // Materials of the roof-group EXTRAS (chimney + decay holes). They use their OWN materials, NOT roofMat, so
+    // the cutaway — which fades ONE material per fade surface — would leave them OPAQUE while the roof x-rays
+    // away (a chimney + dark hole-boxes left floating where the roof was: the "weird stuff on the roof" bug).
+    // Collected here and pushed as their own 'roof' fade surfaces (same footprint AABB) so they dissolve WITH it.
+    const roofExtraMats: { mat: Parameters<typeof fadeSurfaces.push>[0]['material'] }[] = [];
+
     // roof decay — caved-in / missing-shingle patches near the ridge (dark voids reading as holes).
     const holes = roofHoles(style, styleResolver.variation.roofHoleDamageThreshold, styleResolver.variation.roofHoleMaxCount);
     if (holes.length > 0) {
       const holeMat = res.mat(`roofHole.${bi}`, { color: 0x0d0c0a, roughness: 1, side: DoubleSide });
+      roofExtraMats.push({ mat: holeMat });
       const ridgeLen = style.roofShape === 'gable' ? (style.ridgeAlongX ? rw : rd) : Math.max(rw, rd);
       const ridgeAlongX = style.roofShape === 'gable' ? style.ridgeAlongX : rw >= rd;
       for (let h = 0; h < holes.length; h++) {
@@ -678,7 +685,9 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     if (style.hasChimney) {
       const c = cfg.chimneyMeters;
       const chimneyH = style.roofPitchMeters + cfg.world.buildingWallHeightMeters * 0.5;
-      const chimney = new Mesh(res.geo(`chimney.geo.${bi}`, new BoxGeometry(c, chimneyH, c)), res.mat(`chimney.${bi}`, { color: 0x6e4a3a, roughness: 0.95 }));
+      const chimneyMat = res.mat(`chimney.${bi}`, { color: 0x6e4a3a, roughness: 0.95 });
+      roofExtraMats.push({ mat: chimneyMat });
+      const chimney = new Mesh(res.geo(`chimney.geo.${bi}`, new BoxGeometry(c, chimneyH, c)), chimneyMat);
       const sx = (hash01(style.seed, 71) - 0.5) * (rw - c - 0.6);
       const sz = (hash01(style.seed, 72) - 0.5) * (rd - c - 0.6);
       chimney.position.set(sx, chimneyH / 2, sz);
@@ -700,6 +709,11 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     // footprint's NEAREST point: a player anywhere INSIDE the footprint has distance 0 and so always reveals its
     // roof (preserves V20 "see the room you stand in"), regardless of the bubble radius or footprint size.
     fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, halfX: rw / 2, halfZ: rd / 2, opacity: 1 });
+    // Chimney + decay-hole materials fade WITH the roof (same footprint AABB + 'roof' kind) so nothing is left
+    // floating opaque when the roof x-rays away. `object: group` keeps them in the SAME group the cutaway hides.
+    for (const extra of roofExtraMats) {
+      fadeSurfaces.push({ object: group, material: extra.mat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, halfX: rw / 2, halfZ: rd / 2, opacity: 1 });
+    }
   }
 
   /** A covered front entry porch CENTRED on the house's street door, projecting outward along the door's own

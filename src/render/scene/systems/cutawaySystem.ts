@@ -57,6 +57,7 @@ export class CutawaySystem {
               player: { x: player.x, z: player.z },
               camera: { x: camX, z: camZ },
               radiusMeters: this.cfg.visibility.xrayRadiusMeters,
+              roofRadiusMeters: this.cfg.visibility.roofXrayRadiusMeters,
               sightlineMarginMeters: this.cfg.visibility.sightlineMarginMeters,
             });
       const ctx: OcclusionContext = {

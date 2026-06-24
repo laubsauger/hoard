@@ -125,6 +125,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       // M2: a representative district (multiple streaming sectors with abstract populations, V13).
       runtime = createGameRuntime(tier, adp);
       runtime.spawnHorde(combat.gateZeroZombieCount, combat.gateZeroSpawnRadiusMeters);
+      runtime.spawnCaptiveZombie(); // T135: the lone zombie sealed in the starting house's back room (no-op if none)
 
       bootSet(0.4, 'Initializing renderer…');
       host = createRendererHost(canvas, tier);

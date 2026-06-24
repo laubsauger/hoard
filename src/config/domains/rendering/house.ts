@@ -160,10 +160,18 @@ export const houseFields = {
   cutawayXrayRadiusMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'X-RAY BUBBLE radius (V74): a Project-Zomboid-style cutaway bubble around the player. An occluding surface fades ONLY when its NEAREST point is within this distance of the player — so the cutaway follows the player everywhere and dissolves nearby occluders on the camera→player sightline (works behind ANY wall — neighbour/exterior included — not just the building the player occupies), yet stays radius-selective (a wall a few metres further back stays solid). A roof occludes from above so being inside the bubble is enough; a wall must ALSO lie between the player and the camera (V66). A tactical few metres — large enough to clear a typical house half-depth so the room you stand in reveals, small enough that the district still reads as solid streets. Pure VIEW aid, never touches the structural/nav grid (V63).',
-    default: 8,
+    doc: 'X-RAY BUBBLE radius (V74) for WALLS: a Project-Zomboid-style cutaway bubble around the player. A WALL fades only when its nearest point is within this AND it lies on the camera→player sightline (V66) — so the room you stand in reveals a few metres around you, yet the district reads as solid streets. ROOFS use the separate, tighter cutawayRoofXrayRadiusMeters. Pure VIEW aid, never touches the structural/nav grid (V63).',
+    default: 11,
     min: 1,
     max: 40,
+  }),
+  cutawayRoofXrayRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'TIGHTER x-ray radius (V74) for ROOFS only. A roof reveals the WHOLE interior, so — unlike a wall — it must fade ONLY when the player is essentially INSIDE the footprint (its nearest AABB point is 0 when the player stands inside). Kept small (~ the porch depth) so the roof dissolves as the player crosses the threshold, NOT from across the street (which laid the whole interior bare without entering). Distinct from the wall bubble so the wall reveal can be wider without the roof following.',
+    default: 1.5,
+    min: 0,
+    max: 20,
   }),
   cutawaySightlineMarginMeters: num({
     owner: 'rendering',

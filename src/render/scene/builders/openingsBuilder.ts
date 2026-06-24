@@ -104,7 +104,10 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
     e: { dx: 1, dy: 0 },
     w: { dx: -1, dy: 0 },
   };
-  for (const cell of ts.exitCells) {
+  // T135: build leaves for the building EXIT doors AND the interactive INTERIOR doors (same edge-door geometry —
+  // the per-cell geo keys stay unique, and an interior cell still resolves its building for wall height + tint).
+  const doorCells = [...ts.exitCells, ...(ts.interiorDoors ?? [])];
+  for (const cell of doorCells) {
     // Thin-wall house: an EDGE-door sits on the shared edge between its inner room cell and the outer street cell
     // — the leaf/frame are centred on that EDGE (half a cell out toward `edgeDir`), the leaf axis comes from the
     // dir (not the legacy blocked-neighbour heuristic), and the interactable navCell is the floored edge-midpoint

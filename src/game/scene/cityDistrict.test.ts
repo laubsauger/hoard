@@ -212,11 +212,12 @@ describe('city district scene (T80 — large multi-building world)', () => {
   });
 
   // P0 fix: interior partition walls are REAL nav collision (edge-walls), wired from each house's wallEdges.
-  it('wires interior partitions as edge-walls: cells stay walkable but cannot cross, doorways stay open', () => {
+  it('wires interior partitions as edge-walls: cells stay walkable but cannot cross; doorways are passable or a CLOSED interactive door (T135)', () => {
     const { block } = buildCityDistrict();
     const grid = block.navGrid;
     let walledPartitions = 0;
     let openDoorways = 0;
+    let closedDoors = 0;
     for (const house of block.placedHouses!) {
       const doorKeys = new Set(house.doors.map((d) => d.edge.key));
       for (const e of house.wallEdges) {
@@ -228,8 +229,17 @@ describe('city district scene (T80 — large multi-building world)', () => {
         // we just can't assert the cell is walkable when furniture occupies it.
         if (!innerOk || !outerOk) continue;
         if (doorKeys.has(e.key)) {
-          expect(grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)).toBe(true); // doorway: passable
-          openDoorways += 1;
+          if (grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)) {
+            openDoorways += 1; // open gap, or an interactive door that started open
+          } else {
+            // T135: a doorway that is NOT crossable must be a CLOSED interactive door (registered in
+            // interiorDoors so the player can open it), never a dead wall they can't pass.
+            const registered = block.interiorDoors!.some(
+              (dr) => (dr.cx === e.innerCx && dr.cy === e.innerCy) || (dr.cx === e.outerCx && dr.cy === e.outerCy),
+            );
+            expect(registered).toBe(true);
+            closedDoors += 1;
+          }
         } else {
           expect(grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)).toBe(false); // wall: blocked
           walledPartitions += 1;
@@ -237,7 +247,27 @@ describe('city district scene (T80 — large multi-building world)', () => {
       }
     }
     expect(walledPartitions).toBeGreaterThan(0); // real partitions exist
-    expect(openDoorways).toBeGreaterThan(0); // and interior doors stay open
+    expect(openDoorways).toBeGreaterThan(0); // most doorways stay open (flow preserved)
+    expect(closedDoors).toBeGreaterThan(0); // at least the player-house captive door starts closed (tension)
+  });
+
+  it('T135: seals a lone CAPTIVE zombie in a single-door back room of the player house behind a CLOSED interactive door', () => {
+    const { block } = buildCityDistrict();
+    const grid = block.navGrid;
+    const captive = block.captiveZombieCell;
+    expect(captive).toBeTruthy(); // the player house authored a captive room
+    const room = block.roomAt!(captive!.cx, captive!.cy)!;
+    const playerRoom = block.roomAt!(block.playerCell.cx, block.playerCell.cy)!;
+    expect(room.houseIndex).toBe(playerRoom.houseIndex); // captive sits in the PLAYER's house
+    expect(room.roomId).not.toBe(playerRoom.roomId); // a DIFFERENT room than the player starts in
+    // the captive room is a dead-end: exactly ONE door, which is CLOSED (not crossable) yet an interactive
+    // interior door (registered in interiorDoors so the player can open it) — the zombie is contained until then.
+    const house = block.placedHouses![room.houseIndex]!;
+    const roomDoors = house.doors.filter((d) => d.fromRoom === room.roomId || d.toRoom === room.roomId);
+    expect(roomDoors.length).toBe(1);
+    const d = roomDoors[0]!;
+    expect(grid.canCross(d.edge.innerCx, d.edge.innerCy, d.edge.outerCx!, d.edge.outerCy!)).toBe(false); // closed
+    expect(block.interiorDoors!.some((x) => x.cx === d.cx && x.cy === d.cy)).toBe(true); // openable
   });
 
   it('a zombie in one room can only reach the adjacent room via the doorway, never through the wall', () => {

@@ -167,6 +167,20 @@ function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
   }
 }
 
+/** T135 — fraction of a house's interior doorways promoted to interactive (openable) doors; the rest stay
+ *  open gaps so movement still flows (a real door in every doorway would make the interior a maze). */
+const INTERIOR_DOOR_INTERACTIVE_FRACTION = 0.45;
+/** T135 — of the interactive interior doors, the fraction that START closed (surprise/tension — a room you
+ *  cannot see into until you open it). The rest start open. The player-house captive door is always closed. */
+const INTERIOR_DOOR_CLOSED_FRACTION = 0.3;
+
+/** Deterministic [0,1) roll keyed by a cell + salt (V26 — no RNG, stable across runs). Picks which interior
+ *  doorways become interactive doors and which start closed, so the district layout is reproducible. */
+function doorRoll01(cx: number, cy: number, salt: number): number {
+  const h = (Math.imul(cx + 1, 374761393) ^ Math.imul(cy + 1, 668265263) ^ Math.imul(salt | 0, 2246822519)) >>> 0;
+  return (h % 100000) / 100000;
+}
+
 /**
  * Stamp ONE templated house onto a lot. The footprint is EXACTLY the template's W×D ROOM cells (building bounds
  * W×D, no exterior ring) centred in the lot. EVERY cell is walkable, room-tagged floor — the interior reaches
@@ -255,6 +269,52 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
     const outer = ringCellFor(front.cx, front.cy, front.dir);
     if (!isPlayerHouse) b.navGrid.setWallBetween(front.cx, front.cy, outer.cx, outer.cy, false);
     b.exitCells.push({ cx: front.cx, cy: front.cy, edgeDir: front.dir });
+  }
+
+  // --- T135 interior doors: promote a deterministic SUBSET of this house's interior doorways to interactive
+  // edge-doors (a leaf you can open/close; the rest stay open gaps so movement still flows). Most start OPEN; a
+  // fraction start CLOSED for tension. The PLAYER house additionally seals ONE dead-end back room (a room with a
+  // single door, not the start room) behind a CLOSED door + records its cell for the lone captive zombie.
+  const interiorDoorsOfHouse = placed.doors.filter((dr) => !dr.exterior && dr.toRoom !== null);
+  let captiveDoorCell = -1;
+  if (isPlayerHouse && b.playerCell) {
+    const playerRoom = placed.roomAt(b.playerCell.cx, b.playerCell.cy)?.roomId ?? -1;
+    const doorsPerRoom = new Map<number, number>();
+    for (const dr of placed.doors) {
+      doorsPerRoom.set(dr.fromRoom, (doorsPerRoom.get(dr.fromRoom) ?? 0) + 1);
+      if (dr.toRoom !== null) doorsPerRoom.set(dr.toRoom, (doorsPerRoom.get(dr.toRoom) ?? 0) + 1);
+    }
+    // A dead-end room (exactly ONE door, not the start room) is fully contained by closing that one door.
+    for (const dr of interiorDoorsOfHouse) {
+      const cand = [dr.fromRoom, dr.toRoom].find(
+        (rm) => rm !== null && rm !== playerRoom && (doorsPerRoom.get(rm) ?? 0) === 1,
+      );
+      if (cand === undefined || cand === null) continue;
+      captiveDoorCell = b.navGrid.index(dr.cx, dr.cy);
+      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway.
+      let best: CellXY | null = null;
+      let bestD = -1;
+      for (const rc of placed.rooms) {
+        if (rc.roomId !== cand) continue;
+        const dd = Math.max(Math.abs(rc.cx - dr.cx), Math.abs(rc.cy - dr.cy));
+        if (dd > bestD) {
+          bestD = dd;
+          best = { cx: rc.cx, cy: rc.cy };
+        }
+      }
+      if (best) b.captiveZombieCell = best;
+      break;
+    }
+  }
+  for (const dr of interiorDoorsOfHouse) {
+    const isCaptive = b.navGrid.index(dr.cx, dr.cy) === captiveDoorCell;
+    if (!isCaptive && doorRoll01(dr.cx, dr.cy, 0x1d00) >= INTERIOR_DOOR_INTERACTIVE_FRACTION) continue; // stays an open gap
+    b.interiorDoors.push({ cx: dr.cx, cy: dr.cy, edgeDir: dr.dir });
+    // Closed if captive, else a deterministic fraction start closed; an open door leaves its edge already clear.
+    if (isCaptive || doorRoll01(dr.cx, dr.cy, 0x2e00) < INTERIOR_DOOR_CLOSED_FRACTION) {
+      const n = ringCellFor(dr.cx, dr.cy, dr.dir);
+      b.navGrid.setWallBetween(dr.cx, dr.cy, n.cx, n.cy, true); // DoorSystem reads the walled edge as CLOSED
+    }
   }
 
   // --- windows: each placed window is an exterior EDGE-window. Its edge stays a wall (V26 sealed); occlusion +
