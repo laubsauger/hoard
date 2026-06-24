@@ -54,15 +54,26 @@ describe('resolveSeparation (B4 / V19)', () => {
   });
 
   it('never commits a push onto a non-walkable cell (walkable stays authoritative)', () => {
-    // Wall at x < 0: A would be pushed into it and must stay put; B is free to move out.
-    const isWalkable = (x: number) => x >= 0;
+    // Wall at x < 0: A would be pushed into it and must stay put; B is free to move out. The move test gates on
+    // the DESTINATION x (3rd arg) — a push lands only if where it ENDS UP is walkable.
+    const canMove = (_fx: number, _fz: number, tx: number) => tx >= 0;
     const a = agent(1, 0, 0);
     const b = agent(2, 0.2, 0);
     const list = [a, b];
-    resolveSeparation(list, allPairs(list), isWalkable, { iterations: 12, minSpacingScale: 1 });
+    resolveSeparation(list, allPairs(list), canMove, { iterations: 12, minSpacingScale: 1 });
     expect(a.x).toBeGreaterThanOrEqual(0); // never shoved through the wall
-    expect(isWalkable(a.x)).toBe(true);
-    expect(isWalkable(b.x)).toBe(true);
+    expect(b.x).toBeGreaterThanOrEqual(0);
+  });
+
+  it('rejects a push that CROSSES a walled edge even when the destination cell is walkable (thin-wall fix)', () => {
+    // A walled edge at x=0: BOTH sides are walkable cells, but the move test forbids crossing the seam — the
+    // thin-wall model where a destination-only check would shove a body straight through the wall into a house.
+    const canMove = (fx: number, _fz: number, tx: number) => (fx >= 0 ? tx >= 0 : tx < 0);
+    const a = agent(1, 0.1, 0); // just inside the +x side
+    const b = agent(2, 0.3, 0); // crowds A, pushing it toward -x across the seam
+    const list = [a, b];
+    resolveSeparation(list, allPairs(list), canMove, { iterations: 12, minSpacingScale: 1 });
+    expect(a.x).toBeGreaterThanOrEqual(0); // never shoved across the walled edge
   });
 
   it('separates exactly-coincident bodies deterministically (no NaN)', () => {
@@ -98,9 +109,9 @@ describe('resolveSeparation (B4 / V19)', () => {
     // Corridor / doorway: walkable only within |x| <= 0.5. Three bodies stacked along z must spread
     // along z (queue) while staying inside the corridor — no jitter blow-up, no wall push-through.
     const half = 0.5;
-    const isWalkable = (x: number) => x >= -half && x <= half;
+    const canMove = (_fx: number, _fz: number, tx: number) => tx >= -half && tx <= half;
     const list = [agent(1, 0, 0), agent(2, 0.05, 0.3), agent(3, 0.02, 0.6)];
-    resolveSeparation(list, allPairs(list), isWalkable, { iterations: 16, minSpacingScale: 1 });
+    resolveSeparation(list, allPairs(list), canMove, { iterations: 16, minSpacingScale: 1 });
     for (const a of list) {
       expect(Number.isFinite(a.x)).toBe(true);
       expect(Number.isFinite(a.z)).toBe(true);

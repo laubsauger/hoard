@@ -28,23 +28,29 @@ export interface SeparationParams {
 /** Returns the neighbouring agents to test `agent` against (already layer/tier filtered by the caller). */
 export type NeighborQuery = (agent: SeparationAgent) => Iterable<SeparationAgent>;
 
-/** Authoritative walkable test (world XZ). A push is only applied when its result stays walkable. */
-export type WalkableTest = (x: number, z: number) => boolean;
+/**
+ * Authoritative MOVE test: may a body of `radius` move from (fromX,fromZ) to (toX,toZ)? A push is committed
+ * ONLY when this passes. It takes the WHOLE move (not just the destination point) so the caller can reject a
+ * push that CROSSES a walled cell EDGE — in the thin-wall house model both cells flanking a wall are walkable,
+ * so a destination-only test let depenetration shove a body straight THROUGH a wall into a house. The caller
+ * composes radius-aware cell walkability AND an edge-cross test here.
+ */
+export type MoveTest = (fromX: number, fromZ: number, toX: number, toZ: number, radius: number) => boolean;
 
 /**
  * Push overlapping pairs apart to at least their min spacing, in place.
  *
  * Symmetric resolve: each agent applies HALF the needed correction relative to each neighbour; because
  * the neighbour applies its own half in its own turn, a pair converges to the min spacing over the
- * iterations. The walkable predicate stays authoritative — a correction that would leave an agent on a
- * non-walkable position is rejected (the agent keeps its prior, walkable position), so resolution never
- * pushes a body through a wall (clamp to walkable). Returns the set of agent ids whose position moved
- * so the caller can re-bucket exactly those in its spatial hash.
+ * iterations. The MOVE predicate stays authoritative — a correction that would push the agent onto a
+ * non-walkable spot OR across a walled edge is rejected (the agent keeps its prior, valid position), so
+ * resolution never shoves a body through a wall. Returns the set of agent ids whose position moved so the
+ * caller can re-bucket exactly those in its spatial hash.
  */
 export function resolveSeparation(
   agents: readonly SeparationAgent[],
   neighborsOf: NeighborQuery,
-  isWalkable: WalkableTest,
+  canMove: MoveTest,
   params: SeparationParams,
 ): Set<number> {
   if (!Number.isInteger(params.iterations) || params.iterations < 0) {
@@ -83,8 +89,9 @@ export function resolveSeparation(
       if (pushX === 0 && pushZ === 0) continue;
       const candX = a.x + pushX;
       const candZ = a.z + pushZ;
-      // Walkable stays authoritative: only commit the push if it lands on a walkable cell (V19 clamp).
-      if (isWalkable(candX, candZ)) {
+      // The MOVE test stays authoritative: commit the push only if the body can actually slide there — onto a
+      // walkable spot AND without crossing a walled edge (no shoving through a thin wall, V42/V101).
+      if (canMove(a.x, a.z, candX, candZ, a.radius)) {
         a.x = candX;
         a.z = candZ;
         moved.add(a.id);

@@ -723,10 +723,14 @@ export class HordeSimulation {
       return scratch;
     };
 
+    // A depenetration push is committed only if the body can actually SLIDE there: radius-aware walkable AND it
+    // does not cross a walled cell EDGE (the thin-wall house model leaves both flanking cells walkable, so a
+    // destination-only test let crowd pressure shove a body straight through a wall into a house, V42/V101).
+    const grid = this.d.scene.navGrid;
     const moved = resolveSeparation(
       pool,
       neighborsOf,
-      (x, z) => this.d.scene.isWalkableWorld(x, z),
+      (fx, fz, tx, tz, r) => isWalkableRadius(this.d.scene, tx, tz, r) && !segmentCrossesWall(grid, fx, fz, tx, tz),
       { iterations: separationIterations, minSpacingScale },
     );
 

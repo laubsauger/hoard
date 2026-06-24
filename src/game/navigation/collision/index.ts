@@ -17,5 +17,5 @@ export {
   type SeparationAgent,
   type SeparationParams,
   type NeighborQuery,
-  type WalkableTest,
+  type MoveTest,
 } from './separation';
