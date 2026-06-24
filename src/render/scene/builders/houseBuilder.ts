@@ -28,6 +28,7 @@ import {
   windowPlacements,
   type HouseStyle,
   type CellRect,
+  type PlacedHouse,
 } from '../../../game/scene';
 import {
   windowOpeningHeightMeters,
@@ -269,6 +270,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     const b = bld.bounds;
     const centerX = ((b.minCx + b.maxCx + 1) / 2) * navCellSize;
     const centerZ = ((b.minCy + b.maxCy + 1) / 2) * navCellSize;
+    // A TEMPLATED thin-wall house (placedHouses) builds its exterior walls from the perimeter EDGES (below) —
+    // the footprint cells are walkable rooms, NOT a blocked ring. A LEGACY block (cityBlock / §G) has no placed
+    // house and keeps the blocked-perimeter-cell ring path.
+    const house = ts.placedHouses?.[bi];
 
     // per-house clapboard tint (weathered); each building owns its base + per-direction upper + roof
     // materials so the cutaway fades ONLY this house and neighbours keep their colour (per-building, V59).
@@ -291,7 +296,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       return g;
     };
 
-    for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+    if (!house) for (let cy = b.minCy; cy <= b.maxCy; cy++) {
       for (let cx = b.minCx; cx <= b.maxCx; cx++) {
         const idx = grid.index(cx, cy);
         if (!grid.isBlocked(idx)) continue;
@@ -392,6 +397,11 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       }
     }
 
+    // Templated thin-wall house: exterior walls as THIN per-edge panels (base opaque → baseParts, upper → its own
+    // fade surface), mirroring the interior-partition per-edge build. Pushed BEFORE the roof/interior so the
+    // per-building fade-surface order stays [exterior edges…] → [roof] → [interior edges…].
+    if (house) buildExteriorEdgeWalls(bi, house, style, wallH, baseH, upperH, baseParts);
+
     // one merged base-wall mesh for the whole house (section cells excluded — they stay individual).
     const baseGeoMerged = res.mergeBoxes(`wallBase.geo.${bi}`, baseParts);
     if (baseGeoMerged) {
@@ -436,7 +446,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     // fade-surface order stays deterministic: [upper-wall sides…] → [roof] → [interior partition edges…].
     buildInteriorWalls(bi, style, wallH);
     buildPorch(b, bi, style);
-    collectIvy(b, style, grid, ivyMatrices);
+    collectIvy(b, style, grid, ivyMatrices, house !== undefined);
     collectDebris(b, style, debrisMatrices, debrisColors);
   });
 
@@ -446,11 +456,125 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
   return { fadeSurfaces, sectionMeshes };
 
   /**
-   * P0c — INTERIOR PARTITION WALLS from the placed floor-plan (PlacedHouse.wallEdges). The exterior shell +
-   * doors + windows already render from the blocked perimeter ring (the placed house's exterior, 1:1); this
-   * adds the room dividers so the cutaway reveals a MULTI-ROOM interior instead of one open box. Each interior
-   * wallEdge is a solid full-height panel centred on the shared cell face; an edge a DOOR opens is omitted
-   * (the doorway gap). Districts without templates (cityBlock) skip this.
+   * Item1d — EXTERIOR WALLS of a templated thin-wall house, built from the perimeter EDGES (PlacedHouse.wallEdges,
+   * kind 'exterior') as THIN per-edge panels — the analogue of the interior-partition build, but keeping the
+   * exterior base/upper cutaway split: the BASE band [0,baseH] is opaque and accrues into the building's merged
+   * base wall (`baseParts`); the UPPER band [baseH,wallH] is its OWN transparent fade surface per edge (the cladding
+   * node-material + the FadeSurface push with halfX/halfZ + the real outward normal, so the directional x-ray fades
+   * only the side(s) between camera + player). The FRONT-door edge is left OPEN (openingsBuilder fills the doorway
+   * + header). A WINDOW edge is PUNCHED (jamb reveals + sill + header) so the glass/void built by openingsBuilder
+   * shows through the full wall depth. Pushed BEFORE the roof + interior so the per-building fade order is
+   * [exterior edges…] → [roof] → [interior edges…]. Legacy cityBlock keeps the blocked-ring path (this is skipped).
+   */
+  function buildExteriorEdgeWalls(
+    bi: number,
+    house: PlacedHouse,
+    style: HouseStyle,
+    wallH: number,
+    baseH: number,
+    upperH: number,
+    baseParts: BoxGeometry[],
+  ): void {
+    const cs = navCellSize;
+    const th = Math.min(cfg.wallPanelThickness, cs);
+    const storeyH = cfg.world.buildingWallHeightMeters;
+    const winH = windowOpeningHeightMeters(storeyH);
+    const winSpan = windowOpeningSpanMeters(cs);
+    const bands = windowSillHeights(storeyH, wallH).map((sy) => [sy, sy + winH] as const);
+    // the FRONT door's edge is a doorway gap (openingsBuilder builds the frame/leaf/header fill there).
+    const doorGapKeys = new Set<string>();
+    for (const dr of house.doors) if (dr.front) doorGapKeys.add(dr.edge.key);
+    // window edges → punched (the window glass sits in the hole, openingsBuilder).
+    const winEdgeKeys = new Set<string>();
+    for (const w of house.windows) winEdgeKeys.add(w.edge.key);
+
+    let edgeIdx = 0;
+    for (const edge of house.wallEdges) {
+      if (edge.kind !== 'exterior') continue; // interior partitions are built separately
+      if (doorGapKeys.has(edge.key)) continue; // doorway gap
+      const dir = exteriorEdgeDir(edge.key, edge.innerCx, edge.innerCy);
+      const dl = EXT_DIR_DELTA[dir];
+      // world face centre = midpoint of the inner room cell + the outer street cell.
+      const faceX = ((edge.innerCx + (edge.innerCx + dl.dx) + 1) / 2) * cs;
+      const faceZ = ((edge.innerCy + (edge.innerCy + dl.dy) + 1) / 2) * cs;
+      const alongX = edge.along === 'x'; // N/S face → the wall RUN is along X
+      const outwardNormal: VecXZ = { x: dl.dx, z: dl.dy };
+      const hasWindow = winEdgeKeys.has(edge.key);
+
+      const upperBoxes: BoxGeometry[] = [];
+      // one sub-panel of run length `len` (shifted `runOff` along the run), vertical [yB,yT]; base→opaque merged,
+      // upper→this edge's transparent fade-surface batch — the exterior base/upper split, per edge.
+      const emit = (runOff: number, len: number, yB: number, yT: number): void => {
+        if (yT - yB <= 1e-4 || len <= 1e-4) return;
+        const px = alongX ? faceX + runOff : faceX;
+        const pz = alongX ? faceZ : faceZ + runOff;
+        const mkGeo = (h: number): BoxGeometry => (alongX ? new BoxGeometry(len, h, th) : new BoxGeometry(th, h, len));
+        const bTop = Math.min(yT, baseH);
+        if (yB < bTop) {
+          const box = mkGeo(bTop - yB);
+          box.translate(px, (yB + bTop) / 2, pz);
+          baseParts.push(box);
+        }
+        if (upperH > 0) {
+          const uB = Math.max(yB, baseH);
+          const uT = Math.min(yT, wallH);
+          if (uB < uT) {
+            const box = mkGeo(uT - uB);
+            box.translate(px, (uB + uT) / 2 + upperOffset.verticalInsetMeters, pz);
+            upperBoxes.push(box);
+          }
+        }
+      };
+
+      if (!hasWindow) {
+        emit(0, cs, 0, wallH); // solid full-height edge panel
+      } else {
+        const openHalf = winSpan / 2;
+        const revealW = (cs - winSpan) / 2;
+        if (revealW > 1e-4) {
+          emit(-(openHalf + revealW / 2), revealW, 0, wallH);
+          emit(openHalf + revealW / 2, revealW, 0, wallH);
+        }
+        let yCursor = 0;
+        for (const [yb, yt] of [...bands].sort((a, b) => a[0] - b[0])) {
+          const holeBottom = Math.max(0, Math.min(yb, wallH));
+          if (holeBottom > yCursor) emit(0, winSpan, yCursor, holeBottom);
+          yCursor = Math.max(yCursor, Math.min(yt, wallH));
+        }
+        if (yCursor < wallH) emit(0, winSpan, yCursor, wallH);
+      }
+
+      // one merged transparent UPPER mesh per edge → its own per-edge x-ray fade surface (mirrors the interior
+      // partitions); the cladding stays continuous with the opaque base via the same colorNode.
+      const merged = res.mergeBoxes(`wallExtUpper.geo.${bi}.${edgeIdx}`, upperBoxes);
+      if (merged) {
+        const mat = res.nodeMat(`wallExtUpper.${bi}.${edgeIdx}`, new MeshStandardNodeMaterial({ roughness: 0.92, transparent: true, opacity: 1 }));
+        mat.colorNode = claddingColorNode(style.wallColor, cfg.clapboardSpacing, cfg.clapboardGrooveDarken, cfg.clapboardGrooveWidthRatio);
+        mat.polygonOffset = upperOffset.polygonOffset;
+        mat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
+        mat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
+        const mesh = new Mesh(merged, mat);
+        mesh.castShadow = true;
+        mesh.renderOrder = upperOffset.renderOrder;
+        root.add(mesh);
+        merged.computeBoundingBox();
+        const bb = merged.boundingBox;
+        const sCenterX = bb ? (bb.min.x + bb.max.x) / 2 : faceX;
+        const sCenterZ = bb ? (bb.min.z + bb.max.z) / 2 : faceZ;
+        const halfX = bb ? (bb.max.x - bb.min.x) / 2 : 0;
+        const halfZ = bb ? (bb.max.z - bb.min.z) / 2 : 0;
+        fadeSurfaces.push({ object: mesh, material: mat, kind: 'upperWall', outwardNormal, heightMeters: wallH, buildingIndex: bi, centerX: sCenterX, centerZ: sCenterZ, halfX, halfZ, opacity: 1 });
+      }
+      edgeIdx++;
+    }
+  }
+
+  /**
+   * P0c — INTERIOR PARTITION WALLS from the placed floor-plan (PlacedHouse.wallEdges). The exterior walls + doors
+   * + windows render from the perimeter EDGES (buildExteriorEdgeWalls, thin-wall model); this adds the room
+   * dividers so the cutaway reveals a MULTI-ROOM interior instead of one open box. Each interior wallEdge is a
+   * solid full-height panel centred on the shared cell face; an edge a DOOR opens is omitted (the doorway gap).
+   * Districts without templates (cityBlock) skip this.
    *
    * ITEM D — each partition is its OWN fade surface (kind 'upperWall') so the X-RAY BUBBLE (V74) fades ONLY the
    * partition(s) genuinely BETWEEN the player and the camera, leaving the rest solid (the rooms still read) — the
@@ -612,7 +736,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
 
   /** Accrue per-house ivy/overgrowth instances climbing the EXTERIOR wall faces, scaled by style.ivy. The
    *  caller flushes one shared instanced mesh for the whole district. */
-  function collectIvy(b: CellRect, style: HouseStyle, navGrid: NavGrid, out: Matrix4[]): void {
+  function collectIvy(b: CellRect, style: HouseStyle, navGrid: NavGrid, out: Matrix4[], templated: boolean): void {
     if (style.ivy <= 0) return;
     const cs = navCellSize;
     const wallH = cfg.world.buildingWallHeightMeters * Math.max(1, style.storeys);
@@ -625,7 +749,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       for (let cx = b.minCx; cx <= b.maxCx; cx++) {
         if (cx !== b.minCx && cx !== b.maxCx && cy !== b.minCy && cy !== b.maxCy) continue; // perimeter only
         const idx = navGrid.index(cx, cy);
-        if (!navGrid.isBlocked(idx)) continue;
+        // Legacy block: an exterior wall is a BLOCKED perimeter cell. Thin-wall house: the perimeter cells ARE
+        // walkable rooms (no blocked ring) — every perimeter cell carries an exterior edge-wall face, so ivy
+        // climbs them all.
+        if (!templated && !navGrid.isBlocked(idx)) continue;
         const cellRoll = hash01(style.seed, 5100 + cx * 31 + cy * 7);
         if (cellRoll > style.ivy) continue; // denser ivy on more overgrown houses
         // outward face normal: pick the first open neighbour direction.
