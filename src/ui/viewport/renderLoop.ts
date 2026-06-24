@@ -25,6 +25,7 @@ import { inputStore } from '../../stores/input';
 import { debugViewStore } from '../../diagnostics/store';
 import { uiStore } from '../../stores/ui';
 import { inventoryViewStore } from '../../stores/inventoryView';
+import { timeOfDayStore } from '../../stores/timeOfDay';
 
 const DEG2RAD = Math.PI / 180;
 
@@ -58,6 +59,9 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
   // ---- frame loop: real dt -> runtime.update (fixed ticks) -> sync scene -> render (V12) ----
   let last = performance.now();
   let rafHandle = 0;
+  // T125: only re-publish the HUD time-of-day when the displayed MINUTE changes (a full day = dayLengthSeconds,
+  // so this fires a couple of times a second at most) — avoids a per-frame store write + React churn (V11).
+  let lastTodMinute = -1;
   const moveSpeedKeys = (): { x: number; z: number } => {
     const yaw = camera.state.yawDeg * DEG2RAD;
     const fwdX = -Math.sin(yaw);
@@ -177,7 +181,17 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
         }
       }
     }
-    scene.syncFrame(dt, camera.camera, debugViewStore.getState().flags);
+    // T125/V90: a render-side DEV override of the day/night phase (lighting only — the sim clock is untouched,
+    // so replay stays exact). When enabled, lighting parks the sun at `override`; else it follows the sim clock.
+    const tod = timeOfDayStore.getState();
+    const todOverride = tod.overrideEnabled ? tod.override : null;
+    scene.syncFrame(dt, camera.camera, debugViewStore.getState().flags, todOverride);
+    // Publish the effective day fraction the lighting used (override or sim clock) for the HUD clock, minute-gated.
+    const todMinute = Math.floor(scene.currentTimeOfDay * 1440) % 1440;
+    if (todMinute !== lastTodMinute) {
+      lastTodMinute = todMinute;
+      timeOfDayStore.getState().setCurrent(scene.currentTimeOfDay);
+    }
     gizmos.update(
       runtime.zombies,
       debugViewStore.getState().flags,

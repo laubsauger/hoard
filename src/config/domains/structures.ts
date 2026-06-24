@@ -148,6 +148,27 @@ export const structuresConfig = registerDomain('structures', {
     max: 8,
     integer: true,
   }),
+  /** Ground-floor window SILL height as a fraction of one storey's wall height (V87 sight band). Matches the
+   *  renderer's `windowGeometry.WINDOW_SILL_FRACTION` so the see-THROUGH height gate lines up with the rendered
+   *  pane — the sim authoritatively owns it here; the render builder should converge to this value. */
+  windowSillFraction: num({
+    owner: 'structures',
+    unit: 'ratio',
+    doc: 'Window sill height as a fraction of wall height — the BOTTOM of the see-through band (crouch below it to hide, V87).',
+    default: 0.3,
+    min: 0,
+    max: 0.9,
+  }),
+  /** Window OPENING height as a fraction of one storey's wall height (V87). The see-through band runs from
+   *  `windowSillFraction·wallH` up by this·wallH — mirrors the renderer's `windowGeometry.WINDOW_HEIGHT_FRACTION`. */
+  windowHeightFraction: num({
+    owner: 'structures',
+    unit: 'ratio',
+    doc: 'Window opening height as a fraction of wall height — sets the TOP of the see-through band (V87).',
+    default: 0.4,
+    min: 0.05,
+    max: 1,
+  }),
   /** Projectile hits a window pane absorbs before it smashes (≈1 — one bullet shatters glass). */
   windowGlassShotsToSmash: num({
     owner: 'structures',

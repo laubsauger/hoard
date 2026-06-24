@@ -245,7 +245,10 @@ export class GibSim {
       const i = this.head;
       this.head = (this.head + 1) % this.px.length; // ring buffer — oldest recycled (V24)
       if (this._count < this.px.length) this._count++;
-      const chunk = (0.55 + rnd() * rnd() * 1.1) * sizeMul;
+      // Per-chunk size: a low-biased random (rnd² → mostly near the floor) times the per-burst size multiplier.
+      // Upper tail trimmed (was 0.55 + …·1.1, peaking ~1.65×) so even a high roll on a limb chunk stays a chunk,
+      // not a boulder — the user saw ~1 m lumps at the old upper range (V52 tuning).
+      const chunk = (0.5 + rnd() * rnd() * 0.6) * sizeMul;
       const sz = s.baseSizeMeters * chunk;
       const ang = rnd() * Math.PI * 2;
       const sp = s.severSpeedMinMps + rnd() * (s.severSpeedMaxMps - s.severSpeedMinMps);

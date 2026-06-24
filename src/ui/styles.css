@@ -263,6 +263,28 @@ body,
   opacity: 0.6;
 }
 
+/* T124 — dev time-of-day group: a checkbox row + a full-width scrub slider. */
+.hbn-controls__check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.hbn-controls__check input[type='checkbox'] {
+  width: auto;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.hbn-controls input[type='range'] {
+  width: 100%;
+  accent-color: rgba(143, 174, 92, 0.9);
+  cursor: pointer;
+}
+
 /* T40 / V29 — objective HUD line + accessibility panel. */
 .hbn-hud__objective {
   margin-top: 8px;

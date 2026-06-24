@@ -31,4 +31,37 @@ describe('player crouch stance + eye height (V86)', () => {
     rt.setCrouch(false);
     expect(rt.playerEyeHeight()).toBeCloseTo(p.eyeHeightMeters); // released → back to standing
   });
+
+  it('crouching below the sill HIDES the player through a glassed window; standing is seen (V87)', () => {
+    const rt = makeRuntime();
+    // Approach the window nearest the spawn, then clear it to a see-through glassless hole.
+    const spawn = rt.player();
+    let win = rt.windowViews()[0]!;
+    let best = Infinity;
+    for (const w of rt.windowViews()) {
+      const d = Math.hypot(w.x - spawn.x, w.z - spawn.z);
+      if (d < best) { best = d; win = w; }
+    }
+    for (let i = 0; i < 2000; i++) {
+      const pp = rt.player();
+      const dx = win.x - pp.x;
+      const dz = win.z - pp.z;
+      if (Math.hypot(dx, dz) <= 2.0) break;
+      rt.movePlayer(dx, dz, 0.05);
+    }
+    while (rt.unboardNearestWindow()) {
+      /* strip every board → a glassless opening */
+    }
+    rt.smashNearestWindow(); // ensure the pane is gone (no-op if already broken) — unambiguously see-through
+
+    // STANDING: eye (1.6) is within the window opening band → see THROUGH the window.
+    rt.setCrouch(false);
+    expect(rt.isWindowSeeThrough(win.cx, win.cy)).toBe(true);
+    // CROUCHED: eye drops BELOW the sill → the wall below the window hides the player (V87).
+    rt.setCrouch(true);
+    expect(rt.isWindowSeeThrough(win.cx, win.cy)).toBe(false);
+    // back up to standing → seen again (no latching).
+    rt.setCrouch(false);
+    expect(rt.isWindowSeeThrough(win.cx, win.cy)).toBe(true);
+  });
 });

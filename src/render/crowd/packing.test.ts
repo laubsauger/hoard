@@ -8,6 +8,8 @@ import {
   packCrowdInputs,
   variationSeed,
   variationScale,
+  variationHash01,
+  variationTint,
   FLOATS_PER_POSE,
   FLOATS_PER_META,
 } from './packing';
@@ -239,6 +241,70 @@ describe('packCrowdInputs (V2/V3)', () => {
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThan(16);
       expect(v).toBe(variationSeed(i, 16));
+    }
+  });
+});
+
+describe('variationHash01 (T122/V87)', () => {
+  it('is deterministic + bounded in [0,1)', () => {
+    for (let i = 0; i < 200; i++) {
+      const v = variationHash01(i, 7);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThan(1);
+      expect(v).toBe(variationHash01(i, 7)); // stable per (slot, salt) across calls → replay-deterministic (V26)
+    }
+  });
+
+  it('decorrelates channels by salt (hue vs value differ for the same slot)', () => {
+    let differ = 0;
+    for (let i = 0; i < 64; i++) {
+      if (Math.abs(variationHash01(i, 0x1111) - variationHash01(i, 0x2222)) > 1e-6) differ++;
+    }
+    expect(differ).toBe(64); // every slot's two salted hashes are distinct
+  });
+
+  it('spreads roughly uniformly (mean near 0.5 over many slots)', () => {
+    let sum = 0;
+    const N = 4000;
+    for (let i = 0; i < N; i++) sum += variationHash01(i, 3);
+    expect(sum / N).toBeGreaterThan(0.45);
+    expect(sum / N).toBeLessThan(0.55);
+  });
+});
+
+describe('variationTint (T122/V87)', () => {
+  it('is a subtle, deterministic shift of the base colour (no jitter → base; clamped to [0,1])', () => {
+    const out = new Float32Array(3);
+    variationTint(0.4, 0.5, 0.6, 0, 0, 0.1, 0.15, out, 0);
+    expect(out[0]).toBeCloseTo(0.4, 6);
+    expect(out[1]).toBeCloseTo(0.5, 6);
+    expect(out[2]).toBeCloseTo(0.6, 6);
+    // Same inputs → same output (V26).
+    const a = new Float32Array(3);
+    const b = new Float32Array(3);
+    variationTint(0.4, 0.5, 0.6, 0.7, -0.3, 0.1, 0.15, a, 0);
+    variationTint(0.4, 0.5, 0.6, 0.7, -0.3, 0.1, 0.15, b, 0);
+    expect(Array.from(a)).toEqual(Array.from(b));
+  });
+
+  it('hue jitter skews R and B in OPPOSITE directions (warm↔cool); value jitter scales brightness', () => {
+    const warm = new Float32Array(3);
+    variationTint(0.5, 0.5, 0.5, 1, 0, 0.2, 0, warm, 0); // +hue → redder, bluer-down
+    expect(warm[0]).toBeGreaterThan(0.5);
+    expect(warm[2]).toBeLessThan(0.5);
+    const dark = new Float32Array(3);
+    variationTint(0.5, 0.5, 0.5, 0, -1, 0, 0.3, dark, 0); // -value → darker on all channels
+    expect(dark[0]).toBeLessThan(0.5);
+    expect(dark[1]).toBeLessThan(0.5);
+    expect(dark[2]).toBeLessThan(0.5);
+  });
+
+  it('clamps each channel into [0,1] (never produces an out-of-range colour)', () => {
+    const out = new Float32Array(3);
+    variationTint(0.95, 0.95, 0.95, 1, 1, 0.5, 0.5, out, 0);
+    for (const ch of out) {
+      expect(ch).toBeGreaterThanOrEqual(0);
+      expect(ch).toBeLessThanOrEqual(1);
     }
   });
 });

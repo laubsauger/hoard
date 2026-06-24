@@ -11,6 +11,7 @@ import {
   resolveLocalLightBudget,
   fogTransmittance,
   interiorExposure,
+  interiorExposureCompensation,
   resolveFogDistances,
   approach,
   resolveToneExposure,
@@ -107,6 +108,19 @@ describe('atmosphere (T29)', () => {
     expect(interiorExposure(1, 'desktop-high')).toBeGreaterThan(0);
     expect(interiorExposure(0.5, 'desktop-high')).toBeLessThan(interiorExposure(1, 'desktop-high'));
     expect(() => interiorExposure(1.5, 'desktop-high')).toThrow();
+  });
+
+  it('B44: interior compensation FADES with daylight — full at night, gone at midday (default falloff=1)', () => {
+    const fullyInside = 1;
+    const nightBoost = interiorExposureCompensation(fullyInside, 0, 'desktop-high'); // full dark
+    const dayBoost = interiorExposureCompensation(fullyInside, 1, 'desktop-high'); // full daylight
+    expect(nightBoost).toBeCloseTo(interiorExposure(fullyInside, 'desktop-high'), 6); // == raw boost at night
+    expect(dayBoost).toBe(0); // gone at midday → leaving a building won't darken the daylit exterior
+    // monotonic: brighter scene ⇒ smaller interior boost.
+    expect(interiorExposureCompensation(fullyInside, 0.25, 'desktop-high')).toBeGreaterThan(
+      interiorExposureCompensation(fullyInside, 0.75, 'desktop-high'),
+    );
+    expect(() => interiorExposureCompensation(1, 1.5, 'desktop-high')).toThrow();
   });
 });
 

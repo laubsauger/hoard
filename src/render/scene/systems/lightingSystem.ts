@@ -8,7 +8,7 @@
 import { type AmbientLight, Color, type DirectionalLight, type Fog, type HemisphereLight, type Scene } from 'three';
 import type { QualityTier } from '../../../config/types';
 import type { GameRuntime } from '../../../game/runtime';
-import { approach, interiorExposure, resolveFogDistances, resolveToneExposure } from '../../lighting/lighting';
+import { approach, interiorExposureCompensation, resolveFogDistances, resolveToneExposure } from '../../lighting/lighting';
 import { computeSkyState, type SkyWeatherInput } from '../sky';
 import { isInside } from './playerLocation';
 
@@ -48,6 +48,8 @@ export interface LightingResult {
   readonly sceneBrightness: number;
   /** Resolved renderer tone-mapping exposure (B6). */
   readonly exposure: number;
+  /** Day fraction 0..1 actually used this frame (the dev override if active, else the sim clock) — for the HUD readout (T125). */
+  readonly timeOfDay: number;
 }
 
 export class LightingSystem {
@@ -66,10 +68,17 @@ export class LightingSystem {
     return this.exposure;
   }
 
-  update(dtSeconds: number, runtime: GameRuntime): LightingResult {
+  /**
+   * `timeOfDayOverride` (T125/V90): a render-side DEV override of the day/night phase for lighting tuning.
+   * When non-null the lighting uses it INSTEAD of `runtime.timeOfDay()` and the day/night cycle is frozen at
+   * that fraction. It is a VIEW override only — the deterministic fixed-tick SIM clock is never touched (V2/V26),
+   * so replay stays exact; nothing in the sim reads it.
+   */
+  update(dtSeconds: number, runtime: GameRuntime, timeOfDayOverride?: number | null): LightingResult {
     const { scene, sun, ambient, hemi, fog } = this.handles;
     const severity = runtime.weatherSeverity;
-    const sky = computeSkyState(runtime.timeOfDay(), this.cfg, this.cfg.weather, severity);
+    const timeOfDay = timeOfDayOverride ?? runtime.timeOfDay();
+    const sky = computeSkyState(timeOfDay, this.cfg, this.cfg.weather, severity);
 
     const dist = this.cfg.shadowLightDistanceMeters;
     // B13: anchor the key + its shadow frustum to the player so cast shadows always cover the play area
@@ -108,11 +117,13 @@ export class LightingSystem {
     const sceneBrightness = dayMax > 0 ? Math.min(1, Math.max(0, (sky.keyIntensity + sky.ambientIntensity) / dayMax)) : 0;
     this.exposure = resolveToneExposure({
       baseExposure: this.cfg.baseExposure,
-      interiorStops: interiorExposure(Math.min(1, Math.max(0, this.interiorTransition)), this.cfg.tier),
+      // B44/V91: the interior boost FADES in daylight so leaving a building no longer drops exposure into a
+      // dark exterior (the cutaway interior is sunlit, not a cave) — full lift only at a genuinely dark night.
+      interiorStops: interiorExposureCompensation(Math.min(1, Math.max(0, this.interiorTransition)), sceneBrightness, this.cfg.tier),
       sceneBrightness,
       nightBoostStops: this.cfg.nightExposureBoostStops,
     });
 
-    return { sceneBrightness, exposure: this.exposure };
+    return { sceneBrightness, exposure: this.exposure, timeOfDay };
   }
 }

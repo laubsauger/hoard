@@ -27,7 +27,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'shambler',
     bodyFamily: 'humanoid',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'shamble', moveSpeed: z.shamblerMoveSpeed },
+    locomotion: { kind: 'shamble', moveSpeed: z.shamblerMoveSpeed, moveSpeedScale: z.shamblerMoveSpeedScale },
+    spawnWeight: z.shamblerSpawnWeight,
     perception: { sightRange: z.shamblerSightRange, hearingRange: z.shamblerHearingRange },
     attack: { damage: z.shamblerAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.shamblerAttackCooldownSeconds },
     anatomy: {
@@ -47,7 +48,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'runner',
     bodyFamily: 'humanoid-light',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'run', moveSpeed: z.runnerMoveSpeed },
+    locomotion: { kind: 'run', moveSpeed: z.runnerMoveSpeed, moveSpeedScale: z.runnerMoveSpeedScale },
+    spawnWeight: z.runnerSpawnWeight,
     perception: { sightRange: z.runnerSightRange, hearingRange: z.runnerHearingRange },
     attack: { damage: z.runnerAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.runnerAttackCooldownSeconds },
     anatomy: {
@@ -68,7 +70,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'crawler',
     bodyFamily: 'humanoid-heavy',
     skeletonFamily: 'biped-legless',
-    locomotion: { kind: 'crawl', moveSpeed: z.crawlerMoveSpeed },
+    locomotion: { kind: 'crawl', moveSpeed: z.crawlerMoveSpeed, moveSpeedScale: z.crawlerMoveSpeedScale },
+    spawnWeight: z.crawlerSpawnWeight,
     perception: { sightRange: z.crawlerSightRange, hearingRange: z.crawlerHearingRange },
     attack: { damage: z.crawlerAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.crawlerAttackCooldownSeconds },
     anatomy: {
@@ -90,7 +93,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'armored',
     bodyFamily: 'humanoid-heavy',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'shamble', moveSpeed: z.armoredMoveSpeed },
+    locomotion: { kind: 'shamble', moveSpeed: z.armoredMoveSpeed, moveSpeedScale: z.armoredMoveSpeedScale },
+    spawnWeight: z.armoredSpawnWeight,
     perception: { sightRange: z.armoredSightRange, hearingRange: z.armoredHearingRange },
     attack: { damage: z.armoredAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.armoredAttackCooldownSeconds },
     anatomy: {
@@ -111,7 +115,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'decayed',
     bodyFamily: 'humanoid-light',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'shamble', moveSpeed: z.decayedMoveSpeed },
+    locomotion: { kind: 'shamble', moveSpeed: z.decayedMoveSpeed, moveSpeedScale: z.decayedMoveSpeedScale },
+    spawnWeight: z.decayedSpawnWeight,
     perception: { sightRange: z.decayedSightRange, hearingRange: z.decayedHearingRange },
     attack: { damage: z.decayedAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.decayedAttackCooldownSeconds },
     anatomy: {
@@ -132,7 +137,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'burned',
     bodyFamily: 'humanoid',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'shamble', moveSpeed: z.burnedMoveSpeed },
+    locomotion: { kind: 'shamble', moveSpeed: z.burnedMoveSpeed, moveSpeedScale: z.burnedMoveSpeedScale },
+    spawnWeight: z.burnedSpawnWeight,
     perception: { sightRange: z.burnedSightRange, hearingRange: z.burnedHearingRange },
     attack: { damage: z.burnedAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.burnedAttackCooldownSeconds },
     anatomy: {
@@ -153,7 +159,8 @@ export function buildArchetypes(tier: QualityTier = REFERENCE_TIER): ZombieArche
     id: 'bloated',
     bodyFamily: 'humanoid-heavy',
     skeletonFamily: 'biped-standard',
-    locomotion: { kind: 'shamble', moveSpeed: z.bloatedMoveSpeed },
+    locomotion: { kind: 'shamble', moveSpeed: z.bloatedMoveSpeed, moveSpeedScale: z.bloatedMoveSpeedScale },
+    spawnWeight: z.bloatedSpawnWeight,
     perception: { sightRange: z.bloatedSightRange, hearingRange: z.bloatedHearingRange },
     attack: { damage: z.bloatedAttackDamage, rangeMeters: p.attackRangeMeters, cooldownSeconds: z.bloatedAttackCooldownSeconds },
     anatomy: {

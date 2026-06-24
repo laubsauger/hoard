@@ -16,6 +16,8 @@ export interface FlashlightSystemConfig {
   readonly rangeMeters: number;
   /** How far IN FRONT of the player centre the beam originates (at the nose tip), so it reads as held/aimed. */
   readonly noseOffsetMeters: number;
+  /** Ground distance ahead the beam AXIS aims at — closer than rangeMeters so the cone tilts DOWN and lights the near floor (B44). */
+  readonly aimGroundDistanceMeters: number;
 }
 
 export class FlashlightSystem {
@@ -46,9 +48,12 @@ export class FlashlightSystem {
     // single-ray clamp, and a glassed window still passes light (it casts no opaque shadow), matching V84.
     f.distance = range;
     f.position.set(ox, this.cfg.heightMeters, oz); // origin at the nose tip
-    // Aim the target forward along the ground from the nose origin (same forward the avatar nose + fire dir use)
-    // so the cone rakes from nose height down across the lit area.
-    f.target.position.set(ox + cos * range, 0, oz + sin * range);
+    // B44: aim the target at the ground a SHORT distance ahead (aimGroundDistanceMeters, << range) rather than at
+    // full range — this tilts the cone AXIS steeply DOWN so its lower edge meets the floor close to the player
+    // (no dark ring at the feet) while it rakes forward. The beam still REACHES `range` (set via f.distance above,
+    // which is independent of where the target points), so the throw is preserved.
+    const aimDist = Math.min(this.cfg.aimGroundDistanceMeters, range);
+    f.target.position.set(ox + cos * aimDist, 0, oz + sin * aimDist);
     f.target.updateMatrixWorld();
     const dayScale = this.cfg.dayIntensityScale;
     const brightness = Math.min(1, Math.max(0, sceneBrightness));

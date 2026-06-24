@@ -80,5 +80,11 @@ export {
   type DiagnosticsCounters,
   type DiagnosticsStore,
 } from './diagnostics';
+export {
+  timeOfDayStore,
+  createTimeOfDayStore,
+  type TimeOfDayState,
+  type TimeOfDayStore,
+} from './timeOfDay';
 export { createThrottledPublisher, type Now } from './throttle';
 export { persistStorage, PERSIST_PREFIX } from './storage';

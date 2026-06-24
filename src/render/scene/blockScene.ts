@@ -138,6 +138,8 @@ export class BlockScene {
   /** Live render-feature toggles (mirrored from the debug-flag store each frame by syncFrame). */
   private flashlightOn = true;
   private visionConeCullOn = true;
+  /** Day fraction 0..1 the lighting used on the last synced frame (override if active, else the sim clock) — for the HUD readout (T125). */
+  private currentTod = 0;
   private readonly fog: Fog;
   private readonly playerMesh: Object3D;
   /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
@@ -322,6 +324,7 @@ export class BlockScene {
       heightMeters: this.lighting.flashlightHeightMeters,
       dayIntensityScale: this.lighting.flashlightDayIntensityScale,
       noseOffsetMeters: this.lighting.flashlightNoseOffsetMeters,
+      aimGroundDistanceMeters: this.lighting.flashlightAimGroundDistanceMeters,
     });
 
     this.houseStyle = new HouseStyleResolver(this.runtime.scene, resolveHouseVariation(this.tier));
@@ -431,6 +434,13 @@ export class BlockScene {
     this.fogOfWarEnabled = enabled;
   }
 
+  /** V90: this frame's crowd REVEAL (0..1) for a zombie slot — what the crowd packs as the per-instance fade.
+   *  Body-anchored gore (blood/wounds) multiplies its opacity by this so a splat fades WITH its zombie. When
+   *  vision-cone culling is OFF (the whole horde is drawn), every slot is fully revealed (1) — gore stays. */
+  crowdRevealOf(slot: number): number {
+    return this.visionConeCullOn ? this.visionCull.revealOf(slot) : 1;
+  }
+
   /** The live accessibility params (test/diagnostics — proves settings propagate into the scene). */
   get accessibilityParams(): RenderAccessibility {
     return this.accessibility;
@@ -448,7 +458,7 @@ export class BlockScene {
    * player avatar, hide breached section cells, drive the sun/moon from the clock, and run the cutaway.
    * `camera` is optional only for the construction-time prime; the live loop always passes it.
    */
-  syncFrame(dtSeconds: number, camera: Camera | undefined, flags?: DebugFlags): void {
+  syncFrame(dtSeconds: number, camera: Camera | undefined, flags?: DebugFlags, timeOfDayOverride?: number | null): void {
     // Mirror the live render-feature toggles (vision-cone fog-of-war + flashlight). At the construction-time
     // prime (no flags) the defaults stand. The flags drive both the crowd cull and the flashlight below.
     if (flags) {
@@ -458,7 +468,9 @@ export class BlockScene {
     // PRESERVE ORDER (B6/T98/T109): lighting resolves the scene brightness the flashlight + the passive
     // awareness radius consume. Lighting reads only the clock/weather/player (independent of crowd/doors), so it
     // runs FIRST this frame and the ambient-scaled passive radius is ready for BOTH the crowd reveal and the fog.
-    const { sceneBrightness } = this.lightingSys.update(dtSeconds, this.runtime);
+    // T125/V90: `timeOfDayOverride` is a render-side DEV phase override (lighting only) — the sim clock is untouched.
+    const { sceneBrightness, timeOfDay } = this.lightingSys.update(dtSeconds, this.runtime, timeOfDayOverride);
+    this.currentTod = timeOfDay;
     // T109/V72: ambient-scaled MINIMUM passive awareness radius — small at night (you only sense the flashlight
     // wedge + what is right beside you), large at bright midday (you see all around you on an open street). Fed
     // as the omnidirectional near-reveal radius to BOTH the crowd reveal + the fog of war; still LOS-gated (V63).
@@ -526,6 +538,11 @@ export class BlockScene {
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */
   get currentExposure(): number {
     return this.lightingSys.currentExposure;
+  }
+
+  /** Day fraction 0..1 the lighting used on the last synced frame — published to the time-of-day store for the HUD clock (T125). */
+  get currentTimeOfDay(): number {
+    return this.currentTod;
   }
 
 

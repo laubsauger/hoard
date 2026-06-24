@@ -69,3 +69,29 @@ export function computeSkyState(
 
   return { direction, keyIntensity, ambientIntensity, isDay, elevation01 };
 }
+
+/** Coarse day/night phase label for the HUD readout + dev controls (T125). */
+export type DayPhase = 'dawn' | 'day' | 'dusk' | 'night';
+
+/**
+ * Derive the day/night PHASE from the same day fraction the lighting uses — single-sourced from the SAME
+ * `sin(2π·(t−0.25))` sun elevation `computeSkyState` drives (so the label can never disagree with the actual
+ * sun): zenith at noon (t=0.5), horizon at dawn (t≈0.25) / dusk (t≈0.75), below the horizon at night. Dawn/dusk
+ * are the thin twilight bands either side of the horizon crossing (|elevation| within DUSK_BAND of 0).
+ */
+const DUSK_BAND = 0.18; // |sin elevation| below this near a horizon crossing reads as twilight (dawn/dusk)
+export function dayPhaseOf(timeOfDay: number): DayPhase {
+  if (timeOfDay < 0 || timeOfDay > 1) throw new Error(`timeOfDay must be in [0,1], got ${timeOfDay}`);
+  const sunSin = Math.sin(TAU * (timeOfDay - 0.25)); // +1 noon, 0 dawn/dusk, -1 midnight
+  if (Math.abs(sunSin) <= DUSK_BAND) return timeOfDay < 0.5 ? 'dawn' : 'dusk'; // first half of the day rises (dawn)
+  return sunSin > 0 ? 'day' : 'night';
+}
+
+/** Format a 0..1 day fraction as a 24-hour HH:MM clock (t=0 → 00:00, t=0.5 → 12:00). Pure, for the HUD (T125). */
+export function formatTimeOfDay(timeOfDay: number): string {
+  if (timeOfDay < 0 || timeOfDay > 1) throw new Error(`timeOfDay must be in [0,1], got ${timeOfDay}`);
+  const totalMinutes = Math.floor(timeOfDay * 1440) % 1440; // 1440 minutes per day
+  const hh = Math.floor(totalMinutes / 60);
+  const mm = totalMinutes % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}

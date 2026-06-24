@@ -265,6 +265,38 @@ export const crowdFields = {
     min: 0,
     max: 2.5,
   }),
+  crowdLimbChaseReachRadians: num({
+    owner: 'rendering',
+    unit: 'radians',
+    doc: 'Steady FORWARD arm reach about the shoulder while CHASING (Pursue) — the classic zombie arms-out lurch, gentler than the ATTACK lunge; both arms reach toward the heading, eased in/out by crowdLimbReachBlendHz (T122/V87).',
+    default: 0.7,
+    min: 0,
+    max: 2.5,
+  }),
+  crowdLimbReachBlendHz: num({
+    owner: 'rendering',
+    unit: 'hz',
+    doc: 'Rate the per-figure arm-raise eases toward its per-state target so a zombie noticing the player RAISES its arms smoothly instead of snapping; ~1/this seconds to converge (T122/V87).',
+    default: 6,
+    min: 0.5,
+    max: 30,
+  }),
+  crowdLimbTintHueSpread: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-figure HUE jitter (+/-) around each limb part base colour (skin on the head, clothing on the body), keyed by a stable per-slot hash — subtle warm↔cool variation so the crowd is not 100% uniform (T122/V87).',
+    default: 0.1,
+    min: 0,
+    max: 0.5,
+  }),
+  crowdLimbTintValueSpread: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-figure brightness/VALUE jitter (+/-) around each limb part base colour, keyed by a stable per-slot hash — subtle light/dark variation across figures (T122/V87).',
+    default: 0.14,
+    min: 0,
+    max: 0.6,
+  }),
   crowdLimbAttackFreqHz: num({
     owner: 'rendering',
     unit: 'hz',
@@ -300,6 +332,13 @@ export interface CrowdLimbPart {
   readonly size: readonly [number, number, number];
   /** Local center offset from the feet origin (pre per-instance scale), meters [x, y, z]. */
   readonly offset: readonly [number, number, number];
+  /**
+   * Distance (pre-scale meters) from the box CENTER up to the JOINT it swings from — half the box height for a
+   * limb (hip at the top of a leg, shoulder at the top of an arm). The walk/reach rotation pivots about this
+   * joint, not the limb midpoint (T122/V87), so the joint stays anchored to the torso while the segment swings
+   * below it. 0 = the part never swings (torso/head), so the pivot has no effect.
+   */
+  readonly pivotLen: number;
   /** Walk-phase swing sign about local X (arms/legs counter-swing); 0 keeps the part rigid. */
   readonly swingSign: number;
   /**
@@ -310,11 +349,13 @@ export interface CrowdLimbPart {
   readonly reachSign: number;
 }
 
+// pivotLen = size[1] / 2 for the swinging limbs (the joint sits at the top of the box: hip atop a leg, shoulder
+// atop an arm); 0 for the rigid torso/head. The swing/reach rotation pivots about that joint (T122/V87).
 export const CROWD_LIMB_PARTS: readonly CrowdLimbPart[] = [
-  { id: 'legLeft', size: [0.18, 0.85, 0.2], offset: [-0.13, 0.42, 0], swingSign: 1, reachSign: 0 },
-  { id: 'legRight', size: [0.18, 0.85, 0.2], offset: [0.13, 0.42, 0], swingSign: -1, reachSign: 0 },
-  { id: 'torso', size: [0.5, 0.75, 0.32], offset: [0, 1.2, 0], swingSign: 0, reachSign: 0 },
-  { id: 'head', size: [0.3, 0.32, 0.3], offset: [0, 1.72, 0], swingSign: 0, reachSign: 0 },
-  { id: 'armLeft', size: [0.14, 0.62, 0.16], offset: [-0.34, 1.2, 0], swingSign: -1, reachSign: -1 },
-  { id: 'armRight', size: [0.14, 0.62, 0.16], offset: [0.34, 1.2, 0], swingSign: 1, reachSign: -1 },
+  { id: 'legLeft', size: [0.18, 0.85, 0.2], offset: [-0.13, 0.42, 0], pivotLen: 0.425, swingSign: 1, reachSign: 0 },
+  { id: 'legRight', size: [0.18, 0.85, 0.2], offset: [0.13, 0.42, 0], pivotLen: 0.425, swingSign: -1, reachSign: 0 },
+  { id: 'torso', size: [0.5, 0.75, 0.32], offset: [0, 1.2, 0], pivotLen: 0, swingSign: 0, reachSign: 0 },
+  { id: 'head', size: [0.3, 0.32, 0.3], offset: [0, 1.72, 0], pivotLen: 0, swingSign: 0, reachSign: 0 },
+  { id: 'armLeft', size: [0.14, 0.62, 0.16], offset: [-0.34, 1.2, 0], pivotLen: 0.31, swingSign: -1, reachSign: -1 },
+  { id: 'armRight', size: [0.14, 0.62, 0.16], offset: [0.34, 1.2, 0], pivotLen: 0.31, swingSign: 1, reachSign: -1 },
 ];

@@ -248,6 +248,16 @@ export class GameRuntime {
   private readonly playerSurvival: SurvivalSystem;
   /** Data-composed archetype stats (V7) — the source of per-archetype attack damage/cooldown/reach. */
   private readonly archetypes: ArchetypeRegistry;
+  /** T124/V89 — per-archetype-index move-speed multipliers, built once from the registry; the movement step
+   *  scales the shared horde baseline by `[archetype]` so a per-archetype speed takes effect (allocation-free). */
+  private readonly archMoveSpeedScale: Float32Array;
+  /** T124/V89 — CUMULATIVE per-archetype-index spawn weights + their total, precomputed once so the weighted
+   *  spawn pick allocates nothing per spawn (gate-0 + streaming both hit it many times). */
+  private readonly archSpawnCum: Float32Array;
+  private readonly archSpawnTotal: number;
+  /** T124/V89 — monotonic counter feeding the deterministic weighted archetype pick for STREAM-promoted bodies
+   *  (district fill). Advances only on a stream spawn, in deterministic streaming order → replay-safe (V26). */
+  private streamSpawnSeq = 0;
   /** Session lifecycle store — set to 'dead' once when the player dies (game-over signal for the UI). */
   private readonly session: SessionStore;
   /** Latched so the death transition (set phase 'dead') fires exactly once. */
@@ -283,6 +293,11 @@ export class GameRuntime {
   /** V86: true while the player holds the sneak/crouch stance (lowers eye height + move speed). Set each frame
    *  from input by `setCrouch` so the eye height is correct even when standing still (not only while moving). */
   private playerCrouching = false;
+  /** V87: the window see-through VERTICAL band (world m) — sight passes through a window only when the eye is
+   *  within [sill, sill+opening]. A crouched player whose eye drops BELOW the sill is hidden through the window
+   *  (and cannot see out of it). Computed once from the wall height × the structures sill/height fractions. */
+  private readonly windowSillBottomMeters: number;
+  private readonly windowOpeningTopMeters: number;
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
   /** Resolved world config — here only for the authored wall height (glass-shatter burst origin, T108). */
@@ -353,6 +368,12 @@ export class GameRuntime {
         }
       }
     }
+    // V87: the window see-through vertical band (sill → sill+opening) in world metres.
+    {
+      const wallH = this.worldCfg.buildingWallHeightMeters;
+      this.windowSillBottomMeters = wallH * this.structuresCfg.windowSillFraction;
+      this.windowOpeningTopMeters = this.windowSillBottomMeters + wallH * this.structuresCfg.windowHeightFraction;
+    }
     // V84/V85/V86: the SEE-THROUGH + SEE-OVER scene — sight + light pass through GLASSED windows (glass is
     // transparent; only a boarded-shut 2-board window occludes) AND OVER any prop SHORTER than the CURRENT eye
     // height (a standing player sees over a 1 m fence; a crouched one does not — and is hidden behind it). Player
@@ -412,6 +433,23 @@ export class GameRuntime {
       },
     });
     this.archetypes = buildArchetypeRegistry(this.tier);
+    // T124/V89: precompute the per-archetype-index move-speed multipliers once (no per-tick lookup of the
+    // archetype record) so the movement step scales the shared horde baseline by the archetype's factor.
+    this.archMoveSpeedScale = this.archetypes.moveSpeedScales();
+    // T124/V89: precompute the CUMULATIVE spawn-weight table once so the deterministic weighted pick allocates
+    // nothing per spawn. A roster with no positive weight is a content error (V4 — no silent fallback).
+    {
+      const weights = this.archetypes.spawnWeights();
+      const cum = new Float32Array(weights.length);
+      let acc = 0;
+      for (let a = 0; a < weights.length; a++) {
+        acc += weights[a]!;
+        cum[a] = acc;
+      }
+      if (acc <= 0) throw new Error('zombie spawn weights sum to 0 — no archetype is spawnable (content error, V4)');
+      this.archSpawnCum = cum;
+      this.archSpawnTotal = acc;
+    }
     this.session = opts.sessionStore ?? sessionStore;
     this.weatherProfile = this.weatherCfg.defaultProfile as WeatherProfile;
 
@@ -443,6 +481,8 @@ export class GameRuntime {
       lastAttackTick: this.lastAttackTick,
       attackOf: (slot) => this.attackProfileOf(slot),
       damagePlayer: (slot, fraction) => this.damagePlayer(slot, fraction),
+      // T124/V89: per-archetype move-speed multipliers — the movement step scales the horde baseline per slot.
+      moveSpeedScaleByArchetype: this.archMoveSpeedScale,
     });
 
     this.combat = new CombatSystem({
@@ -596,6 +636,12 @@ export class GameRuntime {
 
   get tick(): number {
     return this.clock.tick;
+  }
+
+  /** Absolute tick (clock + reload offset) — the SAME basis a corpse `bornTick` is stamped in (`absTick`). The
+   *  render lane reads this to age the death-collapse (T122/V87); a pure read, never mutates the sim (V2). */
+  get absoluteTick(): number {
+    return this.absTick();
   }
 
   get aliveCount(): number {
@@ -905,12 +951,26 @@ export class GameRuntime {
    * flashlight clamp consult, so they see/light THROUGH glassed windows but are blocked by a boarded-shut one.
    */
   isWindowSeeThrough(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
+    // (1) is the window see-through BY STATE? (glass-transparent, < 2 boards) — edge-window resolved first, else cell.
+    let stateOpen = false;
+    let edgeResolved = false;
     if (ncx !== undefined && ncy !== undefined) {
       const e = this.windowSystem.edgeCellOf(cx, cy, ncx, ncy);
-      if (e >= 0) return this.windowSystem.isSeeThrough(e);
+      if (e >= 0) {
+        stateOpen = this.windowSystem.isSeeThrough(e);
+        edgeResolved = true;
+      }
     }
-    const nav = this.windowSystem.cellOf(cx, cy);
-    return nav >= 0 && this.windowSystem.isSeeThrough(nav);
+    if (!edgeResolved) {
+      const nav = this.windowSystem.cellOf(cx, cy);
+      stateOpen = nav >= 0 && this.windowSystem.isSeeThrough(nav);
+    }
+    if (!stateOpen) return false;
+    // (2) V87 HEIGHT gate — sight passes through the window's vertical OPENING only. The (player-referenced) eye
+    // must be within [sill, opening top]; a CROUCHED player whose eye drops below the sill is hidden through the
+    // window (and cannot see out of it), a STANDING one is seen. Same dynamic threshold as the see-over (V86).
+    const eye = this.playerEyeHeight();
+    return eye > this.windowSillBottomMeters && eye < this.windowOpeningTopMeters;
   }
 
   /** The window NEAREST the player within interaction reach, or null. */
@@ -1488,23 +1548,27 @@ export class GameRuntime {
   }
 
   /**
-   * Deterministic weighted archetype pick (no RNG — hash of the spawn index, V26) so the horde is a MIX:
-   * mostly shamblers with rarer runners/crawlers/armored/decayed/burned/bloated. Spawn distribution is
-   * content tuning; clamped to the registered archetype count so it never indexes a missing archetype.
+   * T124/V89 — DETERMINISTIC weighted archetype pick (no `Math.random`; a hash of the spawn index, V26) so the
+   * spawned horde is the STANDARD / BLOATED / RUNNER mix: STANDARD dominant, BLOATED + RUNNER sprinkled. The
+   * weights come from the archetype registry (`spawnWeight`, pure config — V4), never a literal table; ecology
+   * variants weighted 0 are skipped. The same `i` always yields the same archetype, so a replay reproduces the
+   * exact roster (V26). Throws if the roster has no positive weight (a content error — no silent fallback).
    */
   private pickSpawnArchetype(i: number): number {
-    // cumulative weights over archetype indices 0..6 (shambler common → bloated rare).
-    const CUM = [50, 64, 76, 84, 92, 97, 100];
-    const n = this.archetypes.count;
-    const h = (i * 2654435761) >>> 0; // Knuth multiplicative hash → spread
-    const r = h % 100;
-    for (let a = 0; a < CUM.length; a++) {
-      if (r < CUM[a]!) return Math.min(a, n - 1);
+    const cum = this.archSpawnCum;
+    const h = (i * 2654435761) >>> 0; // Knuth multiplicative hash → spread the index across the weight range
+    const r = h % this.archSpawnTotal;
+    for (let a = 0; a < cum.length; a++) {
+      if (r < cum[a]!) return a;
     }
-    return 0;
+    return cum.length - 1; // unreachable (r < total = last cumulative) — kept total-exhaustive for the type checker
   }
 
-  /** Spawn one zombie: mint an EntityId, reserve a SoA slot, register a collision agent, map the seam. */
+  /**
+   * Spawn one zombie: mint an EntityId, reserve a SoA slot, register a collision agent, map the seam. Health is
+   * the per-archetype durability (T124/V89 — a BLOATED body spawns with far more health than a RUNNER, so it
+   * takes more hits to kill); the default archetype 0 (STANDARD) keeps the baseline `zombieBaseHealth`.
+   */
   spawnZombie(position: Vec3, archetypeId = 0): EntityId {
     const entity = this.ids.next<EntityId>('entity');
     this.placeZombie(entity, {
@@ -1515,7 +1579,7 @@ export class GameRuntime {
       z: position.z,
       heading: 0,
       state: 0,
-      health: this.combatCfg.zombieBaseHealth,
+      health: this.archetypes.byIndexOf(archetypeId).durability.health,
       anatomyFlags: 0,
       navGroup: HORDE_NAV_GROUP,
     });
@@ -1642,12 +1706,15 @@ export class GameRuntime {
     }
   }
 
-  /** Promote up to `count` abstract members of a sector to live sim, scattered near the sector centre. */
+  /** Promote up to `count` abstract members of a sector to live sim, scattered near the sector centre.
+   *  T124/V89: each promoted body draws its archetype from the SAME deterministic weighted pick as the gate-0
+   *  horde (STANDARD dominant, BLOATED + RUNNER sprinkled), keyed by a monotonic stream counter so the streamed
+   *  population is a varied mix — not all-STANDARD — while staying replay-deterministic (V26). */
   private promoteSector(sectorId: number, count: number, centerX: number, centerZ: number): void {
     const radius = this.combatCfg.gateZeroSpawnRadiusMeters;
     for (let i = 0; i < count; i++) {
       const { x, z } = this.scatterWalkable(centerX, centerZ, radius);
-      const entity = this.spawnZombie({ x, y: 0, z });
+      const entity = this.spawnZombie({ x, y: 0, z }, this.pickSpawnArchetype(this.streamSpawnSeq++));
       const slot = this.entityToSlot.get(entity);
       if (slot !== undefined) this.slotToSector.set(slot, sectorId);
     }

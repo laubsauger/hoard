@@ -56,7 +56,11 @@ export interface LimbGaitConfig {
   readonly walkBobMeters: number;
   readonly chaseBobMeters: number;
   readonly attackReachRadians: number;
+  /** Steady forward arm-reach while CHASING (Pursue) — the classic zombie arms-out lurch (T122/V87). */
+  readonly chaseReachRadians: number;
   readonly attackFreqHz: number;
+  /** Ease rate (Hz) the per-slot arm-raise converges to its per-state target so it never hard-snaps (T122/V87). */
+  readonly reachBlendHz: number;
   readonly speedRefMetersPerSecond: number;
 }
 
@@ -104,13 +108,41 @@ export function gaitPhaseRateHz(state: number, speed: number, cfg: LimbGaitConfi
 }
 
 /**
+ * Behaviour-state → FORWARD arm-reach TARGET (radians, phase-pulsed) — the value the eased per-slot arm-raise
+ * chases (T122/V87). It is the single source of the reach so the easing in `packLimbInputs` and the instantaneous
+ * value in `limbGait` agree. Sign is a MAGNITUDE; `composeLimbMatrix` applies each arm's `reachSign` so BOTH arms
+ * reach the same way (forward), not the locomotion counter-swing.
+ *  - Pursue (chase): a STEADY forward reach (the classic zombie arms-out lurch) with a gentle pulse.
+ *  - Attack: a stronger grasping LUNGE pulse.
+ *  - Stagger: a brief BACKWARD recoil (negative).
+ *  - Idle / Wander / Down: 0 — the arms hang and lumber.
+ * PURE: depends only on the inputs (deterministic, V26).
+ */
+export function stateReachTarget(state: number, phase: number, cfg: LimbGaitConfig): number {
+  const s = Math.sin(phase * TAU);
+  switch (state) {
+    case ZombieState.Pursue:
+      return cfg.chaseReachRadians * (0.75 + 0.25 * s);
+    case ZombieState.Attack:
+      return cfg.attackReachRadians * (0.6 + 0.4 * s);
+    case ZombieState.Stagger:
+      return -cfg.attackReachRadians * 0.5 * Math.abs(s);
+    case ZombieState.Idle:
+    case ZombieState.Wander:
+    case ZombieState.Down:
+    default:
+      return 0;
+  }
+}
+
+/**
  * Behaviour-state → per-figure swing/bob/reach for the current phase (T111/V75). Writes into the caller-owned
  * `out` (reused per frame → allocation-free, V24) and returns it. PURE: output depends only on the inputs
  * (state/speed/phase/cfg), so it is deterministic + unit-testable without a GPU.
  *  - idle/down: a near-still breathing weight-shift (idle swing + idle bob), no reach.
  *  - walk: counter-swing + bob, amplitude scaled by the locomotion factor (paced to speed).
- *  - chase: wider swing + deeper bob, scaled by the locomotion factor (running).
- *  - attack: legs near-planted (idle swing); a FORWARD arm reach (always forward, pulsing) — the lunge.
+ *  - chase (Pursue): wider swing + deeper bob (running) PLUS a steady FORWARD arm reach (the lurch, T122/V87).
+ *  - attack: legs near-planted (idle swing); a stronger FORWARD arm reach (always forward, pulsing) — the lunge.
  *  - stagger: a jerky swing + a brief BACKWARD arm recoil (negative reach).
  */
 export function limbGait(out: LimbGait, state: number, speed: number, phase: number, cfg: LimbGaitConfig): LimbGait {
@@ -118,26 +150,23 @@ export function limbGait(out: LimbGait, state: number, speed: number, phase: num
   const factor = clamp01(speed / cfg.speedRefMetersPerSecond);
   switch (state) {
     case ZombieState.Pursue:
+      // Running gait + a steady forward arm reach (the chase lurch — reach via stateReachTarget below, T122/V87).
       out.swing = cfg.chaseSwingRadians * factor * s;
       out.bob = bobCurve(phase) * lerp(cfg.idleBobMeters, cfg.chaseBobMeters, factor);
-      out.reach = 0;
       break;
     case ZombieState.Wander:
       out.swing = cfg.walkSwingRadians * factor * s;
       out.bob = bobCurve(phase) * lerp(cfg.idleBobMeters, cfg.walkBobMeters, factor);
-      out.reach = 0;
       break;
     case ZombieState.Attack:
-      // Planted legs (minimal swing) + a forward grasping lunge: reach stays forward (>0) and pulses with phase.
+      // Planted legs (minimal swing) + a forward grasping lunge (reach via stateReachTarget below).
       out.swing = cfg.idleSwingRadians * s;
       out.bob = bobCurve(phase) * cfg.idleBobMeters;
-      out.reach = cfg.attackReachRadians * (0.6 + 0.4 * s);
       break;
     case ZombieState.Stagger:
       // Brief recoil: a jerky swing + arms thrown BACK (negative reach → backward via reachSign).
       out.swing = cfg.chaseSwingRadians * s;
       out.bob = bobCurve(phase) * cfg.idleBobMeters;
-      out.reach = -cfg.attackReachRadians * 0.5 * Math.abs(s);
       break;
     case ZombieState.Idle:
     case ZombieState.Down:
@@ -145,9 +174,10 @@ export function limbGait(out: LimbGait, state: number, speed: number, phase: num
       // Near-still: a subtle breathing weight-shift, minimal limb swing, no reach.
       out.swing = cfg.idleSwingRadians * s;
       out.bob = bobCurve(phase) * cfg.idleBobMeters;
-      out.reach = 0;
       break;
   }
+  // Reach (forward arm-raise) is the single state→reach mapping shared with packLimbInputs' eased accumulator.
+  out.reach = stateReachTarget(state, phase, cfg);
   return out;
 }
 
@@ -170,6 +200,14 @@ export interface LimbPackOptions {
   /** Per-figure reveal ALPHA output (V65): the fade is written here, NOT baked into scale, so figures fade
    *  in/out instead of shrinking. Compacted to the front like the other outputs. */
   readonly outFade?: Float32Array | undefined;
+  /**
+   * Per-figure EASED forward arm-reach output (radians, T122/V87): the per-slot `reachState` accumulator is eased
+   * toward `stateReachTarget` at `gait.reachBlendHz` and the result written here (compacted), so a zombie that just
+   * noticed the player RAISES its arms smoothly instead of snapping. composeLimbMatrix applies the per-arm reachSign.
+   */
+  readonly outReach?: Float32Array | undefined;
+  /** Per-figure SoA slot output (T122/V87): the stable identity the render lane hashes for per-instance tint. */
+  readonly outSlot?: Float32Array | undefined;
   /** Real frame delta (seconds) used to advance each live slot's gait phase at its per-state rate (T111/V75). */
   readonly dtSeconds: number;
   /** Per-state gait tunables driving the phase rate (and carried through to the per-part transform) (T111/V75). */
@@ -204,9 +242,10 @@ export function packLimbInputs(
   outState: Uint8Array,
   outSpeed: Float32Array,
   phaseState: Float32Array,
+  reachState: Float32Array,
   opts: LimbPackOptions,
 ): LimbPackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility, outFade, dtSeconds, gait } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility, outFade, outReach, outSlot, dtSeconds, gait } = opts;
   if (count < 0) throw new Error(`count must be >= 0, got ${count}`);
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
   if (outPose.length < capacity * FLOATS_PER_LIMB_POSE) {
@@ -218,6 +257,9 @@ export function packLimbInputs(
   if (outState.length < capacity) throw new Error(`outState too small: need ${capacity}, got ${outState.length}`);
   if (outSpeed.length < capacity) throw new Error(`outSpeed too small: need ${capacity}, got ${outSpeed.length}`);
   if (phaseState.length < count) throw new Error(`phaseState too small: need ${count}, got ${phaseState.length}`);
+  if (reachState.length < count) throw new Error(`reachState too small: need ${count}, got ${reachState.length}`);
+  if (outReach && outReach.length < capacity) throw new Error(`outReach too small: need ${capacity}, got ${outReach.length}`);
+  if (outSlot && outSlot.length < capacity) throw new Error(`outSlot too small: need ${capacity}, got ${outSlot.length}`);
 
   const alive = requireView<Uint8Array>(views, 'alive');
   const position = requireView<Float32Array>(views, 'position');
@@ -271,15 +313,34 @@ export function packLimbInputs(
     outPhase[live] = ph;
     outState[live] = st;
     outSpeed[live] = speed;
+
+    // T122/V87: ease THIS slot's forward arm-reach toward its per-state target so the chase/attack arm-raise blends
+    // in (and drops out) smoothly instead of snapping when the zombie notices/loses the player. Per-SLOT (stable
+    // identity, like phaseState); exponential approach at reachBlendHz, allocation-free + deterministic given dt.
+    if (outReach) {
+      const target = stateReachTarget(st, ph, gait);
+      const k = clamp01(gait.reachBlendHz * dtSeconds);
+      const r = reachState[slot]! + (target - reachState[slot]!) * k;
+      reachState[slot] = r;
+      outReach[live] = r;
+    }
+    if (outSlot) outSlot[live] = slot;
     live++;
   }
   return { liveCount: live };
 }
 
-/** Per-part placement: box dims, local offset from the feet origin, and swing/reach signs (0 = static). */
+/** Per-part placement: box dims, local offset from the feet origin, joint pivot, and swing/reach signs (0 = static). */
 export interface LimbPartPlacement {
   /** Local center offset from the ground origin (pre-scale), meters [x,y,z]. */
   readonly offset: readonly [number, number, number];
+  /**
+   * Distance (pre-scale meters) from the box CENTER up to the JOINT the limb swings from (half the box height:
+   * hip atop a leg, shoulder atop an arm). The swing/reach rotation pivots about this joint, NOT the limb
+   * midpoint (T122/V87), so the joint stays anchored to the torso while the segment swings below/around it.
+   * 0 = the part never swings (torso/head) → the pivot reduces to the plain centered transform.
+   */
+  readonly pivotLen: number;
   /** Walk-phase swing sign about local X (arms/legs counter-swing); 0 keeps the part rigid. */
   readonly swingSign: number;
   /** ATTACK forward-reach sign about local X (T111/V75); non-zero only on arms (same sign on both). 0 = no reach. */
@@ -289,9 +350,18 @@ export interface LimbPartPlacement {
 /**
  * Compose one column-major instance mat4 for a body part into `out` at byte-free element `base`.
  * Transform = Translate(worldCenter) * RotY(heading) * RotX(angle) * Scale(scale), where the local-X rotation
- * angle = swing*swingSign + reach*reachSign: the gait counter-swing (legs+arms opposite) PLUS the attack reach
- * (arms only, both forward — T111/V75). worldCenter = basePos + RotY(heading) * (offset * scale) + vertical
- * bob. When `visible` is false (the part's region is severed, V17), all 16 elements are zeroed → a degenerate
+ * angle = swing*swingSign + reach*reachSign: the gait counter-swing (legs+arms opposite) PLUS the attack/chase
+ * reach (arms only, both forward — T111/V75, T122/V87).
+ *
+ * JOINT PIVOT (T122/V87): the limb rotates about its JOINT (the top of the box — hip for a leg, shoulder for an
+ * arm), NOT its own center. With pivot length L = `placement.pivotLen` (0 for the rigid torso/head), the box
+ * center in the rig-local frame is the joint MINUS the rotated half-segment: localCenter = (ox, oy + L*(1-cosθ),
+ * oz - L*sinθ), θ = the local-X angle. At θ=0 this is the plain `offset`, and the joint (ox, oy+L, oz) stays put
+ * for every θ — so hips/shoulders stay anchored to the torso while the segment swings below/around them. The
+ * basis (columns 0-2) is unchanged; only the translation (column 3) accounts for the pivot. worldCenter =
+ * basePos + RotY(heading) * (localCenter * scale) + vertical bob.
+ *
+ * When `visible` is false (the part's region is severed, V17), all 16 elements are zeroed → a degenerate
  * (invisible) instance, so dismemberment READS without removing/repacking the instance. Pure math; no GPU dep.
  */
 export function composeLimbMatrix(
@@ -323,6 +393,12 @@ export function composeLimbMatrix(
   const ca = Math.cos(sw);
   const sa = Math.sin(sw);
   const [ox, oy, oz] = placement.offset;
+  // JOINT PIVOT (T122/V87): shift the box center so the limb rotates about its joint (top of the box) instead of
+  // its midpoint. localCenter = joint - RotX(sw)*(0,L,0) = (ox, oy + L*(1-cosθ), oz - L*sinθ). L=0 → plain offset.
+  const L = placement.pivotLen;
+  const lx = ox;
+  const ly = oy + L * (1 - ca);
+  const lz = oz - L * sa;
 
   // Column 0 (rotated X axis * scale)
   out[base] = cy * scale;
@@ -339,10 +415,10 @@ export function composeLimbMatrix(
   out[base + 9] = -sa * scale;
   out[base + 10] = cy * ca * scale;
   out[base + 11] = 0;
-  // Column 3 (world translation)
-  out[base + 12] = basePos[0]! + (cy * ox + sy * oz) * scale;
-  out[base + 13] = basePos[1]! + oy * scale + bobY;
-  out[base + 14] = basePos[2]! + (-sy * ox + cy * oz) * scale;
+  // Column 3 (world translation) — pivot-adjusted local center, yawed by heading, plus the body bob.
+  out[base + 12] = basePos[0]! + (cy * lx + sy * lz) * scale;
+  out[base + 13] = basePos[1]! + ly * scale + bobY;
+  out[base + 14] = basePos[2]! + (-sy * lx + cy * lz) * scale;
   out[base + 15] = 1;
 }
 

@@ -70,6 +70,50 @@ export function variationScale(seed: number, variationCount: number, scaleMin: n
 }
 
 /**
+ * Stable [0,1) hash of a slot + salt — a FINER-grained companion to the bucketed `variationSeed` for per-instance
+ * tint / jitter (T122). The salt decorrelates independent visual channels (hue vs value vs scale) from the same
+ * slot; the integer mix then maps to a float in [0,1). Stable per slot across frames + replay-deterministic (V26,
+ * V87) — NEVER `Math.random()` per frame.
+ */
+export function variationHash01(slot: number, salt: number): number {
+  // lowbias32 integer finalizer — well-distributed (near-uniform) + cheap; the salt decorrelates channels.
+  let x = (slot >>> 0) ^ Math.imul(salt >>> 0, 0x9e3779b9);
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  x = (x ^ (x >>> 16)) >>> 0;
+  return x / 4294967296;
+}
+
+function clamp01t(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+/**
+ * Write a SUBTLE, stable per-instance TINT of a base RGB colour into `out[o..o+2]` — the crowd colour variation
+ * (T122/V87). `hueJit`/`valJit` ∈ [-1,1] (from `variationHash01`) shift HUE (warm↔cool via an opposing R/B skew)
+ * and VALUE (brightness) by the small `hueSpread`/`valSpread` fractions, so no two figures read identically while
+ * the jitter stays gentle. PURE + deterministic — same inputs → same tint every frame (V26); allocation-free
+ * (writes into a caller-owned array, V24). Channels are clamped to [0,1].
+ */
+export function variationTint(
+  baseR: number,
+  baseG: number,
+  baseB: number,
+  hueJit: number,
+  valJit: number,
+  hueSpread: number,
+  valSpread: number,
+  out: Float32Array | number[],
+  o = 0,
+): void {
+  const v = 1 + valJit * valSpread;
+  const h = hueJit * hueSpread;
+  out[o] = clamp01t(baseR * v * (1 + h));
+  out[o + 1] = clamp01t(baseG * v);
+  out[o + 2] = clamp01t(baseB * v * (1 - h));
+}
+
+/**
  * Pack live zombies from SoA views into the per-instance GPU INPUT arrays (pose + meta). Dead slots
  * (alive == 0) are skipped and live instances are compacted to the front, so the caller sets
  * InstancedMesh.count = liveCount and the compute shader assembles transforms for index 0..liveCount-1.

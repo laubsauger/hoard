@@ -124,9 +124,20 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
   // Bug A activation: feed zombie body-gore the struck body's live transform each frame so blood rides the
   // body down to the corpse instead of hanging mid-air. `runtime` is reassigned on load — the arrow reads
   // the live binding, so a reload re-targets automatically. null ⇒ the body is gone → that gore fades.
-  bloodView.sim.setBodyAnchors({ resolve: (entity) => getRuntime().bodyAnchor(entity as unknown as EntityId) });
-  // Same body-anchor for dark WOUND marks (T81 surface-stick) so they ride the struck body + corpse, not float.
-  impactView.setBodyAnchors({ resolve: (entity) => getRuntime().bodyAnchor(entity as unknown as EntityId) });
+  // V90: resolve the struck body's transform AND its current crowd REVEAL (0..1), so body-anchored gore fades
+  // WITH a vision-culled/faded zombie instead of floating at full opacity. The reveal is a render value (per
+  // crowd slot) looked up via the entity→slot map; a non-zombie / gone body resolves to 1 (a corpse fades by age).
+  const bodyAnchorWithReveal = (entity: number) => {
+    const rt = getRuntime();
+    const a = rt.bodyAnchor(entity as unknown as EntityId);
+    if (!a) return null;
+    const slot = rt.slotOf(entity as unknown as EntityId);
+    (a as { reveal?: number }).reveal = slot !== undefined ? scene.crowdRevealOf(slot) : 1;
+    return a;
+  };
+  bloodView.sim.setBodyAnchors({ resolve: bodyAnchorWithReveal });
+  // Same body-anchor (+ reveal) for dark WOUND marks (T81 surface-stick) so they ride the struck body + corpse, not float.
+  impactView.setBodyAnchors({ resolve: bodyAnchorWithReveal });
   // Firearm range = the clean-miss tracer length. stopDistance < range ⇒ the shot stopped on structure
   // (a wall), not a clean miss to max range — that is the STRUCTURE-impact branch (V57). Range carries no
   // tier overrides, so resolving at the render tier matches the sim's authoritative value.

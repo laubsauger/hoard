@@ -48,7 +48,7 @@ import {
 } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
-import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed } from './packing';
+import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed, variationHash01, variationTint } from './packing';
 import type { VisionCull } from './visionCull';
 import {
   composeLimbMatrix,
@@ -63,8 +63,16 @@ import {
 
 /** Base crowd flesh/clothing tint; per-instance variation modulates its brightness in the shader (V2). */
 const CROWD_BASE_COLOR = 0x4a5a3a;
-/** Limbed-figure tint — a touch brighter than the horde box so hero/active figures read against the mass. */
+/** Limbed-figure CLOTHING tint (torso/arms/legs) — a touch brighter than the horde box so hero/active figures read
+ *  against the mass. Per-instance hue/value jitter varies it per zombie (T122/V87). */
 const CROWD_LIMB_COLOR = 0x52613f;
+/** Limbed-figure SKIN tint (head) — a warmer, paler decayed-flesh tone, distinct from the clothing (T122/V87). */
+const CROWD_LIMB_SKIN_COLOR = 0x6e6a52;
+/** Subtle per-instance HUE skew on the box horde colour, keyed by the variation seed (T122/V87). */
+const CROWD_BOX_HUE_SPREAD = 0.14;
+/** Salts decorrelating the per-slot hue vs value tint hashes (T122/V87). */
+const TINT_HUE_SALT = 0x1111;
+const TINT_VAL_SALT = 0x2222;
 const TAU = Math.PI * 2;
 
 export interface CrowdSettings {
@@ -81,6 +89,10 @@ export interface CrowdSettings {
   readonly limbedMaxSimTier: number;
   /** Per-state limb gait tunables (swing/bob/reach/frequency by ZombieState + speed) (T111/V75). */
   readonly gait: LimbGaitConfig;
+  /** Per-figure HUE jitter (+/-) on the limbed figures' part colours, keyed by a per-slot hash (T122/V87). */
+  readonly limbTintHueSpread: number;
+  /** Per-figure VALUE (brightness) jitter (+/-) on the limbed figures' part colours (T122/V87). */
+  readonly limbTintValueSpread: number;
 }
 
 export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
@@ -107,9 +119,13 @@ export function resolveCrowdSettings(tier: QualityTier): CrowdSettings {
       walkBobMeters: resolve(renderingConfig.crowdLimbBobMeters, tier),
       chaseBobMeters: resolve(renderingConfig.crowdLimbChaseBobMeters, tier),
       attackReachRadians: resolve(renderingConfig.crowdLimbAttackReachRadians, tier),
+      chaseReachRadians: resolve(renderingConfig.crowdLimbChaseReachRadians, tier),
       attackFreqHz: resolve(renderingConfig.crowdLimbAttackFreqHz, tier),
+      reachBlendHz: resolve(renderingConfig.crowdLimbReachBlendHz, tier),
       speedRefMetersPerSecond: resolve(renderingConfig.crowdLimbGaitSpeedRefMetersPerSecond, tier),
     },
+    limbTintHueSpread: resolve(renderingConfig.crowdLimbTintHueSpread, tier),
+    limbTintValueSpread: resolve(renderingConfig.crowdLimbTintValueSpread, tier),
   };
 }
 
@@ -147,28 +163,43 @@ export class CrowdLimbs {
   private readonly variationCount: number;
   private readonly scaleMin: number;
   private readonly scaleMax: number;
+  /** Per-figure tint jitter spreads (hue + value) for the per-instance colour variation (T122/V87). */
+  private readonly tintHueSpread: number;
+  private readonly tintValueSpread: number;
+  /** Per-part base RGB (head = skin, body = clothing), tinted per-instance into the instTint attribute (T122/V87). */
+  private readonly partBaseColor: Float32Array[];
 
   // Per-frame limbed inputs (compacted to the front) + scratch for instance-matrix composition.
   private readonly pose: Float32Array;
   private readonly scaleArr: Float32Array;
-  /** Per-figure reveal alpha (V65) — copied into every part's instFade attribute each frame so figures FADE
-   *  (never shrink). */
+  /** Per-figure reveal alpha (V65) — copied into every part's instTint.w each frame so figures FADE (never shrink). */
   private readonly fadeArr: Float32Array;
-  private readonly fadeAttrs: InstancedBufferAttribute[] = [];
+  /** Per-part instanced tint+fade attribute (vec4 = [r,g,b, fade]); ONE vertex buffer carries colour AND alpha
+   *  (T122/V87) — staying within the WebGPU 8-vertex-buffer limit (pos+normal+uv + instanceMatrix×4 + instTint). */
+  private readonly tintAttrs: InstancedBufferAttribute[] = [];
   private readonly anatomy: Uint32Array;
   private readonly phase: Float32Array;
   /** Per-instance ZombieState + planar speed (T111/V75), compacted to the front by packLimbInputs. */
   private readonly stateArr: Uint8Array;
   private readonly speedArr: Float32Array;
-  /** Per-instance gait swing/bob/reach for this frame (precomputed once per figure, reused across parts). */
+  /** Per-instance SoA slot (T122/V87) — the stable identity hashed for per-instance tint. */
+  private readonly slotArr: Float32Array;
+  /** Per-instance gait swing/bob + eased forward reach for this frame (precomputed once per figure, reused
+   *  across parts). reachArr is filled by packLimbInputs (per-slot eased arm-raise, T122/V87). */
   private readonly swingArr: Float32Array;
   private readonly bobArr: Float32Array;
   private readonly reachArr: Float32Array;
+  /** Per-instance hue/value tint jitter ∈ [-1,1] (precomputed once per figure from its slot hash, T122/V87). */
+  private readonly hueArr: Float32Array;
+  private readonly valArr: Float32Array;
   private readonly gaitScratch: LimbGait = { swing: 0, bob: 0, reach: 0 };
   /** Per-SLOT gait phase accumulator (stable identity, seeded with per-slot offsets so figures are NOT in
    *  lockstep). The SoA animPhase is sim-owned + unadvanced, so the limb tier owns its phase here (V3). Lazily
    *  sized to the SoA slot count on first update. */
   private slotPhase: Float32Array | null = null;
+  /** Per-SLOT eased forward arm-reach accumulator (T122/V87) — eased toward the per-state target so the chase/
+   *  attack arm-raise blends in/out smoothly. Lazily sized to the SoA slot count alongside slotPhase. */
+  private slotReach: Float32Array | null = null;
   private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
   private readonly posScratch = new Float32Array(3);
   private readonly mat4 = new Matrix4();
@@ -180,6 +211,17 @@ export class CrowdLimbs {
     this.variationCount = settings.variationCount;
     this.scaleMin = settings.scaleMin;
     this.scaleMax = settings.scaleMax;
+    this.tintHueSpread = settings.limbTintHueSpread;
+    this.tintValueSpread = settings.limbTintValueSpread;
+
+    // Per-part base colour: the head reads as SKIN, the body (torso/arms/legs) as CLOTHING; per-instance jitter
+    // varies both per zombie (T122/V87).
+    const skin = new Color(CROWD_LIMB_SKIN_COLOR);
+    const cloth = new Color(CROWD_LIMB_COLOR);
+    this.partBaseColor = CROWD_LIMB_PARTS.map((p) => {
+      const c = p.id === 'head' ? skin : cloth;
+      return new Float32Array([c.r, c.g, c.b]);
+    });
 
     // One shared material family across all parts (no per-zombie/per-part material, V2).
     this.material = registry.track(
@@ -201,22 +243,28 @@ export class CrowdLimbs {
       mesh.frustumCulled = false; // figures span the crowd bounds; cluster-cull later (T30)
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      // V65: per-instance reveal ALPHA so figures FADE in/out (never scale/shrink — height stays constant). The
-      // limb uses NO instanceColor (it's a flat colour, no per-instance variation), which frees the vertex
-      // buffer this `instFade` attribute needs: position+normal+uv + instanceMatrix×4 + instFade = 8 (the WebGPU
-      // limit). The shared material reads `instFade` as opacity (set below).
-      const fadeAttr = new InstancedBufferAttribute(new Float32Array(this.budget).fill(1), 1);
-      fadeAttr.setUsage(DynamicDrawUsage);
-      geo.setAttribute('instFade', fadeAttr);
-      this.fadeAttrs.push(fadeAttr);
+      // T122/V87: per-instance TINT + reveal ALPHA ride in ONE vec4 instanced attribute [r,g,b, fade]. Instead of
+      // instanceColor (a separate binding) this keeps the limb within the WebGPU 8-vertex-buffer budget:
+      // position+normal+uv + instanceMatrix×4 + instTint = 8. The shared material reads .xyz as colour + .w as
+      // opacity (set below). Figures FADE via alpha (V65 — never scale/shrink) AND vary in colour per zombie.
+      const tint = new Float32Array(this.budget * 4);
+      for (let i = 0; i < this.budget; i++) tint[i * 4 + 3] = 1; // start fully visible
+      const tintAttr = new InstancedBufferAttribute(tint, 4);
+      tintAttr.setUsage(DynamicDrawUsage);
+      geo.setAttribute('instTint', tintAttr);
+      this.tintAttrs.push(tintAttr);
       registry.track(mesh, 'buffer', `crowd.limbMesh.${part.id}`);
       parent.add(mesh);
       meshes.push(mesh);
     }
     this.meshes = meshes;
     this.material.transparent = true;
-    this.material.opacityNode = attribute('instFade', 'float');
-    this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign, reachSign: p.reachSign }));
+    // [r,g,b, fade] per instance in ONE vec4 attribute (T122/V87). Explicit 'vec4' type param so the swizzle
+    // accessors (.xyz/.w) resolve (a bare string arg widens to `string` and drops the typed swizzles).
+    const instTint = attribute<'vec4'>('instTint', 'vec4');
+    this.material.colorNode = instTint.xyz; // per-instance skin/clothing tint (T122/V87)
+    this.material.opacityNode = instTint.w; // per-instance reveal alpha (V65)
+    this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, pivotLen: p.pivotLen, swingSign: p.swingSign, reachSign: p.reachSign }));
     this.severBits = CROWD_LIMB_PARTS.map((p) => {
       const region = LIMB_REGION[p.id];
       return region ? regionBit(region) : 0;
@@ -229,9 +277,12 @@ export class CrowdLimbs {
     this.phase = new Float32Array(this.budget);
     this.stateArr = new Uint8Array(this.budget);
     this.speedArr = new Float32Array(this.budget);
+    this.slotArr = new Float32Array(this.budget);
     this.swingArr = new Float32Array(this.budget);
     this.bobArr = new Float32Array(this.budget);
     this.reachArr = new Float32Array(this.budget);
+    this.hueArr = new Float32Array(this.budget);
+    this.valArr = new Float32Array(this.budget);
   }
 
   /**
@@ -250,6 +301,12 @@ export class CrowdLimbs {
       if (this.slotPhase) next.set(this.slotPhase.subarray(0, Math.min(this.slotPhase.length, count)));
       this.slotPhase = next;
     }
+    // Per-SLOT eased arm-reach accumulator (T122/V87), sized alongside slotPhase; seeded 0 (arms down).
+    if (!this.slotReach || this.slotReach.length < count) {
+      const next = new Float32Array(count);
+      if (this.slotReach) next.set(this.slotReach.subarray(0, Math.min(this.slotReach.length, count)));
+      this.slotReach = next;
+    }
 
     const { liveCount } = packLimbInputs(
       views,
@@ -260,6 +317,7 @@ export class CrowdLimbs {
       this.stateArr,
       this.speedArr,
       this.slotPhase,
+      this.slotReach,
       {
         count,
         capacity: this.budget,
@@ -269,24 +327,33 @@ export class CrowdLimbs {
         maxSimTier: this.maxSimTier,
         visibility,
         outFade: this.fadeArr,
+        outReach: this.reachArr, // per-slot EASED forward arm-raise (T122/V87)
+        outSlot: this.slotArr, // stable identity for the per-instance tint hash (T122/V87)
         dtSeconds,
         gait: this.gait,
       },
     );
 
-    // Pre-pass: resolve each figure's state-driven swing/bob/reach ONCE (reused across all 6 parts). Writes
-    // into per-instance scratch arrays — allocation-free (the gait writes into a reused scratch object, V24).
+    // Pre-pass: resolve each figure's state-driven swing/bob ONCE (reused across all 6 parts) + its stable tint
+    // jitter. reachArr is already the eased forward arm-raise from packLimbInputs (T122/V87). Allocation-free.
     for (let i = 0; i < liveCount; i++) {
       const g = limbGait(this.gaitScratch, this.stateArr[i]!, this.speedArr[i]!, this.phase[i]!, this.gait);
       this.swingArr[i] = g.swing;
       this.bobArr[i] = g.bob;
-      this.reachArr[i] = g.reach;
+      const slot = this.slotArr[i]!;
+      this.hueArr[i] = variationHash01(slot, TINT_HUE_SALT) * 2 - 1;
+      this.valArr[i] = variationHash01(slot, TINT_VAL_SALT) * 2 - 1;
     }
 
     for (let part = 0; part < this.meshes.length; part++) {
       const mesh = this.meshes[part]!;
       const placement = this.placements[part]!;
       const bit = this.severBits[part]!;
+      const base = this.partBaseColor[part]!;
+      const baseR = base[0]!;
+      const baseG = base[1]!;
+      const baseB = base[2]!;
+      const tintArr = this.tintAttrs[part]!.array as Float32Array;
       for (let i = 0; i < liveCount; i++) {
         const p = i * FLOATS_PER_LIMB_POSE;
         this.posScratch[0] = this.pose[p]!;
@@ -308,11 +375,12 @@ export class CrowdLimbs {
         );
         this.mat4.fromArray(this.matScratch);
         mesh.setMatrixAt(i, this.mat4);
+        // T122/V87: per-instance tint (skin/clothing base × stable hue/value jitter) + reveal alpha (V65) into vec4.
+        const o = i * 4;
+        variationTint(baseR, baseG, baseB, this.hueArr[i]!, this.valArr[i]!, this.tintHueSpread, this.tintValueSpread, tintArr, o);
+        tintArr[o + 3] = this.fadeArr[i]!;
       }
-      // V65: copy this frame's per-figure reveal alpha into the part's instanced opacity attribute.
-      const fa = this.fadeAttrs[part]!;
-      (fa.array as Float32Array).set(this.fadeArr.subarray(0, liveCount));
-      fa.needsUpdate = true;
+      this.tintAttrs[part]!.needsUpdate = true;
       mesh.count = liveCount;
       mesh.instanceMatrix.needsUpdate = true;
     }
@@ -421,7 +489,9 @@ export class Crowd {
       return m.mul(positionLocal).xyz;
     })();
 
-    // Per-instance colour variation from the meta storage buffer (seed -> brightness band). NO new material.
+    // Per-instance colour variation from the meta storage buffer (seed -> brightness + subtle hue band). NO new
+    // material. T122/V87: on top of the brightness band, a small warm↔cool HUE skew keyed by the same seed so the
+    // far horde is not 100% uniform in hue either (the limbed figures get the richer skin/clothing tint).
     const base = new Color(CROWD_BASE_COLOR);
     const denom = Math.max(1, settings.variationCount - 1);
     const spread = settings.brightnessSpread;
@@ -429,7 +499,9 @@ export class Crowd {
       const seed = this.metaBuffer.toAttribute().y; // per-instance variation seed (vertex attr -> varying)
       const t = seed.div(denom); // 0..1 across the variation seeds
       const brightness = float(1 - spread).add(t.mul(spread * 2)); // [1-spread, 1+spread]
-      return vec3(base.r, base.g, base.b).mul(brightness);
+      const hue = t.sub(0.5).mul(CROWD_BOX_HUE_SPREAD); // subtle warm↔cool skew around the base
+      const tint = vec3(float(1).add(hue), float(1), float(1).sub(hue));
+      return vec3(base.r, base.g, base.b).mul(tint).mul(brightness);
     })();
 
     // V65: reveal fade = material ALPHA, not scale. A member entering/leaving the player's awareness blends

@@ -158,10 +158,20 @@ export const lightingConfig = registerDomain('lighting', {
   interiorExposureStops: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Exposure compensation (stops) applied when fully inside an enclosed interior.',
+    doc: 'Exposure compensation (stops) applied when fully inside an enclosed interior AT NIGHT (the darkest case). Faded toward zero in daylight by interiorExposureDaylightFalloff — see that field for why.',
     default: 1.2,
     min: 0,
     max: 6,
+  }),
+  interiorExposureDaylightFalloff: num({
+    owner: 'lighting',
+    unit: 'ratio',
+    doc:
+      'How much the interior exposure boost FADES OUT in full daylight, 0..1 (1 = fully gone at midday, 0 = always full). ' +
+      'B44 fix: the cutaway view keeps the roof casting shadow but lets the camera see in, so a DAYLIT interior is only a touch dimmer than the sunlit street — NOT the dark cave a first-person interior would be. A flat interior boost therefore made interiors read BRIGHTER than the exterior, and stepping OUTSIDE dropped exposure ~2.3x with no matching rise in scene radiance, so the street suddenly looked much darker (the reported "outside is darker than inside" bug). Scaling the boost by darkness (1 - sceneBrightness) removes it in daylight (seamless in/out, sunlit street reads bright) while keeping the full lift for a genuinely dark night interior lit mainly by the flashlight.',
+    default: 1,
+    min: 0,
+    max: 1,
   }),
   exposureTransitionSeconds: num({
     owner: 'lighting',
@@ -178,11 +188,13 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightIntensity: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Player flashlight SpotLight intensity at night (full darkness). Scaled down by daylight (flashlightDayIntensityScale).',
-    default: 28,
+    doc:
+      'Player flashlight SpotLight intensity at night (full darkness). Scaled down by daylight (flashlightDayIntensityScale). ' +
+      'Raised (B44) so the beam still READS outdoors at dusk/night — outside the open sky/moon ambient competes with the additive cone, and the wider near-floor cone (flashlightConeHalfAngleDegrees) spreads the same flux over more ground, so it needs more punch to stay the player\'s main light.',
+    default: 60,
     min: 0,
-    max: 200,
-    tiers: { 'desktop-high': 32, 'mobile-webgpu': 20 },
+    max: 400,
+    tiers: { 'desktop-high': 68, 'mobile-webgpu': 44 },
   }),
   flashlightDayIntensityScale: num({
     owner: 'lighting',
@@ -211,10 +223,19 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightConeHalfAngleDegrees: num({
     owner: 'lighting',
     unit: 'degrees',
-    doc: 'Flashlight SpotLight cone HALF-angle — its OWN value, decoupled from the (wide) player vision FOV. A tight, realistic torch beam (was inheriting the vision wedge → far too wide).',
-    default: 17,
+    doc: 'Flashlight SpotLight cone HALF-angle — its OWN value, decoupled from the (wide) player vision FOV. Widened (B44) from a tight torch so the cone\'s lower edge reaches the GROUND close to the player (kills the dark ring at the feet) while the axis still throws forward.',
+    default: 24,
     min: 4,
     max: 80,
+  }),
+  flashlightAimGroundDistanceMeters: num({
+    owner: 'lighting',
+    unit: 'meters',
+    doc:
+      'Ground distance AHEAD of the player the beam AXIS aims at — deliberately CLOSER than the full reach (flashlightRangeMeters). B44 fix for the dark gap right at the feet: the SpotLight sits at flashlightHeightMeters, so aiming its target at the ground at FULL range made the axis a shallow downward slope whose lower cone edge only met the floor far downrange (near floor sat below the beam). Aiming the axis at a near ground point tilts the cone steeply DOWN so the lit pool begins near the feet and rakes forward; the beam still REACHES flashlightRangeMeters (set via SpotLight.distance, independent of the target point), so the throw is preserved.',
+    default: 4,
+    min: 0.5,
+    max: 40,
   }),
   flashlightRangeMeters: num({
     owner: 'lighting',
@@ -235,8 +256,8 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightPenumbra: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'SpotLight penumbra (0 = hard edge, 1 = fully soft) — softens the flashlight cone edge so threats fade in rather than pop.',
-    default: 0.6,
+    doc: 'SpotLight penumbra (0 = hard edge, 1 = fully soft) — softens the flashlight cone edge so threats fade in rather than pop, and (B44) lets the soft lower edge fill the near ground in front of the player quickly.',
+    default: 0.7,
     min: 0,
     max: 1,
   }),
@@ -251,8 +272,8 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightHeightMeters: num({
     owner: 'lighting',
     unit: 'meters',
-    doc: 'Height above the ground the flashlight is mounted (chest/torch height) so the cone rakes forward across the ground.',
-    default: 1.3,
+    doc: 'Height above the ground the flashlight is mounted (chest/torch height) so the cone rakes forward across the ground. Lowered slightly (B44) so the beam meets the floor closer to the feet (less dead zone right in front).',
+    default: 1.05,
     min: 0.1,
     max: 4,
   }),

@@ -9,7 +9,53 @@ import { useState } from 'react';
 import type { EngineHandle } from './GameViewport';
 import { WEATHER_PROFILES, type WeatherProfile } from '../config/domains/weather';
 import { uiStore } from '../stores/ui';
-import { useUi } from '../stores/react';
+import { timeOfDayStore } from '../stores/timeOfDay';
+import { useUi, useTimeOfDay } from '../stores/react';
+import { dayPhaseOf, formatTimeOfDay } from '../render/scene/sky';
+
+const PHASE_LABEL = { dawn: 'Dawn', day: 'Day', dusk: 'Dusk', night: 'Night' } as const;
+
+/** T125 dev group: scrub + freeze the day/night phase for lighting tuning. This is a RENDER-side override
+ *  (lighting only) — the deterministic sim clock is untouched (V2/V26). Selectors return primitives (B24). */
+function TimeOfDayControls() {
+  const current = useTimeOfDay((s) => s.current); // primitive; minute-stepped by the engine
+  const overrideEnabled = useTimeOfDay((s) => s.overrideEnabled);
+  const override = useTimeOfDay((s) => s.override);
+  // The slider drives `override` when frozen; otherwise it tracks (and previews from) the live clock.
+  const value = overrideEnabled ? override : current;
+
+  const toggleFreeze = () => {
+    const s = timeOfDayStore.getState();
+    if (!s.overrideEnabled) s.setOverride(s.current); // capture the live time so the sun doesn't jump on freeze
+    s.setOverrideEnabled(!s.overrideEnabled);
+  };
+  const scrub = (t: number) => {
+    const s = timeOfDayStore.getState();
+    s.setOverride(t);
+    if (!s.overrideEnabled) s.setOverrideEnabled(true); // scrubbing implies freeze-at-this-time
+  };
+
+  return (
+    <div className="hbn-controls__group" aria-label="time of day">
+      <label className="hbn-controls__check">
+        <input type="checkbox" checked={overrideEnabled} onChange={toggleFreeze} />
+        Freeze time {overrideEnabled ? '(dev)' : ''}
+      </label>
+      <label>
+        Time of day · {formatTimeOfDay(value)} {PHASE_LABEL[dayPhaseOf(value)]}
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={1 / 1440}
+          value={value}
+          onChange={(e) => scrub(Number(e.target.value))}
+          aria-label="scrub time of day"
+        />
+      </label>
+    </div>
+  );
+}
 
 export function Controls({ handle }: { handle: EngineHandle | null }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -102,6 +148,7 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
           </select>
         </label>
       </div>
+      <TimeOfDayControls />
       <div className="hbn-controls__group">
         <button onClick={() => uiStore.getState().openPanel('settings')}>Accessibility</button>
       </div>

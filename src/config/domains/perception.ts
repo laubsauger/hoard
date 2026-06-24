@@ -131,8 +131,8 @@ export const perceptionConfig = registerDomain('perception', {
   crouchEyeHeightMeters: num({
     owner: 'perception',
     unit: 'meters',
-    doc: 'Crouched player eye height (m) — lower than standing so the player sees over less AND is hidden behind low cover (V86).',
-    default: 0.9,
+    doc: 'Crouched player eye height (m) — below a ~0.9 m window sill + the ~1 m fence so the player sees over less AND is hidden behind low cover / below a window (V86/V87).',
+    default: 0.85,
     min: 0.2,
     max: 2,
   }),

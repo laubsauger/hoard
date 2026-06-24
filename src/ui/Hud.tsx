@@ -2,13 +2,30 @@
 // over a published *ViewSnapshot. The HUD NEVER subscribes to a per-frame world array (no zombie
 // positions, no instance buffers) — only throttled snapshot fields the engine deliberately published.
 
-import { usePlayerView, useMapView, useUi } from '../stores/react';
+import { usePlayerView, useMapView, useUi, useTimeOfDay } from '../stores/react';
+import { dayPhaseOf, formatTimeOfDay, type DayPhase } from '../render/scene/sky';
 
 function Vital({ label, value }: { label: string; value: number | null }) {
   return (
     <div className="hbn-vital">
       <span className="hbn-vital__label">{label}</span>
       <span className="hbn-vital__value">{value === null ? '--' : Math.round(value)}</span>
+    </div>
+  );
+}
+
+const PHASE_LABEL: Record<DayPhase, string> = { dawn: 'Dawn', day: 'Day', dusk: 'Dusk', night: 'Night' };
+
+/** T125: HH:MM clock + day/night phase, sourced from the SAME day fraction the lighting uses (timeOfDayStore.current).
+ *  Subscribes to two primitives only (V11/B24); the engine pushes `current` at minute granularity so this re-renders
+ *  at most a couple of times a second, not per frame. A dev-frozen (override) clock is flagged. */
+function TimeReadout() {
+  const t = useTimeOfDay((s) => s.current); // primitive; engine guards to minute steps
+  const frozen = useTimeOfDay((s) => s.overrideEnabled);
+  return (
+    <div className="hbn-vital hbn-vital--time" aria-label="time of day">
+      <span className="hbn-vital__label">{PHASE_LABEL[dayPhaseOf(t)]}{frozen ? ' ❄' : ''}</span>
+      <span className="hbn-vital__value">{formatTimeOfDay(t)}</span>
     </div>
   );
 }
@@ -56,6 +73,7 @@ export function Hud() {
         </div>
       </div>
       <div className="hbn-hud__threat">
+        <TimeReadout />
         <Vital label="Visible Z" value={visibleZombies} />
         <Vital label="Nearest m" value={nearestThreat} />
         <Vital label="District live" value={liveDistrictPop} />

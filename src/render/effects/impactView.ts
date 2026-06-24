@@ -202,6 +202,7 @@ export class ImpactSim {
   readonly wnz: Float32Array;
   readonly wRot: Float32Array;
   readonly wVis: Float32Array; // 0..1 scale/visibility, recomputed each update
+  readonly wReveal: Float32Array; // V90: body's crowd reveal (0..1) this frame — multiplies render scale so a wound fades with a culled zombie
   private readonly wAge: Float32Array;
   // Body-anchoring (T81 surface-stick): an entity-anchored wound stores a BODY-LOCAL offset + the struck
   // entity; update() reprojects it to the body's CURRENT transform each frame so the mark follows the moving
@@ -267,6 +268,7 @@ export class ImpactSim {
     this.wnz = new Float32Array(W);
     this.wRot = new Float32Array(W);
     this.wVis = new Float32Array(W);
+    this.wReveal = new Float32Array(W).fill(1); // V90: default fully visible until a body anchor reports its reveal
     this.wAge = new Float32Array(W);
     this.wEntity = new Float32Array(W).fill(-1); // -1 = static/world wound (not body-anchored)
     this.wLX = new Float32Array(W);
@@ -373,6 +375,7 @@ export class ImpactSim {
     if (e < 0) return;
     const a = this.woundAnchors ? this.woundAnchors.resolve(e) : null;
     if (!a) return;
+    this.wReveal[i] = a.reveal ?? 1; // V90: fade this wound with its (possibly vision-culled) zombie
     const lx = this.wLX[i]!;
     const ly = this.wLY[i]!;
     const lz = this.wLZ[i]!;
@@ -777,7 +780,7 @@ export class ImpactView {
     // ---- wounds ----
     const nw = sim.woundCount;
     for (let i = 0; i < nw; i++) {
-      const vis = sim.wVis[i]!;
+      const vis = sim.wVis[i]! * sim.wReveal[i]!; // V90: × the body's crowd reveal → fades with a culled zombie
       this.orientDecal(this.woundMesh, i, sim.wx[i]!, sim.wy[i]!, sim.wz[i]!, sim.wnx[i]!, sim.wny[i]!, sim.wnz[i]!, sim.wRot[i]!, sim.settings.woundSizeMeters * vis);
       this.woundMesh.setColorAt(i, this.tmp.setRGB(WOUND_COLOR.r, WOUND_COLOR.g, WOUND_COLOR.b));
     }

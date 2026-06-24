@@ -34,6 +34,15 @@ export class VisionCullSystem {
     this.perceptionReveal = new Float32Array(zombieCapacity);
   }
 
+  /** V90: this frame's memory-blended reveal (0..1) for a zombie SLOT — the SAME value the crowd packs as the
+   *  per-instance fade. 1 = fully visible, 0 = culled/faded. Out-of-range slot → 1 (don't hide). Read by
+   *  body-anchored gore (blood/wounds) so a splat fades WITH its zombie instead of floating at full opacity. */
+  revealOf(slot: number): number {
+    if (slot < 0 || slot >= this.perceptionReveal.length) return 1;
+    const r = this.perceptionReveal[slot]!;
+    return r < 0 ? 0 : r > 1 ? 1 : r;
+  }
+
   /**
    * Build this frame's reveal. `passiveRadiusMeters` is the live, ambient-scaled passive awareness radius
    * (T109/V72) used as the omnidirectional near-reveal radius; when omitted (e.g. tests / the construction

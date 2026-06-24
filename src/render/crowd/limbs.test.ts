@@ -13,6 +13,7 @@ import {
   walkBob,
   limbGait,
   gaitPhaseRateHz,
+  stateReachTarget,
   FLOATS_PER_LIMB_POSE,
   FLOATS_PER_MAT4,
   type LimbPartPlacement,
@@ -34,7 +35,9 @@ const GAIT: LimbGaitConfig = {
   walkBobMeters: 0.05,
   chaseBobMeters: 0.12,
   attackReachRadians: 1.05,
+  chaseReachRadians: 0.7,
   attackFreqHz: 3.2,
+  reachBlendHz: 6,
   speedRefMetersPerSecond: 2.5,
 };
 
@@ -61,19 +64,27 @@ function out(cap: number) {
     phase: new Float32Array(cap),
     state: new Uint8Array(cap),
     speed: new Float32Array(cap),
+    reach: new Float32Array(cap),
+    slot: new Float32Array(cap),
   };
 }
 
 const OPTS = { variationCount: 1, scaleMin: 1, scaleMax: 1, maxSimTier: 1, dtSeconds: 0, gait: GAIT } as const;
 
-/** Call packLimbInputs with a fresh per-slot phase accumulator sized to the scanned slot count. */
+/** Call packLimbInputs with fresh per-slot phase + reach accumulators sized to the scanned slot count, threading
+ *  the reach/slot outputs (T122/V87) so tests can assert them. */
 function pack(
   views: ReturnType<typeof makeSoa>['soa']['views'],
   o: ReturnType<typeof out>,
-  opts: Parameters<typeof packLimbInputs>[8],
+  opts: Parameters<typeof packLimbInputs>[9],
   phaseState: Float32Array = new Float32Array(opts.count),
+  reachState: Float32Array = new Float32Array(opts.count),
 ) {
-  return packLimbInputs(views, o.pose, o.scale, o.anatomy, o.phase, o.state, o.speed, phaseState, opts);
+  return packLimbInputs(views, o.pose, o.scale, o.anatomy, o.phase, o.state, o.speed, phaseState, reachState, {
+    ...opts,
+    outReach: opts.outReach ?? o.reach,
+    outSlot: opts.outSlot ?? o.slot,
+  });
 }
 
 describe('packLimbInputs — tier selection (V13)', () => {
@@ -214,6 +225,17 @@ describe('limbGait — state-driven swing/bob/reach (T111/V75)', () => {
     }
   });
 
+  it('CHASE (Pursue) raises the arms forward — a steady reach while still locomoting (T122/V87)', () => {
+    const ref = GAIT.speedRefMetersPerSecond;
+    for (const phase of [0, 0.25, 0.5, 0.75]) {
+      const r = limbGait(fresh(), ZombieState.Pursue, ref, phase, GAIT);
+      expect(r.reach).toBeGreaterThan(0); // arms reach forward through the chase
+    }
+    // Roaming states keep the arms down (no reach).
+    expect(limbGait(fresh(), ZombieState.Wander, ref, 0.3, GAIT).reach).toBe(0);
+    expect(limbGait(fresh(), ZombieState.Idle, 0, 0.3, GAIT).reach).toBe(0);
+  });
+
   it('is deterministic — identical inputs give identical outputs', () => {
     const a = limbGait(fresh(), ZombieState.Pursue, 1.7, 0.33, GAIT);
     const b = limbGait(fresh(), ZombieState.Pursue, 1.7, 0.33, GAIT);
@@ -239,10 +261,63 @@ describe('gaitPhaseRateHz — per-state stride frequency (T111/V75)', () => {
   });
 });
 
+describe('stateReachTarget — forward arm-raise target (T122/V87)', () => {
+  it('chasing/attacking reach FORWARD (>0); roaming states do not (==0); stagger recoils BACK (<0)', () => {
+    expect(stateReachTarget(ZombieState.Pursue, 0.3, GAIT)).toBeGreaterThan(0);
+    expect(stateReachTarget(ZombieState.Attack, 0.3, GAIT)).toBeGreaterThan(0);
+    expect(stateReachTarget(ZombieState.Idle, 0.3, GAIT)).toBe(0);
+    expect(stateReachTarget(ZombieState.Wander, 0.3, GAIT)).toBe(0);
+    expect(stateReachTarget(ZombieState.Down, 0.3, GAIT)).toBe(0);
+    expect(stateReachTarget(ZombieState.Stagger, 0.3, GAIT)).toBeLessThan(0);
+  });
+
+  it('the ATTACK lunge reaches further than the steady CHASE lurch at the same phase', () => {
+    expect(stateReachTarget(ZombieState.Attack, 0.25, GAIT)).toBeGreaterThan(
+      stateReachTarget(ZombieState.Pursue, 0.25, GAIT),
+    );
+  });
+
+  it('is deterministic — identical inputs give identical output (V26)', () => {
+    expect(stateReachTarget(ZombieState.Pursue, 0.42, GAIT)).toBe(stateReachTarget(ZombieState.Pursue, 0.42, GAIT));
+  });
+});
+
+describe('packLimbInputs — eased arm-raise + slot output (T122/V87)', () => {
+  it('eases the per-slot reach toward the chase target over frames (no hard snap)', () => {
+    const s = makeSoa();
+    s.alive[0] = 1;
+    s.simTier[0] = 0;
+    s.state[0] = ZombieState.Pursue;
+    s.velocity[0] = GAIT.speedRefMetersPerSecond; // full chase
+    const o = out(CAP);
+    const phaseState = new Float32Array(CAP);
+    const reachState = new Float32Array(CAP); // arms start down (0)
+    const opts = { count: 1, capacity: CAP, ...OPTS, dtSeconds: 1 / 30 };
+    pack(s.soa.views, o, opts, phaseState, reachState);
+    const after1 = o.reach[0]!;
+    expect(after1).toBeGreaterThan(0); // arms begin to raise
+    pack(s.soa.views, o, opts, phaseState, reachState);
+    const after2 = o.reach[0]!;
+    expect(after2).toBeGreaterThan(after1); // keeps easing UP toward the target (accumulator persists per slot)
+  });
+
+  it('writes the SoA slot per compacted instance (the stable tint identity)', () => {
+    const s = makeSoa();
+    s.alive[0] = 0; // dead → skipped
+    s.alive[1] = 1; s.simTier[1] = 0;
+    s.alive[2] = 1; s.simTier[2] = 0;
+    const o = out(CAP);
+    const res = pack(s.soa.views, o, { count: 3, capacity: CAP, ...OPTS });
+    expect(res.liveCount).toBe(2);
+    expect(o.slot[0]).toBe(1); // instance 0 = slot 1
+    expect(o.slot[1]).toBe(2); // instance 1 = slot 2
+  });
+});
+
 describe('composeLimbMatrix — transform composition (V2)', () => {
-  const torso: LimbPartPlacement = { offset: [0, 1.2, 0], swingSign: 0, reachSign: 0 };
-  const armLeft: LimbPartPlacement = { offset: [-0.34, 1.2, 0], swingSign: -1, reachSign: -1 };
-  const armRight: LimbPartPlacement = { offset: [0.34, 1.2, 0], swingSign: 1, reachSign: -1 };
+  const torso: LimbPartPlacement = { offset: [0, 1.2, 0], pivotLen: 0, swingSign: 0, reachSign: 0 };
+  const armLeft: LimbPartPlacement = { offset: [-0.34, 1.2, 0], pivotLen: 0.31, swingSign: -1, reachSign: -1 };
+  const armRight: LimbPartPlacement = { offset: [0.34, 1.2, 0], pivotLen: 0.31, swingSign: 1, reachSign: -1 };
 
   it('composes translation from position + part offset (heading 0)', () => {
     const m = new Float32Array(FLOATS_PER_MAT4);
@@ -300,6 +375,34 @@ describe('composeLimbMatrix — transform composition (V2)', () => {
     // Forward reach (positive magnitude, reachSign -1 → sw<0 → sin(sw)<0 → out[9] = -sin(sw) > 0): the arm's
     // hand swings toward local +Z / the facing direction.
     expect(al[9]).toBeGreaterThan(0);
+  });
+
+  it('swings the limb about its JOINT (top of the box), not its center (T122/V87)', () => {
+    const leg: LimbPartPlacement = { offset: [-0.13, 0.42, 0], pivotLen: 0.425, swingSign: 1, reachSign: 0 };
+    const L = leg.pivotLen;
+    const a = new Float32Array(FLOATS_PER_MAT4);
+    const b = new Float32Array(FLOATS_PER_MAT4);
+    composeLimbMatrix(a, 0, [0, 0, 0], 0, 1, leg, 0, 0, 0, true); // no swing
+    composeLimbMatrix(b, 0, [0, 0, 0], 0, 1, leg, 0.5, 0, 0, true); // swung
+    // The joint = box center (column 3) + the local +Y axis (column 1) × pivotLen. It must be ANCHORED (identical)
+    // across swings — that is the definition of pivoting about the joint instead of the limb midpoint.
+    const jointA = [a[12]! + a[4]! * L, a[13]! + a[5]! * L, a[14]! + a[6]! * L];
+    const jointB = [b[12]! + b[4]! * L, b[13]! + b[5]! * L, b[14]! + b[6]! * L];
+    expect(jointB[0]).toBeCloseTo(jointA[0]!, 6);
+    expect(jointB[1]).toBeCloseTo(jointA[1]!, 6);
+    expect(jointB[2]).toBeCloseTo(jointA[2]!, 6);
+    // The box CENTER (translation) DOES move — the foot swings out below the fixed hip. (facing = heading − 90°,
+    // so at heading 0 the limb's fore/aft swing displaces world X, i.e. column-3 element 12.)
+    expect(b[12]).not.toBeCloseTo(a[12]!, 3);
+  });
+
+  it('pivotLen 0 (torso/head) keeps the plain centered translation even when swung (T122/V87)', () => {
+    const rigid: LimbPartPlacement = { offset: [0, 1.2, 0], pivotLen: 0, swingSign: 1, reachSign: 0 };
+    const m = new Float32Array(FLOATS_PER_MAT4);
+    composeLimbMatrix(m, 0, [0, 0, 0], 0, 1, rigid, 0.5, 0, 0, true);
+    expect(m[12]).toBeCloseTo(0, 6);
+    expect(m[13]).toBeCloseTo(1.2, 6);
+    expect(m[14]).toBeCloseTo(0, 6);
   });
 
   it('zeroes the whole matrix when the part is severed (dismemberment hide, V17)', () => {

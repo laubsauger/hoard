@@ -121,6 +121,13 @@ export interface HordeSimulationDeps {
   readonly attackOf: (slot: ZombieSlot) => { damageFraction: number; cooldownTicks: number; rangeMeters: number };
   /** Apply a melee hit to the player (routed through GameRuntime -> the player survival system, T22). */
   readonly damagePlayer: (slot: ZombieSlot, damageFraction: number) => void;
+  /**
+   * T124/V89 — per-archetype-INDEX move-speed multipliers (registry order = the SoA `archetype` field). The
+   * movement step scales the shared horde baseline (`combat.hordeMoveSpeed`) by `[archetype]` for each slot, so
+   * a per-archetype speed (STANDARD 1.0 / RUNNER >1 / BLOATED <1) actually takes effect in the deterministic
+   * fixed-tick sim. A flat typed array → an O(1) per-slot read, no per-tick archetype-record lookup or alloc.
+   */
+  readonly moveSpeedScaleByArchetype: Float32Array;
 }
 
 /**
@@ -204,6 +211,7 @@ export class HordeSimulation {
     const { zombies, spatial, scene, combatCfg, clock, agentRadius } = this.d;
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
+    const scaleByArch = this.d.moveSpeedScaleByArchetype; // T124/V89: per-archetype speed multiplier (per slot)
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
     const pos: [number, number, number] = [0, 0, 0];
@@ -262,7 +270,8 @@ export class HordeSimulation {
           return;
         }
       }
-      const effSpeed = speed * moveScale;
+      // T124/V89: scale the shared baseline by THIS body's archetype factor (STANDARD 1.0 / RUNNER >1 / BLOATED <1).
+      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale;
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);
@@ -369,6 +378,7 @@ export class HordeSimulation {
     const nav = this.nav;
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
+    const scaleByArch = this.d.moveSpeedScaleByArchetype; // T124/V89: per-archetype speed multiplier (per slot)
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
     const pos: [number, number, number] = [0, 0, 0];
@@ -439,7 +449,8 @@ export class HordeSimulation {
           return;
         }
       }
-      const effSpeed = speed * moveScale;
+      // T124/V89: scale the shared baseline by THIS body's archetype factor (STANDARD 1.0 / RUNNER >1 / BLOATED <1).
+      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale;
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);

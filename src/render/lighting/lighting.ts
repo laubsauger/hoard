@@ -149,6 +149,23 @@ export function interiorExposure(t: number, tier: QualityTier): number {
   return smooth * stops;
 }
 
+/**
+ * Interior exposure compensation in stops, ATTENUATED BY DAYLIGHT (B44/V91). The raw interior boost
+ * (`interiorExposure`) assumes a first-person-style dark cave; but the x-ray cutaway view keeps the roof
+ * shadowing the interior yet lets the camera see in, so a DAYLIT interior is only marginally dimmer than
+ * the sunlit street. A flat boost therefore over-brightened interiors and made stepping OUTSIDE read much
+ * darker (exposure dropped with no matching radiance gain). Scaling the boost by darkness
+ * `(1 - sceneBrightness)` (weighted by `interiorExposureDaylightFalloff`) removes it in daylight — the
+ * in/out transition is seamless and the sunlit street stays bright — while preserving the full lift for a
+ * genuinely dark NIGHT interior lit mainly by the flashlight. Pure + monotonic in both inputs.
+ */
+export function interiorExposureCompensation(t: number, sceneBrightness: number, tier: QualityTier): number {
+  if (sceneBrightness < 0 || sceneBrightness > 1) throw new Error(`sceneBrightness must be in [0,1], got ${sceneBrightness}`);
+  const falloff = resolve(lightingConfig.interiorExposureDaylightFalloff, tier);
+  const daylightWeight = 1 - falloff * sceneBrightness; // 1 at full dark, (1-falloff) at full daylight
+  return interiorExposure(t, tier) * daylightWeight;
+}
+
 export interface FogDistances {
   readonly near: number;
   readonly far: number;

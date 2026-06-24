@@ -155,8 +155,8 @@ export const gibFields = {
   gibSeverLimbSizeMul: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Size multiplier (× base gib size) of the dropped LIMB chunk — bigger than a fleck so it reads as a limb, not a speck (T76/V52).',
-    default: 2.8,
+    doc: 'Size multiplier (× base gib size) of the dropped LIMB chunk — bigger than a fleck so it reads as a limb, not a speck (T76/V52). Trimmed from 2.8: at the high end of the per-chunk random it produced ~1 m boulder-sized lumps; a limb should read as a chunk, not a torso.',
+    default: 1.6,
     min: 1,
     max: 8,
   }),

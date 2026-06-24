@@ -42,9 +42,9 @@ function fakeRuntime(inside: boolean, timeOfDay: number): GameRuntime {
 }
 
 describe('LightingSystem', () => {
-  it('raises exposure monotonically as the player settles indoors (no snap)', () => {
+  it('raises exposure monotonically as the player settles indoors at night (no snap)', () => {
     const sys = new LightingSystem(makeHandles(), CFG);
-    const rt = fakeRuntime(true, 0.5); // midday, indoors
+    const rt = fakeRuntime(true, 0.0); // midnight, indoors — the interior boost applies here (B44 daylight-faded)
     let prev = -Infinity;
     const series: number[] = [];
     for (let i = 0; i < 20; i++) {
@@ -58,14 +58,26 @@ describe('LightingSystem', () => {
     expect(sys.currentExposure).toBe(series[series.length - 1]);
   });
 
-  it('lifts indoor exposure above the matched outdoor exposure (interior compensation)', () => {
+  it('lifts indoor exposure above the matched outdoor exposure AT NIGHT (interior compensation)', () => {
     const inside = new LightingSystem(makeHandles(), CFG);
     const outside = new LightingSystem(makeHandles(), CFG);
     for (let i = 0; i < 40; i++) {
-      inside.update(1 / 30, fakeRuntime(true, 0.5));
-      outside.update(1 / 30, fakeRuntime(false, 0.5));
+      inside.update(1 / 30, fakeRuntime(true, 0.0));
+      outside.update(1 / 30, fakeRuntime(false, 0.0));
     }
     expect(inside.currentExposure).toBeGreaterThan(outside.currentExposure);
+  });
+
+  it('B44: fades the interior boost in DAYLIGHT so stepping outside does NOT drop exposure (no sudden darkening)', () => {
+    const inside = new LightingSystem(makeHandles(), CFG);
+    const outside = new LightingSystem(makeHandles(), CFG);
+    for (let i = 0; i < 60; i++) {
+      inside.update(1 / 30, fakeRuntime(true, 0.5)); // noon, indoors
+      outside.update(1 / 30, fakeRuntime(false, 0.5)); // noon, outdoors
+    }
+    // With interiorExposureDaylightFalloff=1 the daylight interior boost is gone — indoor exposure must NOT
+    // exceed the outdoor exposure (the bug was indoor >> outdoor → leaving read much darker).
+    expect(inside.currentExposure).toBeCloseTo(outside.currentExposure, 6);
   });
 
   it('applies the night-floor boost so a dark scene is brighter than a bright one (exterior)', () => {
@@ -76,5 +88,19 @@ describe('LightingSystem', () => {
       day.update(1 / 30, fakeRuntime(false, 0.5)); // noon
     }
     expect(night.currentExposure).toBeGreaterThan(day.currentExposure);
+  });
+
+  it('T125: a timeOfDay override drives the lighting instead of the sim clock (render-side phase override)', () => {
+    const sys = new LightingSystem(makeHandles(), CFG);
+    // Sim clock says noon, but override to midnight — the result must report midnight and read as a darker (higher
+    // exposure) night scene, proving the lighting used the override, not runtime.timeOfDay().
+    const noonRt = fakeRuntime(false, 0.5);
+    let res = sys.update(1 / 30, noonRt, 0.0);
+    for (let i = 0; i < 5; i++) res = sys.update(1 / 30, noonRt, 0.0);
+    expect(res.timeOfDay).toBe(0.0);
+    const dayExposure = new LightingSystem(makeHandles(), CFG).update(1 / 30, fakeRuntime(false, 0.5)).exposure;
+    expect(res.exposure).toBeGreaterThan(dayExposure);
+    // Null/undefined override falls through to the sim clock.
+    expect(sys.update(1 / 30, noonRt).timeOfDay).toBe(0.5);
   });
 });

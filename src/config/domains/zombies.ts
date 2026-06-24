@@ -72,9 +72,16 @@ export const zombiesConfig = registerDomain('zombies', {
   }),
 
   // ---- T21 archetype stats (data-composed; every tunable typed — V4/V7) ----
-  // shambler — slow, durable baseline.
-  shamblerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Shambler locomotion speed.', default: 1.2, min: 0.1, max: 12 }),
-  shamblerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Shambler base health.', default: 100, min: 1, max: 10_000 }),
+  // T124/V89 — the SPAWNED roster is the STANDARD / BLOATED / RUNNER trio: a per-archetype move-speed SCALE
+  // (multiplier on the shared horde baseline `combat.hordeMoveSpeed`, so STANDARD = 1.0 = unchanged baseline),
+  // a per-archetype HEALTH (count, drives hits-to-kill via the SoA per-slot health), and a SPAWN WEIGHT
+  // (relative; STANDARD dominant, BLOATED + RUNNER sprinkled). The grounded ecology variants (crawler /
+  // armored / decayed / burned) keep zero spawn weight by default — present for content tuning, never spawned
+  // until a designer raises their weight. shambler = STANDARD baseline.
+  shamblerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Shambler (STANDARD) nominal locomotion speed (the baseline the other archetypes scale against).', default: 1.4, min: 0.1, max: 12 }),
+  shamblerMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler (STANDARD) move-speed multiplier on the shared horde baseline (combat.hordeMoveSpeed). 1.0 = baseline.', default: 1.0, min: 0.1, max: 6 }),
+  shamblerSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler (STANDARD) relative spawn weight — DOMINANT (the common zombie, ~70%+ of the mix).', default: 76, min: 0, max: 1000 }),
+  shamblerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Shambler (STANDARD) base health — the baseline hits-to-kill.', default: 100, min: 1, max: 10_000 }),
   shamblerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Shambler flat armor.', default: 10, min: 0, max: 1000 }),
   shamblerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler sight range.', default: 18, min: 1, max: 200 }),
   shamblerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Shambler hearing range.', default: 36, min: 1, max: 500 }),
@@ -82,9 +89,11 @@ export const zombiesConfig = registerDomain('zombies', {
   shamblerAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive shambler attacks on a reached target (V17 attack cadence).', default: 1.5, min: 0.05, max: 30 }),
   shamblerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler sever-threshold scale (anatomical damage variation).', default: 1, min: 0.1, max: 10 }),
 
-  // runner — fast, fragile, agitated.
-  runnerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Runner locomotion speed.', default: 4.2, min: 0.1, max: 12 }),
-  runnerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Runner base health.', default: 70, min: 1, max: 10_000 }),
+  // runner (RUNNER) — FAST, fragile: approaches quickly, dies in fewer hits.
+  runnerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Runner (RUNNER) nominal locomotion speed (= baseline × runnerMoveSpeedScale).', default: 2.24, min: 0.1, max: 12 }),
+  runnerMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner (RUNNER) move-speed multiplier vs the STANDARD baseline — FASTER (1.5–1.7×).', default: 1.6, min: 0.1, max: 6 }),
+  runnerSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner (RUNNER) relative spawn weight — SPRINKLED (low; fast threat punctuates the standard mix).', default: 12, min: 0, max: 1000 }),
+  runnerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Runner (RUNNER) base health — LOW (0.5–0.7× standard; fewer hits to kill).', default: 60, min: 1, max: 10_000 }),
   runnerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Runner flat armor.', default: 4, min: 0, max: 1000 }),
   runnerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner sight range.', default: 28, min: 1, max: 200 }),
   runnerHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Runner hearing range.', default: 48, min: 1, max: 500 }),
@@ -92,8 +101,10 @@ export const zombiesConfig = registerDomain('zombies', {
   runnerAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive runner attacks on a reached target (faster, agitated cadence).', default: 0.9, min: 0.05, max: 30 }),
   runnerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner sever-threshold scale (fragile — easier to sever).', default: 0.7, min: 0.1, max: 10 }),
 
-  // crawler — already legless, low/ground posture, durable torso.
+  // crawler — already legless, low/ground posture, durable torso. (Ecology variant — 0 spawn weight by default.)
   crawlerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Crawler locomotion speed (low to ground).', default: 0.7, min: 0.1, max: 12 }),
+  crawlerMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Crawler move-speed multiplier vs the STANDARD baseline (very slow drag).', default: 0.5, min: 0.1, max: 6 }),
+  crawlerSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Crawler relative spawn weight (0 = not in the default spawn mix; content-tunable).', default: 0, min: 0, max: 1000 }),
   crawlerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Crawler base health.', default: 90, min: 1, max: 10_000 }),
   crawlerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Crawler flat armor.', default: 8, min: 0, max: 1000 }),
   crawlerSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Crawler sight range (eyes near ground).', default: 10, min: 1, max: 200 }),
@@ -103,7 +114,10 @@ export const zombiesConfig = registerDomain('zombies', {
   crawlerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Crawler sever-threshold scale (tough torso/arms).', default: 1.4, min: 0.1, max: 10 }),
 
   // armored (emergency-personnel) — slow, very tanky body + flat armor; head still fatal → forces headshots/penetration.
+  // (Ecology variant — 0 spawn weight by default.)
   armoredMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Armored locomotion speed (weighed down by gear).', default: 1.0, min: 0.1, max: 12 }),
+  armoredMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Armored move-speed multiplier vs the STANDARD baseline (slowed by gear).', default: 0.72, min: 0.1, max: 6 }),
+  armoredSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Armored relative spawn weight (0 = not in the default spawn mix; content-tunable).', default: 0, min: 0, max: 1000 }),
   armoredHealth: num({ owner: 'zombies', unit: 'count', doc: 'Armored base health (high — tanky body).', default: 140, min: 1, max: 10_000 }),
   armoredArmor: num({ owner: 'zombies', unit: 'count', doc: 'Armored flat armor (riot/EMS gear — heavily mitigates body hits).', default: 60, min: 0, max: 1000 }),
   armoredSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Armored sight range.', default: 16, min: 1, max: 200 }),
@@ -113,7 +127,10 @@ export const zombiesConfig = registerDomain('zombies', {
   armoredSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Armored sever-threshold scale (body very hard to sever — gear protects limbs).', default: 2.2, min: 0.1, max: 10 }),
 
   // decayed — far gone, low health, falls apart easily (very low sever threshold), shambling.
+  // (Ecology variant — 0 spawn weight by default.)
   decayedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Decayed locomotion speed (frail shamble).', default: 1.0, min: 0.1, max: 12 }),
+  decayedMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Decayed move-speed multiplier vs the STANDARD baseline (frail shamble).', default: 0.72, min: 0.1, max: 6 }),
+  decayedSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Decayed relative spawn weight (0 = not in the default spawn mix; content-tunable).', default: 0, min: 0, max: 1000 }),
   decayedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Decayed base health (low — rotted, fragile).', default: 45, min: 1, max: 10_000 }),
   decayedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Decayed flat armor (none — flesh has rotted away).', default: 0, min: 0, max: 1000 }),
   decayedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Decayed sight range (clouded eyes).', default: 12, min: 1, max: 200 }),
@@ -123,7 +140,10 @@ export const zombiesConfig = registerDomain('zombies', {
   decayedSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Decayed sever-threshold scale (very low — limbs come off easily).', default: 0.4, min: 0.1, max: 10 }),
 
   // burned — charred; brittle flesh, emits ash not blood (gore type), moderate stats.
+  // (Ecology variant — 0 spawn weight by default.)
   burnedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Burned locomotion speed.', default: 1.3, min: 0.1, max: 12 }),
+  burnedMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Burned move-speed multiplier vs the STANDARD baseline.', default: 0.93, min: 0.1, max: 6 }),
+  burnedSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Burned relative spawn weight (0 = not in the default spawn mix; content-tunable).', default: 0, min: 0, max: 1000 }),
   burnedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Burned base health (moderate).', default: 80, min: 1, max: 10_000 }),
   burnedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Burned flat armor (charred crust).', default: 6, min: 0, max: 1000 }),
   burnedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Burned sight range.', default: 16, min: 1, max: 200 }),
@@ -132,9 +152,11 @@ export const zombiesConfig = registerDomain('zombies', {
   burnedAttackCooldownSeconds: num({ owner: 'zombies', unit: 'seconds', doc: 'Seconds between consecutive burned attacks.', default: 1.4, min: 0.05, max: 30 }),
   burnedSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Burned sever-threshold scale (brittle, charred — slightly easier to sever).', default: 0.9, min: 0.1, max: 10 }),
 
-  // bloated — slow, swollen; splits easily and bursts on death (death effect hook, render later).
-  bloatedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Bloated locomotion speed (very slow, swollen).', default: 0.9, min: 0.1, max: 12 }),
-  bloatedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Bloated base health (high — distended mass).', default: 110, min: 1, max: 10_000 }),
+  // bloated (BLOATED) — SLOW, swollen, TOUGH: takes many more hits to kill, splits/bursts on death.
+  bloatedMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Bloated (BLOATED) nominal locomotion speed (= baseline × bloatedMoveSpeedScale).', default: 0.84, min: 0.1, max: 12 }),
+  bloatedMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Bloated (BLOATED) move-speed multiplier vs the STANDARD baseline — SLOWER (0.55–0.65×).', default: 0.6, min: 0.1, max: 6 }),
+  bloatedSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Bloated (BLOATED) relative spawn weight — SPRINKLED (low; tanky speed-bump in the standard mix).', default: 12, min: 0, max: 1000 }),
+  bloatedHealth: num({ owner: 'zombies', unit: 'count', doc: 'Bloated (BLOATED) base health — HIGH (1.8–2.2× standard; many more hits to kill).', default: 200, min: 1, max: 10_000 }),
   bloatedArmor: num({ owner: 'zombies', unit: 'count', doc: 'Bloated flat armor (soft, none to speak of).', default: 2, min: 0, max: 1000 }),
   bloatedSightRange: num({ owner: 'zombies', unit: 'meters', doc: 'Bloated sight range.', default: 10, min: 1, max: 200 }),
   bloatedHearingRange: num({ owner: 'zombies', unit: 'meters', doc: 'Bloated hearing range.', default: 26, min: 1, max: 500 }),
@@ -164,5 +186,15 @@ export const zombiesConfig = registerDomain('zombies', {
     max: 1_080_000,
     integer: true,
     tiers: { 'mobile-webgpu': 5400 },
+  }),
+  /** Ticks a fresh corpse takes to COLLAPSE from standing → prone (the render-side death topple, T122/V87). */
+  corpseCollapseTicks: num({
+    owner: 'zombies',
+    unit: 'ticks',
+    doc: 'Ticks a killed zombie takes to topple from standing to prone (render-only death collapse, drives the CorpseField pitch/sink ease — NOT a teleport-to-floor). ~15 ticks ≈ 0.5 s at the 30 Hz default rate.',
+    default: 15,
+    min: 1,
+    max: 120,
+    integer: true,
   }),
 });

@@ -171,6 +171,22 @@ function interiorWallColor(wallColorHex: number): number {
   return new Color(wallColorHex).lerp(new Color(0xffffff), 0.6).getHex();
 }
 
+const EXT_DIR_DELTA: Record<'n' | 's' | 'e' | 'w', { dx: number; dy: number }> = {
+  n: { dx: 0, dy: -1 },
+  s: { dx: 0, dy: 1 },
+  e: { dx: 1, dy: 0 },
+  w: { dx: -1, dy: 0 },
+};
+
+/** The OUTWARD direction (n/s/e/w) of an EXTERIOR wall edge, decoded from its canonical key (`x|cx|topCy` for a
+ *  N/S face, `z|leftCx|cy` for an E/W face — placeHouse's scheme). For an N/S face the wall is north of the inner
+ *  cell iff its keyed topCy is above it; for an E/W face it is west iff its keyed leftCx is left of it. Pure. */
+function exteriorEdgeDir(key: string, innerCx: number, innerCy: number): 'n' | 's' | 'e' | 'w' {
+  const parts = key.split('|');
+  if (parts[0] === 'x') return Number(parts[2]) < innerCy ? 'n' : 's';
+  return Number(parts[1]) < innerCx ? 'w' : 'e';
+}
+
 export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver, cfg: HouseConfig): HouseHandles {
   const { root, res, navCellSize } = ctx;
   const fadeSurfaces: FadeSurface[] = [];

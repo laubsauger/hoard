@@ -153,6 +153,10 @@ export interface BodyAnchor {
   readonly lying: number;
   /** World Y the toppled body rests at (floor/slab top under it). */
   readonly groundY: number;
+  /** V90: the body's current crowd REVEAL (0..1) — body-anchored gore multiplies its opacity by this so a
+   *  splat fades WITH a vision-culled/faded zombie instead of floating at full opacity. Absent ⇒ 1 (a static
+   *  world wound, or no reveal source). The resolver fills it from the render-side per-slot reveal. */
+  readonly reveal?: number;
 }
 
 /** Render-side, read-only resolver of a struck body's current transform by entity id (Bug A). */
@@ -321,6 +325,7 @@ export class BloodSim {
   readonly zgWZ: Float32Array; // re-projected world Z
   readonly zgSize: Float32Array;
   readonly zgVis: Float32Array; // 0..1 visibility/shrink (1 fresh → 0 dried/gone), recomputed each update
+  readonly zgReveal: Float32Array; // V90: body's crowd reveal (0..1) this frame — multiplies render opacity so gore fades with a culled zombie
   readonly zgr: Float32Array;
   readonly zgg: Float32Array;
   readonly zgb: Float32Array;
@@ -407,6 +412,7 @@ export class BloodSim {
     this.zgWZ = new Float32Array(Z);
     this.zgSize = new Float32Array(Z);
     this.zgVis = new Float32Array(Z);
+    this.zgReveal = new Float32Array(Z).fill(1); // V90: default fully visible until a body anchor reports its reveal
     this.zgr = new Float32Array(Z);
     this.zgg = new Float32Array(Z);
     this.zgb = new Float32Array(Z);
@@ -751,6 +757,7 @@ export class BloodSim {
       this.zgVis[i] = 0;
       return;
     }
+    this.zgReveal[i] = a.reveal ?? 1; // V90: fade this splat with its (possibly vision-culled) zombie
     const lx = this.zgLX[i]!;
     const ly = this.zgLY[i]!;
     const lz = this.zgLZ[i]!;
@@ -1148,7 +1155,7 @@ export class BloodView {
     // blob there, shrinking + darkening it by its dried visibility. Expired/gone splats collapse to nothing.
     const nz = sim.zombieGoreCount;
     for (let i = 0; i < nz; i++) {
-      const vis = sim.zgVis[i]!;
+      const vis = sim.zgVis[i]! * sim.zgReveal[i]!; // V90: × the body's crowd reveal → fades with a culled zombie
       const sc = sim.zgSize[i]! * vis;
       this.dummy.position.set(sim.zgWX[i]!, sim.zgWY[i]!, sim.zgWZ[i]!);
       this.dummy.quaternion.identity();

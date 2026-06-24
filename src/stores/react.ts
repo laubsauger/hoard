@@ -13,6 +13,7 @@ import { noiseViewStore, type NoiseViewState } from './noiseView';
 import { inputStore, type InputState } from './input';
 import { interactionSelectStore, type InteractionSelectState } from './interactionSelect';
 import { diagnosticsStore, type DiagnosticsState } from './diagnostics';
+import { timeOfDayStore, type TimeOfDayState } from './timeOfDay';
 
 export const useSession = <T>(selector: (s: SessionState) => T): T => useStore(sessionStore, selector);
 export const useSettings = <T>(selector: (s: SettingsState) => T): T => useStore(settingsStore, selector);
@@ -28,3 +29,4 @@ export const useInput = <T>(selector: (s: InputState) => T): T => useStore(input
 export const useInteractionSelect = <T>(selector: (s: InteractionSelectState) => T): T =>
   useStore(interactionSelectStore, selector);
 export const useDiagnostics = <T>(selector: (s: DiagnosticsState) => T): T => useStore(diagnosticsStore, selector);
+export const useTimeOfDay = <T>(selector: (s: TimeOfDayState) => T): T => useStore(timeOfDayStore, selector);
