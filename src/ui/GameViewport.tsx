@@ -12,11 +12,10 @@ import {
   RendererHost,
   detectQualityTier,
   applyTierOverride,
-  CameraRig,
-  resolveCameraSettings,
   type AdapterLimits,
 } from '../render/engine';
 import { createDevStats, createRendererHost, startRendererHost, attachResize } from './viewport/rendererHost';
+import { createCameraController } from './viewport/cameraController';
 import { createEffectViews } from './viewport/effectViews';
 import { AimRaycaster } from './viewport/aim';
 import { registerInput } from './viewport/input';
@@ -220,7 +219,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       const { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField, surfaceProjector, firearmRangeMeters } =
         createEffectViews({ tier, registry: host.resources, scene, gizmosGroup: gizmos.group, getRuntime: () => runtime });
 
-      const camera = new CameraRig(resolveCameraSettings(tier), canvas.clientWidth / Math.max(1, canvas.clientHeight));
+      const camera = createCameraController(canvas, tier);
 
       cleanups.push(attachResize(canvas, host, camera, tier));
 
