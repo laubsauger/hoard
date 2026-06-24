@@ -179,13 +179,13 @@ const EXT_DIR_DELTA: Record<'n' | 's' | 'e' | 'w', { dx: number; dy: number }> =
   w: { dx: -1, dy: 0 },
 };
 
-/** The OUTWARD direction (n/s/e/w) of an EXTERIOR wall edge, decoded from its canonical key (`x|cx|topCy` for a
- *  N/S face, `z|leftCx|cy` for an E/W face — placeHouse's scheme). For an N/S face the wall is north of the inner
- *  cell iff its keyed topCy is above it; for an E/W face it is west iff its keyed leftCx is left of it. Pure. */
-function exteriorEdgeDir(key: string, innerCx: number, innerCy: number): 'n' | 's' | 'e' | 'w' {
-  const parts = key.split('|');
-  if (parts[0] === 'x') return Number(parts[2]) < innerCy ? 'n' : 's';
-  return Number(parts[1]) < innerCx ? 'w' : 'e';
+/** The OUTWARD direction (n/s/e/w) of an EXTERIOR wall edge: the side whose neighbour cell is OUTSIDE the
+ *  footprint (roomAt → null). A template footprint is a full W×D rectangle (depth ≥ 2 everywhere), so a boundary
+ *  cell is exterior on at most one of its N/S faces and one of its E/W faces — no n↔s (or e↔w) ambiguity. The
+ *  edge's `along` axis ('x' = N/S face, 'z' = E/W face) picks which pair to test. WORLD coords throughout. */
+function exteriorEdgeDir(house: PlacedHouse, innerCx: number, innerCy: number, along: 'x' | 'z'): 'n' | 's' | 'e' | 'w' {
+  if (along === 'x') return house.roomAt(innerCx, innerCy - 1) === null ? 'n' : 's';
+  return house.roomAt(innerCx - 1, innerCy) === null ? 'w' : 'e';
 }
 
 export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver, cfg: HouseConfig): HouseHandles {
@@ -492,7 +492,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     for (const edge of house.wallEdges) {
       if (edge.kind !== 'exterior') continue; // interior partitions are built separately
       if (doorGapKeys.has(edge.key)) continue; // doorway gap
-      const dir = exteriorEdgeDir(edge.key, edge.innerCx, edge.innerCy);
+      const dir = exteriorEdgeDir(house, edge.innerCx, edge.innerCy, edge.along);
       const dl = EXT_DIR_DELTA[dir];
       // world face centre = midpoint of the inner room cell + the outer street cell.
       const faceX = ((edge.innerCx + (edge.innerCx + dl.dx) + 1) / 2) * cs;

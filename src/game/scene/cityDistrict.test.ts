@@ -13,16 +13,69 @@ describe('city district scene (T80 — large multi-building world)', () => {
     const { block } = buildCityDistrict();
     const buildings = buildingsOf(block);
     expect(buildings.length).toBeGreaterThanOrEqual(8); // Project-Zomboid-scale, NOT one house
-    // human-scale footprints: each is a template's W×D rooms wrapped in a 1-cell exterior wall ring, so
-    // building bounds run ~14–22 m at navCellSize 2 m (the biggest 9-wide ranch + ring = 11 cells = 22 m).
-    for (const b of buildings) {
-      const w = (b.bounds.maxCx - b.bounds.minCx + 1) * block.navGrid.settings.navCellSize;
-      const d = (b.bounds.maxCy - b.bounds.minCy + 1) * block.navGrid.settings.navCellSize;
+    // thin-wall model: each building's bounds are EXACTLY its template's W×D ROOM cells — NO exterior wall ring
+    // (no +2). At navCellSize 2 m a single-storey footprint runs ~8–24 m. buildingsOf() and placedHouses share
+    // stamping order, so building[i] is house[i].
+    const houses = block.placedHouses!;
+    expect(houses.length).toBe(buildings.length);
+    buildings.forEach((b, i) => {
+      const wCells = b.bounds.maxCx - b.bounds.minCx + 1;
+      const dCells = b.bounds.maxCy - b.bounds.minCy + 1;
+      // bounds === the template footprint (W×D), NOT (W+2)×(D+2)
+      expect(wCells).toBe(houses[i]!.template.footprint.w);
+      expect(dCells).toBe(houses[i]!.template.footprint.d);
+      expect(wCells).toBe(houses[i]!.width);
+      expect(dCells).toBe(houses[i]!.depth);
+      const w = wCells * block.navGrid.settings.navCellSize;
+      const d = dCells * block.navGrid.settings.navCellSize;
       expect(w).toBeGreaterThanOrEqual(8);
       expect(w).toBeLessThanOrEqual(24);
       expect(d).toBeGreaterThanOrEqual(8);
       expect(d).toBeLessThanOrEqual(24);
+    });
+  });
+
+  it('exterior walls are THIN edge-walls — every perimeter room cell is walkable but cannot cross OUT (no ring)', () => {
+    const { block } = buildCityDistrict();
+    const grid = block.navGrid;
+    let walledEdges = 0;
+    let walkableInner = 0;
+    let blockedInner = 0;
+    for (const house of block.placedHouses!) {
+      // outward direction of an exterior edge: the side whose neighbour is OUTSIDE the footprint (roomAt → null),
+      // picked from the edge's `along` axis — the same world-coord derivation the scene + renderer use.
+      const dirOf = (e: (typeof house.wallEdges)[number]): readonly [number, number] => {
+        if (e.along === 'x') return house.roomAt(e.innerCx, e.innerCy - 1) === null ? [0, -1] : [0, 1];
+        return house.roomAt(e.innerCx - 1, e.innerCy) === null ? [-1, 0] : [1, 0];
+      };
+      const frontDoorEdges = new Set(house.doors.filter((dr) => dr.front).map((dr) => dr.edge.key));
+      for (const e of house.wallEdges) {
+        if (e.kind !== 'exterior') continue;
+        const [dx, dy] = dirOf(e);
+        const ox = e.innerCx + dx;
+        const oy = e.innerCy + dy;
+        // the INNER room cell is walkable FLOOR — there is no sealed wall ring. (A SOLID furniture piece may sit on
+        // a perimeter room cell; that's an orthogonal cell-block, not the edge-wall this test probes — skip it.)
+        const innerBlocked = grid.isBlocked(grid.index(e.innerCx, e.innerCy));
+        if (innerBlocked) {
+          blockedInner += 1;
+          continue;
+        }
+        walkableInner += 1;
+        if (frontDoorEdges.has(e.key)) continue; // the door edge is the cleared exception (its own test)
+        if (grid.isBlocked(grid.index(ox, oy))) continue; // a prop/car parked on the outer street cell — skip
+        // both cells walkable, but the shared EDGE is WALLED — a body can't cross out (the thin exterior
+        // edge-wall), and BOTH cells stay walkable (no blocked ring volume).
+        expect(grid.canCross(e.innerCx, e.innerCy, ox, oy)).toBe(false);
+        walledEdges += 1;
+      }
     }
+    // the perimeter is WALKABLE floor with thin edge-walls — NOT a blocked ring. In the old (W+2)×(D+2) model
+    // EVERY perimeter cell was a blocked wall (walkableInner would be 0); here the majority are walkable room
+    // cells (some carry solid furniture against the wall — an orthogonal cell-block, counted separately).
+    expect(walkableInner).toBeGreaterThan(blockedInner);
+    expect(walkableInner).toBeGreaterThan(100);
+    expect(walledEdges).toBeGreaterThan(0);
   });
 
   it('buildingBounds is the union bbox covering every building (back-compat accessor)', () => {
