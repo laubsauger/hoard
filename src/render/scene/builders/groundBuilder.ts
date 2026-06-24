@@ -34,7 +34,9 @@ export function buildGround(ctx: BuildContext, cfg: GroundConfig): void {
   // Base ground = grass/dirt verge under the whole district; the suburban paint is layered on top below.
   const ground = new Mesh(
     res.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
-    res.mat('ground', { color: 0x57564a, roughness: 0.98 }),
+    // polygonOffset pushes the base verge BACK in depth so the suburban paint layered on top never z-fights it
+    // (the layers are near-coplanar — tiny Y gaps alone aren't enough at iso distance; the depth bias is).
+    res.mat('ground', { color: 0x57564a, roughness: 0.98, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(width / 2, 0, depth / 2);
@@ -92,11 +94,17 @@ export function buildGroundRects(ctx: BuildContext): void {
   const rects = town.groundRects;
   if (!rects || rects.length === 0) return;
   const color: Record<GroundKind, number> = { asphalt: 0x26282c, sidewalk: 0x6a6c6e, grass: 0x3b4a2c };
-  const yOf: Record<GroundKind, number> = { asphalt: 0.012, sidewalk: 0.02, grass: 0.028 };
+  const yOf: Record<GroundKind, number> = { asphalt: 0.02, sidewalk: 0.05, grass: 0.08 };
+  // Each paint layer gets a distinct polygonOffset (more negative = wins the depth test) so abutting/overlapping
+  // layers (street↔sidewalk, sidewalk↔lawn) never z-fight — the depth bias orders them deterministically beyond
+  // what the small Y gaps can do at iso distance. Higher kind wins on overlap (grass over sidewalk over asphalt).
+  const off: Record<GroundKind, number> = { asphalt: -1, sidewalk: -2, grass: -3 };
+  const mat = (kind: GroundKind, roughness: number): MeshStandardMaterial =>
+    res.mat(`ground.${kind}`, { color: color[kind], roughness, polygonOffset: true, polygonOffsetFactor: off[kind], polygonOffsetUnits: off[kind] });
   const mats: Record<GroundKind, MeshStandardMaterial> = {
-    asphalt: res.mat('ground.asphalt', { color: color.asphalt, roughness: 0.96 }),
-    sidewalk: res.mat('ground.sidewalk', { color: color.sidewalk, roughness: 0.9 }),
-    grass: res.mat('ground.grass', { color: color.grass, roughness: 1 }),
+    asphalt: mat('asphalt', 0.96),
+    sidewalk: mat('sidewalk', 0.9),
+    grass: mat('grass', 1),
   };
   const group = new Group();
   rects.forEach((r, i) => {
