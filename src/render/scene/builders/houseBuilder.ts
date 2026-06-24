@@ -20,7 +20,7 @@ import {
   Vector3,
 } from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { color, float, fract, positionWorld, smoothstep } from 'three/tsl';
+import { color, float, fract, positionWorld, smoothstep, step } from 'three/tsl';
 import {
   buildingsOf,
   roofHoles,
@@ -48,6 +48,49 @@ import type { ResolvedDomain } from '../../../config/types';
 import type { BuildContext } from './buildContext';
 import type { FadeSurface, HouseHandles, SectionMesh } from './handles';
 import type { HouseStyleResolver } from './houseStyle';
+
+// ---- collapsed-roof sag (house polish #8) — a caved roof tilts about Z, but the tilt must NEVER dip the low
+// eave BELOW the wall plate (walls poking through above the roof). The sag is a gentle, fixed tilt; the group
+// is then LIFTED by the low eave's vertical drop (hx·sin θ) so that eave lands exactly on the wall top. Named
+// consts (V4 — no magic tilt literal). ----
+/** Collapsed-roof tilt about Z (radians). Gentle enough to read as a sagging caved roof without a steep slab. */
+const COLLAPSED_ROOF_SAG_RADIANS = 0.1;
+
+// ---- procedural asphalt-shingle roof (house polish #6) — no texture files: a TSL colorNode that bands the
+// roof tint into horizontal shingle COURSES (dark seam every `course` m of world Y, like the cladding grooves),
+// vertical TAB seams (every `tab` m of world X), and a faint alternating per-course TINT so rows read as
+// offset shingle strips rather than one flat colour. Subtle + believable; all params are named consts (V4). ----
+/** Vertical spacing of a shingle course (world metres). */
+const ROOF_SHINGLE_COURSE_METERS = 0.55;
+/** Horizontal spacing of a shingle tab seam (world metres). */
+const ROOF_SHINGLE_TAB_METERS = 0.95;
+/** Darkening of the shadow groove at each course / tab seam (0..1, tint multiplied down). */
+const ROOF_SHINGLE_GROOVE_DARKEN = 0.32;
+/** Groove thickness as a fraction of one course / tab. */
+const ROOF_SHINGLE_GROOVE_WIDTH_RATIO = 0.16;
+/** Faint extra darkening applied to every other course so rows read as distinct shingle strips. */
+const ROOF_SHINGLE_ROW_TINT = 0.06;
+
+/**
+ * The shingle roof `colorNode` (TSL): the per-house roof tint with horizontal course seams + vertical tab seams
+ * cut in as shadow grooves, plus an alternating per-course darken so the roof reads as stacked asphalt-shingle
+ * strips. Banded by WORLD position (continuous across the merged roof + decay holes). Pure node construction.
+ */
+function roofShingleColorNode(roofColorHex: number) {
+  const base = color(roofColorHex);
+  // horizontal course seam: 0 at a course line, rising past the groove.
+  const fy = fract(positionWorld.y.div(ROOF_SHINGLE_COURSE_METERS));
+  const courseSeam = float(1).sub(smoothstep(0, ROOF_SHINGLE_GROOVE_WIDTH_RATIO, fy)).mul(ROOF_SHINGLE_GROOVE_DARKEN);
+  // vertical tab seam along world X.
+  const fx = fract(positionWorld.x.div(ROOF_SHINGLE_TAB_METERS));
+  const tabSeam = float(1).sub(smoothstep(0, ROOF_SHINGLE_GROOVE_WIDTH_RATIO, fx)).mul(ROOF_SHINGLE_GROOVE_DARKEN);
+  // alternating row tint: every other course darkened a hair (step at the half-mark of a 2-course band).
+  const rowSel = step(0.5, fract(positionWorld.y.div(ROOF_SHINGLE_COURSE_METERS * 2)));
+  const rowDark = rowSel.mul(ROOF_SHINGLE_ROW_TINT);
+  // combine the darkenings (take the strongest seam so crossing grooves don't double-darken to black).
+  const seam = courseSeam.max(tabSeam);
+  return base.mul(float(1).sub(seam).sub(rowDark));
+}
 
 export interface HouseConfig {
   /** Resolved world domain (building wall height, porch depth, etc). */
@@ -437,7 +480,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     const cxw = ((b.minCx + b.maxCx + 1) / 2) * cs;
     const czw = ((b.minCy + b.maxCy + 1) / 2) * cs;
 
-    const roofMat = res.mat(`roof.${bi}`, { color: style.roofColor, roughness: 0.95, transparent: true, opacity: 1, side: DoubleSide });
+    // procedural asphalt-shingle node material (polish #6): a node material so the colorNode bands the tint into
+    // shingle courses/tabs. Stays transparent-capable (opacity driven per-frame by the cutaway) + DoubleSide.
+    const roofMat = res.nodeMat(`roof.${bi}`, new MeshStandardNodeMaterial({ roughness: 0.95, transparent: true, opacity: 1, side: DoubleSide }));
+    roofMat.colorNode = roofShingleColorNode(style.roofColor);
     roofMat.polygonOffset = roofOff.polygonOffset;
     roofMat.polygonOffsetFactor = roofOff.polygonOffsetFactor;
     roofMat.polygonOffsetUnits = roofOff.polygonOffsetUnits;
@@ -478,7 +524,14 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     }
 
     group.position.set(cxw, wallH, czw);
-    if (style.collapsed) group.rotation.z = (hash01(style.seed, 80) < 0.5 ? 1 : -1) * 0.14; // sagging caved roof
+    if (style.collapsed) {
+      // sag about Z by a fixed gentle tilt, then LIFT the group by the low eave's vertical drop so the lowest
+      // eave stays ON the wall plate (never below it → walls never poke through above the roof, polish #8).
+      const sag = (hash01(style.seed, 80) < 0.5 ? 1 : -1) * COLLAPSED_ROOF_SAG_RADIANS;
+      group.rotation.z = sag;
+      const hx = rw / 2 + cfg.roofOverhang; // roof half-extent along the tilt (X) axis, incl. eave overhang
+      group.position.y += hx * Math.sin(Math.abs(sag)); // raise so the dipped eave returns to the wall top
+    }
     root.add(group);
     // Half-extents = the roof footprint half-dimensions, so the X-RAY BUBBLE (V74) measures its radius to the
     // footprint's NEAREST point: a player anywhere INSIDE the footprint has distance 0 and so always reveals its

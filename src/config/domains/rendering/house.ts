@@ -112,8 +112,8 @@ export const houseFields = {
   wallPanelThicknessMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'Thickness of a wall-shell panel (≪ navCell). Walls are thin oriented shells on exposed cell edges, not cell-filling blocks (B3).',
-    default: 0.25,
+    doc: 'Thickness of a wall-shell panel (≪ navCell). Walls are thin oriented shells on exposed cell edges / room-perimeter faces, not cell-filling blocks (B3). ~0.18 m reads as a believable framed partition instead of a chunky slab (house polish #3).',
+    default: 0.18,
     min: 0.02,
     max: 2,
   }),
