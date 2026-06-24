@@ -12,6 +12,9 @@ import { NavGrid } from '@/game/navigation';
 import { RegionGraph } from '@/game/navigation';
 import { StructuralModule } from '@/game/destruction';
 import type { ModuleId } from '@/game/core/contracts';
+import type { PlacedHouse } from './placeHouse';
+import type { RoomType } from './houseTemplates';
+import type { WindowPlacement } from './windows';
 
 /** Base-package version this authored block belongs to (save-compat gate on reload — V23). */
 export const TEST_BLOCK_WORLD_VERSION = 'gate0-testblock-1';
@@ -109,6 +112,16 @@ export interface TestBlock {
   readonly props?: readonly PropInstance[];
   /** Walkable cells the player can leave/enter a building through (front doors, T38). May be empty. */
   readonly exitCells: readonly CellXY[];
+  /** P0: the room-based houses generated from floor-plan templates (placeHouse). Present for the templated
+   *  district; absent for the bare GATE-0 / M1 blocks. The renderer (P0c) builds walls/doors/windows from
+   *  each house's `wallEdges`; loot/AI read rooms-as-regions via `roomAt`. */
+  readonly placedHouses?: readonly PlacedHouse[];
+  /** P0: the authored window set (derived from the placed templates). When present, `windowPlacements` returns
+   *  THIS exact set so the sim seed + the renderer mesh build read the SAME windows (V26). */
+  readonly windowSeeds?: readonly WindowPlacement[];
+  /** P0 rooms-as-regions (cell → room): which house + room (and its type) a world cell belongs to, or null
+   *  outside every house interior. For later loot/furniture/AI ("a zombie wanders its room"). */
+  roomAt?(cx: number, cy: number): { readonly houseIndex: number; readonly roomId: number; readonly type: RoomType } | null;
   /** World-space centre of a nav cell (y = 0 floor). */
   cellCenter(cell: CellXY): Vec3;
   /** Map a module-local structural cell to the nav cell it occupies (integrator-owned seam). */

@@ -5,20 +5,22 @@
 import { describe, it, expect } from 'vitest';
 import { buildCityDistrict } from './cityDistrict';
 import { buildingsOf } from './testBlock';
+import { reachableFromExterior } from './houseTemplates';
 
 describe('city district scene (T80 — large multi-building world)', () => {
   it('authors MANY separately-enterable buildings on a street grid', () => {
     const { block } = buildCityDistrict();
     const buildings = buildingsOf(block);
     expect(buildings.length).toBeGreaterThanOrEqual(8); // Project-Zomboid-scale, NOT one house
-    // human-scale footprints (~10–18 m wide, ~8–16 m deep at navCellSize 2 m).
+    // human-scale footprints: each is a template's W×D rooms wrapped in a 1-cell exterior wall ring, so
+    // building bounds run ~14–22 m at navCellSize 2 m (the biggest 9-wide ranch + ring = 11 cells = 22 m).
     for (const b of buildings) {
       const w = (b.bounds.maxCx - b.bounds.minCx + 1) * block.navGrid.settings.navCellSize;
       const d = (b.bounds.maxCy - b.bounds.minCy + 1) * block.navGrid.settings.navCellSize;
       expect(w).toBeGreaterThanOrEqual(8);
-      expect(w).toBeLessThanOrEqual(20);
+      expect(w).toBeLessThanOrEqual(24);
       expect(d).toBeGreaterThanOrEqual(8);
-      expect(d).toBeLessThanOrEqual(20);
+      expect(d).toBeLessThanOrEqual(24);
     }
   });
 
@@ -77,6 +79,46 @@ describe('city district scene (T80 — large multi-building world)', () => {
     expect(sectors.length).toBeGreaterThan(0);
     for (const sec of sectors) {
       expect(block.isWalkableWorld(sec.centerX, sec.centerZ)).toBe(true);
+    }
+  });
+
+  // P0b: real room-based houses generated from floor-plan templates (placeHouse) replace the old
+  // perimeter-cell shells + the §G test-wall that used to bisect a house.
+  it('generates a room-based house per building — typed rooms, a front door, reachable interior', () => {
+    const { block } = buildCityDistrict();
+    expect(block.placedHouses && block.placedHouses.length).toBe(buildingsOf(block).length);
+    for (const house of block.placedHouses!) {
+      // a tiled room map covering the whole footprint
+      expect(house.rooms.length).toBe(house.width * house.depth);
+      // exactly one front door, and every room reachable from the exterior door via interior doors
+      const plan = house.template.levels[0]!;
+      const fronts = house.doors.filter((dr) => dr.front);
+      expect(fronts.length).toBe(1);
+      expect(reachableFromExterior(plan.rooms, plan.doors)).toBe(true);
+      // interior partition walls exist between differing rooms (a real multi-room layout, not one box)
+      expect(house.wallEdges.some((e) => e.kind === 'interior')).toBe(true);
+    }
+  });
+
+  it('exposes rooms-as-regions (roomAt) over each house interior, null outside', () => {
+    const { block } = buildCityDistrict();
+    expect(block.roomAt).toBeDefined();
+    // the player's start cell resolves to a typed room
+    const here = block.roomAt!(block.playerCell.cx, block.playerCell.cy);
+    expect(here).not.toBeNull();
+    expect(typeof here!.type).toBe('string');
+    // the central green (horde muster) is not inside any house
+    expect(block.roomAt!(block.spawnCenterCell.cx, block.spawnCenterCell.cy)).toBeNull();
+  });
+
+  it('the §G breach wall no longer bisects a house — its cells sit outside every building', () => {
+    const { block } = buildCityDistrict();
+    for (let z = 0; z < block.wall.sizeZ; z++) {
+      const cell = block.navCellForStructuralCell(block.wall.packCell(0, 0, z));
+      const insideAHouse = buildingsOf(block).some(
+        (b) => cell.cx >= b.bounds.minCx && cell.cx <= b.bounds.maxCx && cell.cy >= b.bounds.minCy && cell.cy <= b.bounds.maxCy,
+      );
+      expect(insideAHouse).toBe(false);
     }
   });
 

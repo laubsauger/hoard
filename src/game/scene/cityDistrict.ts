@@ -1,22 +1,22 @@
-// T80 — a LARGE authored multi-building suburban DISTRICT (Project-Zomboid scale). A street grid (asphalt +
-// sidewalks + grass verges) carries a block of residential LOTS; MANY separately-enterable houses sit on
-// those lots, each with perimeter walls, a front door onto the street, an interior partition (two rooms),
-// windows + porch (rendered from the authored grid), a fenced yard and abandoned-car/tire/overgrowth
-// dressing. The player roams the whole network: out a front door, down the sidewalk, into any other house —
-// the cutaway reveals the interior of whichever building they currently occupy (per-building roof fade).
+// T80 / P0b — a LARGE authored multi-building suburban DISTRICT (Project-Zomboid scale). A street grid
+// (asphalt + sidewalks + grass verges) carries a block of residential LOTS; MANY separately-enterable houses
+// sit on those lots. Each house is now generated from a single-storey floor-plan TEMPLATE (placeHouse —
+// docs/PROCEDURAL-HOUSES.md): a real room layout with a sealed exterior shell, a front door onto the street,
+// interior partition walls between typed rooms, and windows derived from the room plan. The player roams the
+// whole network; the cutaway reveals the interior of whichever building they occupy (per-building roof fade).
 //
-// ONE house keeps the destructible StructuralModule section (the central promise, §G) — breaching its
-// interior dividing wall opens a route between its two rooms — but the world is NOT built around defending
-// it: it is one feature among many. The horde gathers in a central green and streams across the grid toward
-// the player over the shared flow field; offscreen streaming SECTORS (laid on the open streets) hold the
-// abstract population the rest of the world promotes from (V13).
+// The destructible §G test-wall that used to BISECT a house is GONE — real houses are room-based, not a
+// two-room breach puzzle. The breach MECHANIC stays available: a single standalone StructuralModule wall
+// section sits on the central green so the horde-event routes (which read the module's per-cell breach/
+// reinforce/burning state, not its nav position) keep working — without an embedded test wall in a home.
 //
-// Still returns { block, sectors } and the block satisfies the SAME (extended) TestBlock contract, so
-// GameRuntime + BlockScene drive/render it unchanged. Layout is authored level content (cell counts) per
-// the V4 note; tunable scales (sector count, abstract pop) come from typed world config.
+// Still returns { block, sectors } satisfying the (extended) TestBlock contract, so GameRuntime + BlockScene
+// drive/render it unchanged. Layout is authored level content (cell counts) per V4; tunable scales come from
+// typed world config. Determinism (V26): the per-lot template choice + placement is a pure hash of the lot.
 
 import { NavGrid, RegionGraph } from '@/game/navigation';
 import { StructuralModule } from '@/game/destruction';
+import { setPropSolid } from './propSolidity';
 import type { ModuleId } from '@/game/core/contracts';
 import { resolveDomain } from '@/config/registry';
 import { worldConfig } from '@/config/domains/world';
@@ -32,15 +32,20 @@ import {
   type PropInstance,
   type TestBlock,
 } from './testBlock';
+import { placeHouse, type PlacedHouse } from './placeHouse';
+import { HOUSE_TEMPLATES, type HouseTemplate, type RoomType, type Edge } from './houseTemplates';
+import { houseStyleForBuilding, type WindowPlacement } from './windows';
+import { resolveHouseVariation, windowState, type HouseVariationParams } from './houseStyle';
 
 /** Region id for the open-air street/yard network wrapping the houses (shared with the M1 block). */
 export const REGION_STREET = 2;
 
-export const CITY_DISTRICT_WORLD_VERSION = 'm2-citydistrict-1';
+export const CITY_DISTRICT_WORLD_VERSION = 'm2-citydistrict-2';
 
 // ---- district grid layout (nav cells; navCellSize is 2 m) -------------------------------------------
 // A regular block of COLS×ROWS lots, separated (and bordered) by STREET-wide bands. One lot is an open
-// green (the horde muster). Width ≈ 158 m, height ≈ 98 m.
+// green (the horde muster). A house's nav footprint is its template W×D ROOMS wrapped in a 1-cell exterior
+// WALL ring, so the building bounds are (W+2)×(D+2) — they fit inside one LOT_W×LOT_H lot.
 const STREET = 4; // cells (8 m) — street + sidewalk + verge band around every lot
 const LOT_W = 11; // cells — lot footprint (house + yard)
 const LOT_H = 11;
@@ -53,26 +58,13 @@ const GRID_HEIGHT_CELLS = STREET + ROWS * (LOT_H + STREET); // 49
 const PARK_COL = 2;
 const PARK_ROW = 1;
 
+/** Lot that hosts the player's start house (kept SHELTERED: front door starts closed, no horde inside). */
+const PLAYER_COL = 0;
+const PLAYER_ROW = 0;
+
 const TEST_MODULE_ID = 1 as ModuleId;
 const FRACTURE_FAMILY = 0;
-
-// ---- feature house (lot 0,0) — carries the destructible dividing wall (the §G promise) --------------
-// Authored explicitly so the StructuralModule maps onto real interior cells. A vertical wall splits it into
-// room A (west, sealed) and room B (east, with the street door + player start); the destructible section is
-// the middle run of that wall — breaching it is the only route between the rooms.
-const FEATURE_H_MIN_CX = 5;
-const FEATURE_H_MIN_CY = 5;
-const FEATURE_H_W = 9; // 18 m
-const FEATURE_H_H = 8; // 16 m
-const FEATURE_H_MAX_CX = FEATURE_H_MIN_CX + FEATURE_H_W - 1; // 13
-const FEATURE_H_MAX_CY = FEATURE_H_MIN_CY + FEATURE_H_H - 1; // 12
-const FEATURE_WALL_CX = 9; // interior dividing wall column
-const WALL_SECTION_CY_START = 7;
-const WALL_SECTION_CELLS = 4; // cy 7,8,9,10 — the destructible run
-const FEATURE_DOOR_CX = 11; // door in room B's south wall
-const FEATURE_DOOR_CY = FEATURE_H_MAX_CY; // 12
-
-const PLAYER_CELL: CellXY = { cx: 11, cy: 9 }; // feature-house room B (east), walkable interior
+const WALL_SECTION_CELLS = 4; // the standalone breach-mechanic wall — 4 destructible cells
 
 // ---- deterministic per-lot variation ----------------------------------------------------------------
 /** Small deterministic hash → [0,1) so the same lot always authors the same house (replay-stable, V26). */
@@ -80,6 +72,21 @@ function lotRand(i: number, j: number, salt: number): number {
   let h = (Math.imul(i + 1, 73856093) ^ Math.imul(j + 1, 19349663) ^ Math.imul(salt + 1, 83492791)) >>> 0;
   h = Math.imul(h ^ (h >>> 13), 0x85ebca6b) >>> 0;
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** The single-storey templates the district draws from (multi-floor colonial is P3 — excluded). Ordered for
+ *  a stable index space; the per-lot choice hashes into this list (V26). */
+const SINGLE_STOREY_TEMPLATES: readonly HouseTemplate[] = HOUSE_TEMPLATES.filter((t) => t.storeys === 1);
+
+/** Pick a believable, deterministic template for a lot, varying across the street. The player lot gets a
+ *  fixed compact template (a small bungalow) so the sheltered start is consistent. */
+function templateForLot(i: number, j: number): HouseTemplate {
+  if (i === PLAYER_COL && j === PLAYER_ROW) {
+    return SINGLE_STOREY_TEMPLATES.find((t) => t.id === 'bungalow-2bed') ?? SINGLE_STOREY_TEMPLATES[0]!;
+  }
+  const n = SINGLE_STOREY_TEMPLATES.length;
+  const idx = Math.min(n - 1, Math.floor(lotRand(i, j, 11) * n));
+  return SINGLE_STOREY_TEMPLATES[idx]!;
 }
 
 interface LotOrigin {
@@ -102,60 +109,121 @@ interface DistrictBuild {
   readonly groundRects: GroundRect[];
   readonly props: PropInstance[];
   readonly exitCells: CellXY[];
+  readonly houses: PlacedHouse[];
+  readonly windowSeeds: WindowPlacement[];
+  readonly houseVar: HouseVariationParams;
+  readonly boardedFraction: number;
+  /** Picked when stamping the player's house — the interior cell the player starts in (sheltered). */
+  playerCell: CellXY | null;
+}
+
+/** A sheltered player-start cell: the interior-edge MIDPOINT on the side OPPOSITE the front door (so the
+ *  start is deep from the closed door, yet an edge-midpoint, not a corner — leaving the lootable corner clear
+ *  of both the player and the door). */
+function shelteredPlayerCell(originCx: number, originCy: number, w: number, d: number, doorDir: Edge): CellXY {
+  const midX = originCx + Math.floor((w - 1) / 2);
+  const midY = originCy + Math.floor((d - 1) / 2);
+  switch (doorDir) {
+    case 'n':
+      return { cx: midX, cy: originCy + d - 1 }; // door north → start at the south edge
+    case 's':
+      return { cx: midX, cy: originCy };
+    case 'e':
+      return { cx: originCx, cy: midY }; // door east → start at the west edge
+    case 'w':
+      return { cx: originCx + w - 1, cy: midY };
+  }
+}
+
+/** The ring (shell) cell one step OUT from a room cell in `dir` — where the exterior wall/door/window sits. */
+function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
+  switch (dir) {
+    case 'n':
+      return { cx, cy: cy - 1 };
+    case 's':
+      return { cx, cy: cy + 1 };
+    case 'e':
+      return { cx: cx + 1, cy };
+    case 'w':
+      return { cx: cx - 1, cy };
+  }
 }
 
 /**
- * Stamp one ordinary house into a lot: perimeter walls (with a south front-door gap), a single interior
- * partition (two rooms, with a doorway gap), a fenced front yard, and a little dressing. Footprint + storeys
- * vary deterministically per lot. Returns nothing — mutates the shared build accumulators.
+ * Stamp ONE templated house onto a lot. The template's W×D room footprint is centred in the lot wrapped in a
+ * 1-cell exterior WALL ring (building bounds (W+2)×(D+2)). The ring is blocked (the sealed shell); the FRONT
+ * door is a 1-cell gap in the ring (left closed for the player's house — sheltered start); window cells are
+ * ring cells flagged for the window system; the interior W×D cells are walkable, room-tagged floor.
+ *
+ * Interior partition walls are RENDERED (P0c) + carried as rooms-as-regions, but the 2 m nav grid is too
+ * coarse to wall off 1-cell rooms, so partitions are not nav blockers in P0 — the house enters/exits only
+ * through its doors (sealed shell), and the interior is one navigable space subdivided into typed rooms.
+ * A finer sub-cell wall nav is explicitly deferred (docs/PROCEDURAL-HOUSES.md note). Mutates `b`.
  */
-function stampHouse(b: DistrictBuild, i: number, j: number): void {
+function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const lot = lotOrigin(i, j);
-  // footprint 5..7 wide × 4..6 deep (10–14 m × 8–12 m), centred in the lot with a 1-cell north margin.
-  const hw = 5 + Math.floor(lotRand(i, j, 1) * 3); // 5..7
-  const hh = 4 + Math.floor(lotRand(i, j, 2) * 3); // 4..6
-  const hMinCx = lot.minCx + Math.floor((LOT_W - hw) / 2);
-  const hMinCy = lot.minCy + 1;
-  const hMaxCx = hMinCx + hw - 1;
-  const hMaxCy = hMinCy + hh - 1;
-  const storeys = lotRand(i, j, 3) < 0.4 ? 2 : 1;
-  const doorCx = hMinCx + Math.floor(hw / 2);
+  const template = templateForLot(i, j);
+  const { w, d } = template.footprint;
+  const bw = w + 2; // building bounds include the 1-cell wall ring
+  const bh = d + 2;
+  const bMinCx = lot.minCx + Math.max(0, Math.floor((LOT_W - bw) / 2));
+  const bMinCy = lot.minCy + Math.max(0, Math.floor((LOT_H - bh) / 2));
+  const bMaxCx = bMinCx + bw - 1;
+  const bMaxCy = bMinCy + bh - 1;
+  const originCx = bMinCx + 1; // interior room origin (inside the ring)
+  const originCy = bMinCy + 1;
 
-  stampShell(b, hMinCx, hMinCy, hMaxCx, hMaxCy, doorCx, hMaxCy);
+  const placed = placeHouse(template, originCx, originCy);
+  const houseIndex = b.houses.length;
+  b.houses.push(placed);
 
-  // interior partition: a horizontal wall splitting front/back rooms, with a 1-cell doorway gap.
-  if (hh >= 5) {
-    const partCy = hMinCy + Math.floor(hh / 2);
-    const gapCx = hMinCx + 1 + Math.floor(lotRand(i, j, 4) * Math.max(1, hw - 2));
-    for (let cx = hMinCx + 1; cx <= hMaxCx - 1; cx++) {
-      if (cx === gapCx) continue;
-      b.navGrid.block(cx, partCy);
-    }
+  // --- seal the exterior shell: block the whole (W+2)×(D+2) perimeter ring (the template footprint is a
+  // rectangle, so EVERY boundary edge is exterior wall). Door gaps are punched after.
+  for (let cx = bMinCx; cx <= bMaxCx; cx++) {
+    b.navGrid.block(cx, bMinCy);
+    b.navGrid.block(cx, bMaxCy);
+  }
+  for (let cy = bMinCy; cy <= bMaxCy; cy++) {
+    b.navGrid.block(bMinCx, cy);
+    b.navGrid.block(bMaxCx, cy);
   }
 
-  b.buildings.push({ bounds: { minCx: hMinCx, maxCx: hMaxCx, minCy: hMinCy, maxCy: hMaxCy }, storeys });
+  // --- front door: a 1-cell gap in the ring, on the ring cell one step OUT from the door's room cell. The
+  // player's house starts SHELTERED (door left blocked) so the beelining horde mills at the wall; every
+  // other house's door gap is walkable. Only the FRONT door is an exit cell (count == buildings, T80).
+  const front = placed.doors.find((dr) => dr.front);
+  const isPlayerHouse = i === PLAYER_COL && j === PLAYER_ROW;
+  if (front) {
+    const ring = ringCellFor(front.cx, front.cy, front.dir);
+    if (!isPlayerHouse) b.navGrid.clear(ring.cx, ring.cy);
+    b.exitCells.push(ring);
+    // the player starts DEEP in the house — the interior cell farthest from the (closed) front door — so the
+    // start is genuinely sheltered and the lootable corner lands clear of the door.
+    if (isPlayerHouse) b.playerCell = shelteredPlayerCell(originCx, originCy, w, d, front.dir);
+  }
+
+  // --- windows: each placed window's ring cell stays a blocked wall, flagged for the window system. The
+  // initial decay state is seeded off the per-house style (V26) — render + sim derive the identical state.
+  const style = houseStyleForBuilding({ minCx: bMinCx, minCy: bMinCy, maxCx: bMaxCx, maxCy: bMaxCy }, 1, houseIndex, b.houseVar, -1);
+  const cs = b.navGrid.settings.navCellSize;
+  for (const win of placed.windows) {
+    const ring = ringCellFor(win.cx, win.cy, win.dir);
+    b.windowSeeds.push({
+      cx: ring.cx,
+      cy: ring.cy,
+      ns: win.ns,
+      slot: win.slot,
+      state: windowState(style, win.slot, b.boardedFraction),
+      storeys: 1,
+      x: (ring.cx + 0.5) * cs,
+      z: (ring.cy + 0.5) * cs,
+    });
+  }
+
+  b.buildings.push({ bounds: { minCx: bMinCx, maxCx: bMaxCx, minCy: bMinCy, maxCy: bMaxCy }, storeys: 1 });
+
+  const doorCx = front ? ringCellFor(front.cx, front.cy, front.dir).cx : lot.minCx + Math.floor(LOT_W / 2);
   dressYard(b, lot, doorCx, i, j);
-}
-
-/** Block a rectangular shell perimeter, leaving the single (cx,cy) cell open as the front door. */
-function stampShell(
-  b: DistrictBuild,
-  minCx: number,
-  minCy: number,
-  maxCx: number,
-  maxCy: number,
-  doorCx: number,
-  doorCy: number,
-): void {
-  for (let cx = minCx; cx <= maxCx; cx++) {
-    b.navGrid.block(cx, minCy);
-    if (!(cx === doorCx && maxCy === doorCy)) b.navGrid.block(cx, maxCy);
-  }
-  for (let cy = minCy; cy <= maxCy; cy++) {
-    b.navGrid.block(minCx, cy);
-    b.navGrid.block(maxCx, cy);
-  }
-  if (doorCy === maxCy) b.exitCells.push({ cx: doorCx, cy: doorCy });
 }
 
 /** Fence the lot's street frontage (south + short side returns), leaving the door's walk open, plus a few
@@ -201,6 +269,16 @@ function stampPark(b: DistrictBuild, lot: LotOrigin): void {
 const SPAWN_CENTER_CELL: CellXY = (() => {
   const lot = lotOrigin(PARK_COL, PARK_ROW);
   return { cx: Math.floor((lot.minCx + lot.maxCx) / 2), cy: Math.floor((lot.minCy + lot.maxCy) / 2) };
+})();
+
+/** The standalone §G breach-mechanic wall: a short 4-cell column on the open green, kept off any house so it
+ *  no longer bisects a home. The horde-event routes read the module's per-cell state, so the mechanic stays
+ *  whole; nav-wise the cells start blocked (a low garden wall) and a breach clears them. */
+const BREACH_WALL_CELLS: readonly CellXY[] = (() => {
+  const lot = lotOrigin(PARK_COL, PARK_ROW);
+  const cx = lot.minCx + 1;
+  const cy0 = lot.minCy + 1;
+  return Array.from({ length: WALL_SECTION_CELLS }, (_, z) => ({ cx, cy: cy0 + z }));
 })();
 
 /** The district scene plus the streaming sectors laid over it (consumed by DistrictModel). */
@@ -250,36 +328,36 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
   region.addRegion(REGION_ROOM_B);
   region.addRegion(REGION_STREET);
 
-  const build: DistrictBuild = { navGrid, buildings: [], groundRects: [], props: [], exitCells: [] };
+  const worldCfg = resolveDomain(worldConfig, tier);
+  const build: DistrictBuild = {
+    navGrid,
+    buildings: [],
+    groundRects: [],
+    props: [],
+    exitCells: [],
+    houses: [],
+    windowSeeds: [],
+    houseVar: resolveHouseVariation(tier),
+    boardedFraction: worldCfg.houseWindowBoardedFraction,
+    playerCell: null,
+  };
 
-  // ---- ground paint: asphalt base, grass lots, concrete sidewalk rings ----
+  // ---- ground paint: asphalt base under everything ----
   build.groundRects.push({ kind: 'asphalt', rect: { minCx: 0, maxCx: GRID_WIDTH_CELLS - 1, minCy: 0, maxCy: GRID_HEIGHT_CELLS - 1 } });
 
-  // ---- the feature house (destructible dividing wall) on lot (0,0) ----
-  stampShell(build, FEATURE_H_MIN_CX, FEATURE_H_MIN_CY, FEATURE_H_MAX_CX, FEATURE_H_MAX_CY, FEATURE_DOOR_CX, FEATURE_DOOR_CY);
-  // the dividing wall column (interior rows) — starts fully intact (blocked); the section breaches open.
-  for (let cy = FEATURE_H_MIN_CY + 1; cy <= FEATURE_H_MAX_CY - 1; cy++) navGrid.block(FEATURE_WALL_CX, cy);
-  // The player's house starts SHELTERED: close (block) its front door so the beelining horde can't path
-  // straight into the player's room — it mills at the walls instead, so the player can observe + test the
-  // idle->attack trigger rather than being swarmed at spawn. Breaching the dividing wall / a door opens it.
-  navGrid.block(FEATURE_DOOR_CX, FEATURE_DOOR_CY);
-  build.buildings.push({
-    bounds: { minCx: FEATURE_H_MIN_CX, maxCx: FEATURE_H_MAX_CX, minCy: FEATURE_H_MIN_CY, maxCy: FEATURE_H_MAX_CY },
-    storeys: 2,
-  });
-  dressYard(build, lotOrigin(0, 0), FEATURE_DOOR_CX, 0, 0);
-
-  // ---- the remaining lots: ordinary enterable houses, except the central green ----
+  // ---- the houses: every lot is a templated home, except the central green ----
   for (let j = 0; j < ROWS; j++) {
     for (let i = 0; i < COLS; i++) {
-      if (i === 0 && j === 0) continue; // feature house already placed
       if (i === PARK_COL && j === PARK_ROW) {
         stampPark(build, lotOrigin(i, j));
         continue;
       }
-      stampHouse(build, i, j);
+      stampTemplatedHouse(build, i, j);
     }
   }
+
+  if (!build.playerCell) throw new Error('district authoring error: the player house produced no front door');
+  const playerCell: CellXY = build.playerCell;
 
   // grass yards on every lot (drawn above the asphalt); sidewalk ring around each lot.
   for (let j = 0; j < ROWS; j++) {
@@ -290,18 +368,40 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     }
   }
 
-  // ---- the destructible StructuralModule section (the §G promise) ----
+  // ---- GENERIC prop solidity (V53/V42/V5): a SOLID prop (car, tree) marks its footprint BLOCKED so shots
+  // stop, bodies collide, and sight breaks at it — all via the shared nav grid (no per-asset code). Fence
+  // spans block EXCEPT the ones whose decay rolled them missing — using the SAME world chance the renderer
+  // reads so blocked cells line up with the visible pickets. Doors are never sealed (guard the exit cells).
+  const fenceMissingChance = worldCfg.fenceMissingChance;
+  const exitKeys = new Set(build.exitCells.map((e) => navGrid.index(e.cx, e.cy)));
+  for (const prop of build.props) {
+    setPropSolid(navGrid, prop, true, (cx, cy) => exitKeys.has(navGrid.index(cx, cy)), fenceMissingChance);
+  }
+
+  // ---- the standalone destructible §G wall section (breach mechanic kept; no house bisected) ----
+  for (const c of BREACH_WALL_CELLS) navGrid.block(c.cx, c.cy);
   const wall = new StructuralModule({ id: TEST_MODULE_ID, sizeX: 1, sizeY: 1, sizeZ: WALL_SECTION_CELLS, seed: 7531 });
   for (let z = 0; z < WALL_SECTION_CELLS; z++) {
     wall.addCell({ x: 0, y: 0, z, material: 'brick', family: FRACTURE_FAMILY, strength: 100 });
   }
 
-  // feature-house room B reaches the street through its front door (region connectivity).
-  region.addPortal(REGION_ROOM_B, REGION_STREET, navGrid.index(FEATURE_DOOR_CX, FEATURE_DOOR_CY), 1);
+  // coarse region portal: the player's house reaches the street through its front door (opened later).
+  const playerFrontGap = build.exitCells[0];
+  if (playerFrontGap) region.addPortal(REGION_ROOM_B, REGION_STREET, navGrid.index(playerFrontGap.cx, playerFrontGap.cy), 1);
 
   // union bbox of every building (back-compat single-rect accessor).
-  const buildingBounds = unionBounds(build.buildings.map((b) => b.bounds));
+  const buildingBounds = unionBounds(build.buildings.map((bld) => bld.bounds));
   const navCellSize = navGrid.settings.navCellSize;
+
+  // rooms-as-regions lookup (cell → house + room) over every placed house interior (loot/AI, P1).
+  const houses = build.houses;
+  const roomAt = (cx: number, cy: number): { houseIndex: number; roomId: number; type: RoomType } | null => {
+    for (let h = 0; h < houses.length; h++) {
+      const r = houses[h]!.roomAt(cx, cy);
+      if (r) return { houseIndex: h, roomId: r.roomId, type: r.type };
+    }
+    return null;
+  };
 
   const block: TestBlock = {
     navGrid,
@@ -310,17 +410,20 @@ export function buildCityDistrict(tier: QualityTier = 'desktop-high'): CityDistr
     moduleId: TEST_MODULE_ID,
     worldVersion: CITY_DISTRICT_WORLD_VERSION,
     fractureFamily: FRACTURE_FAMILY,
-    playerCell: PLAYER_CELL,
+    playerCell,
     spawnCenterCell: SPAWN_CENTER_CELL,
     buildingBounds,
     buildings: build.buildings,
     groundRects: build.groundRects,
     props: build.props,
     exitCells: build.exitCells,
+    placedHouses: houses,
+    windowSeeds: build.windowSeeds,
+    roomAt,
     cellCenter: (cell) => ({ x: (cell.cx + 0.5) * navCellSize, y: 0, z: (cell.cy + 0.5) * navCellSize }),
     navCellForStructuralCell: (structuralCell) => {
       const { z } = wall.unpackCell(structuralCell);
-      return { cx: FEATURE_WALL_CX, cy: WALL_SECTION_CY_START + z };
+      return BREACH_WALL_CELLS[z] ?? BREACH_WALL_CELLS[0]!;
     },
     navIndex: (cell) => navGrid.index(cell.cx, cell.cy),
     isWalkableWorld: (x, z) => {

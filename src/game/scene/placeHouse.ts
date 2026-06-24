@@ -74,6 +74,8 @@ export interface PlacedDoor {
   /** World cell the door opening sits in (the `fromRoom` side). */
   readonly cx: number;
   readonly cy: number;
+  /** Outward edge direction (n/s/e/w) the door opens through — the side the wall/shell ring sits on. */
+  readonly dir: Edge;
 }
 
 /** A window OPENING on an exterior wall edge, with the owning room + a deterministic state seed slot. */
@@ -88,6 +90,8 @@ export interface PlacedWindow {
   readonly cy: number;
   /** Wall runs along X (a N/S facade) → the renderer rotates the pane. Mirrors WindowPlacement.ns. */
   readonly ns: boolean;
+  /** Outward edge direction (n/s/e/w) the window faces — the side the exterior wall/shell ring sits on. */
+  readonly dir: Edge;
 }
 
 /** A fully placed single-storey house: room map + wall edges + door/window openings, in world cells. */
@@ -213,6 +217,7 @@ export function placeHouse(template: HouseTemplate, originCx: number, originCy: 
       toRoom: door.toRoom,
       cx: originCx + door.atCell.cx,
       cy: originCy + door.atCell.cy,
+      dir: door.edge,
     });
   }
 
@@ -235,6 +240,7 @@ export function placeHouse(template: HouseTemplate, originCx: number, originCy: 
       cx: originCx + win.atCell.cx,
       cy: originCy + win.atCell.cy,
       ns: dl.dy !== 0, // n/s facade → wall runs along X → renderer rotates the pane
+      dir: win.edge,
     });
   });
 

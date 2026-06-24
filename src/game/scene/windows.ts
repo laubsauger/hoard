@@ -69,7 +69,10 @@ export interface WindowSystemConfig {
 type WindowScene = Pick<
   TestBlock,
   'navGrid' | 'buildings' | 'buildingBounds' | 'exitCells' | 'wall' | 'navCellForStructuralCell'
->;
+> & {
+  /** P0: when the scene authored its windows from floor-plan templates, this IS the window set (V26). */
+  readonly windowSeeds?: readonly WindowPlacement[];
+};
 
 /**
  * Which building (if any) owns the destructible §G section cells — the renderer keeps it lightly weathered
@@ -130,6 +133,10 @@ export interface WindowPlacementOptions {
  * cell that is neither a corner nor adjacent to a door opening (matching blockScene's loop exactly).
  */
 export function windowPlacements(scene: WindowScene, opts: WindowPlacementOptions): WindowPlacement[] {
+  // P0: a templated scene authored its windows from the floor-plan templates (placeHouse) — that set IS the
+  // single source of truth, so the sim seed and the renderer mesh build read EXACTLY the same windows (V26).
+  // The legacy facade-stride placement below remains for the GATE-0 / M1 blocks, which have no templates.
+  if (scene.windowSeeds) return [...scene.windowSeeds];
   const grid = scene.navGrid;
   const cs = grid.settings.navCellSize;
   const featureIdx = featureBuildingIndexOf(scene);
