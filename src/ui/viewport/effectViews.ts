@@ -22,6 +22,7 @@ import { GibView, resolveGibSettings } from '../../render/effects/gibView';
 import { WeatherView, resolveRainSettings } from '../../render/effects/weatherView';
 import { FireView, resolveFireSettings } from '../../render/effects/fireView';
 import { HighlightView, resolveHighlightSettings } from '../../render/effects/highlightView';
+import { CursorView } from '../../render/effects/cursorView';
 import { CorpseField, resolveCorpseFieldSettings } from '../../render/corpse';
 import { weaponsConfig } from '../../config/domains/weapons';
 import { resolveDomain } from '../../config/registry';
@@ -38,6 +39,8 @@ export interface EffectViews {
   readonly weatherView: WeatherView;
   readonly fireView: FireView;
   readonly highlightView: HighlightView;
+  /** T136: the world-space mouse reticle (ground ring at the pointer point). */
+  readonly cursorView: CursorView;
   readonly corpseField: CorpseField;
   /** Read-only projector over the static structure (shared blood floor/wall + impact wall-finder). */
   readonly surfaceProjector: RaycastSurfaceProjector;
@@ -83,6 +86,8 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
   // interactable in reach (the target the prompt + wheel act on). Tracked in the host registry → freed on
   // unmount (V24). Driven each frame off runtime.nearestInteractableHighlight() in the loop.
   const highlightView = new HighlightView(resolveHighlightSettings(tier), registry);
+  const cursorView = new CursorView(registry);
+  cursorView.attachTo(scene.scene);
   bloodView.attachTo(scene.scene);
   gibView.attachTo(scene.scene);
   impactView.attachTo(scene.scene);
@@ -153,7 +158,7 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
   const corpseField = new CorpseField(resolveCorpseFieldSettings(tier), registry);
   corpseField.attachTo(scene.scene);
 
-  return { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField, surfaceProjector, firearmRangeMeters };
+  return { bloodView, gibView, impactView, weatherView, fireView, highlightView, cursorView, corpseField, surfaceProjector, firearmRangeMeters };
 }
 
 /** True if `o` or any ancestor is the tagged player avatar (T127) — so its async-attached SkinnedMesh is never

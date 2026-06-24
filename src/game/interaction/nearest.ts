@@ -139,6 +139,37 @@ export function nearestInteractable(
 }
 
 /**
+ * HOVER pick (T136): among the interactables WITHIN `rangeMeters` of the player (x,z), the one nearest the
+ * POINTER world point (px,pz) — so the MOUSE chooses which of several in-reach targets is selected, instead of
+ * always the closest-to-the-player one (tedious when two sit side by side). `distanceMeters` stays the
+ * player→target distance (the prompt anchor / reach readout). Ties break by input order. Pure — no render/runtime
+ * coupling. Nothing in reach → null (the caller then falls back to `nearestInteractable`, e.g. no pointer yet).
+ */
+export function hoveredInteractable(
+  targets: readonly InteractionTargetWorld[],
+  x: number,
+  z: number,
+  rangeMeters: number,
+  pointerX: number,
+  pointerZ: number,
+  hoverRadiusMeters = Infinity,
+): NearestInteractable | null {
+  let best: NearestInteractable | null = null;
+  let bestPointerDist = Infinity;
+  for (const target of targets) {
+    const reach = Math.hypot(target.x - x, target.z - z);
+    if (reach > rangeMeters) continue; // must be IN REACH of the player to interact
+    const toPointer = Math.hypot(target.x - pointerX, target.z - pointerZ);
+    if (toPointer > hoverRadiusMeters) continue; // pointer not actually OVER/near this target (T136 hold-last)
+    if (toPointer < bestPointerDist) {
+      bestPointerDist = toPointer;
+      best = { target, distanceMeters: reach };
+    }
+  }
+  return best;
+}
+
+/**
  * The primary verb PHRASE to advertise for a target, by its kind + live state (T59/T60). This is the headline
  * action the prompt shows; the wheel still offers the full gated verb list. Never throws — an unknown kind
  * falls back to a generic "interact".

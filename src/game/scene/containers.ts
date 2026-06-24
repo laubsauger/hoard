@@ -20,7 +20,7 @@ export interface ContainerPlacement {
 /** The scene fields container placement needs — a narrow slice so this stays unit-testable without a runtime.
  *  `exitCells` + `windowSeeds` let the cabinet AVOID a cell that already carries a door/window opening (so the
  *  cabinet never sits on — and its glow never merges with — a window/door, V79). */
-type ContainerScene = Pick<TestBlock, 'playerCell' | 'buildings' | 'buildingBounds' | 'navGrid' | 'exitCells' | 'windowSeeds'>;
+type ContainerScene = Pick<TestBlock, 'playerCell' | 'buildings' | 'buildingBounds' | 'navGrid' | 'exitCells' | 'windowSeeds' | 'roomAt'>;
 
 const CONTAINER_DIR_DELTA: Record<'n' | 's' | 'e' | 'w', { dx: number; dy: number }> = {
   n: { dx: 0, dy: -1 },
@@ -107,14 +107,44 @@ function nearestWalkableInterior(grid: NavGrid, b: CellRect, corner: CellXY, avo
   return best;
 }
 
+/** The WALKABLE cell of the player's OWN room FARTHEST from the player — so the kitchen cupboard sits across the
+ *  player's open-plan room (out of immediate reach, range-gated) yet stays IN that room: reachable without
+ *  crossing a wall/closed door, and never sealed in a back bedroom (T135 — the captive room). Null if the scene
+ *  has no room map or the room yields no free cell (caller falls back to the whole-building corner). */
+function farthestWalkableInPlayerRoom(scene: ContainerScene, b: CellRect, avoid: Set<number>): CellXY | null {
+  if (!scene.roomAt) return null;
+  const pr = scene.roomAt(scene.playerCell.cx, scene.playerCell.cy);
+  if (!pr) return null;
+  const grid = scene.navGrid;
+  let best: CellXY | null = null;
+  let bestD = -1;
+  for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+    for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+      const idx = grid.index(cx, cy);
+      if (grid.isBlocked(idx) || avoid.has(idx)) continue;
+      const r = scene.roomAt(cx, cy);
+      if (!r || r.houseIndex !== pr.houseIndex || r.roomId !== pr.roomId) continue; // stay inside the player's room
+      const d = (cx - scene.playerCell.cx) ** 2 + (cy - scene.playerCell.cy) ** 2;
+      if (d > bestD) {
+        bestD = d;
+        best = { cx, cy };
+      }
+    }
+  }
+  return best;
+}
+
 /**
  * The FIXED cells of the scene's lootable world containers (T85). For the slice this is ONE kitchen cupboard
- * anchored in a corner of the player's start room — a stable spot derived from the building bounds, never the
- * live player cell. Returned as a list so multiple authored containers slot in without touching the callers.
+ * anchored across the player's OWN room (the open-plan kitchen/living) — a stable spot, never the live player
+ * cell. T135: room-constrained so the "Kitchen Cupboard" lands in the kitchen (reachable, range-gated), not in
+ * a sealed back bedroom (the captive room) the farthest house corner would pick. Falls back to the whole-building
+ * farthest corner for scenes with no room map (the bare GATE-0 / M1 blocks).
  */
 export function lootableContainerCells(scene: ContainerScene): ContainerPlacement[] {
   const bounds = playerBuildingBounds(scene);
-  const corner = farthestInteriorCorner(bounds, scene.playerCell);
-  const cell = nearestWalkableInterior(scene.navGrid, bounds, corner, openingCells(scene));
+  const avoid = openingCells(scene);
+  const inRoom = farthestWalkableInPlayerRoom(scene, bounds, avoid);
+  const cell = inRoom ?? nearestWalkableInterior(scene.navGrid, bounds, farthestInteriorCorner(bounds, scene.playerCell), avoid);
   return [{ cell, label: 'Kitchen Cupboard' }];
 }

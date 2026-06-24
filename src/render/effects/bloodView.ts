@@ -27,7 +27,7 @@ import {
   InstancedMesh,
   SphereGeometry,
   CircleGeometry,
-  MeshBasicMaterial,
+  MeshStandardMaterial,
   Object3D,
   Color,
   Vector3,
@@ -1038,7 +1038,10 @@ export class BloodView {
   constructor(settings: BloodSettings, registry: ResourceRegistry) {
     this.sim = new BloodSim(settings);
     const dropGeo = registry.track(new SphereGeometry(1, 6, 5), 'geometry', 'blood.dropletGeo');
-    const dropMat = registry.track(new MeshBasicMaterial({ name: 'blood.droplet', toneMapped: false }), 'material', 'blood.dropletMat');
+    // LIT material (not unlit MeshBasic) so blood OBEYS the scene light: dark when no light reaches it (it no
+    // longer glows in a black room) and lit red under the sun/moon/flashlight. Slightly glossy (wet) so it
+    // catches the torch. toneMapped TRUE so it goes through the same exposure/tonemap as the world.
+    const dropMat = registry.track(new MeshStandardMaterial({ name: 'blood.droplet', roughness: 0.5, metalness: 0 }), 'material', 'blood.dropletMat');
     this.dropMesh = registry.track(new InstancedMesh(dropGeo, dropMat, Math.max(1, settings.dropletPoolSize)), 'buffer', 'blood.dropletMesh');
     primeInstanced(this.dropMesh);
 
@@ -1048,9 +1051,10 @@ export class BloodView {
     // fight with the floor surface without z-fighting. Visibility indoors is solved at the SOURCE: the
     // cutaway-faded roof/upper-walls stop depth-writing (blockScene) so they don't occlude the interior.
     const decalMat = registry.track(
-      new MeshBasicMaterial({
+      new MeshStandardMaterial({
         name: 'blood.decal',
-        toneMapped: false,
+        roughness: 0.6,
+        metalness: 0,
         transparent: true,
         depthWrite: false,
         polygonOffset: true,
@@ -1069,7 +1073,7 @@ export class BloodView {
     // far side). Lives in WORLD space and is repositioned to playerWorldPos + body-local offset each frame (NOT
     // parented to the player mesh). Brighter than floor blood so it reads on the dark body.
     const pgGeo = registry.track(new SphereGeometry(1, 7, 6), 'geometry', 'blood.playerGoreGeo');
-    const pgMat = registry.track(new MeshBasicMaterial({ name: 'blood.playerGore', toneMapped: false }), 'material', 'blood.playerGoreMat');
+    const pgMat = registry.track(new MeshStandardMaterial({ name: 'blood.playerGore', roughness: 0.55, metalness: 0 }), 'material', 'blood.playerGoreMat');
     this.pgMesh = registry.track(new InstancedMesh(pgGeo, pgMat, Math.max(1, settings.playerGorePoolSize)), 'buffer', 'blood.playerGoreMesh');
     primeInstanced(this.pgMesh);
     this.pgMesh.renderOrder = 2; // over the body + floor decals so the coating reads
@@ -1078,7 +1082,7 @@ export class BloodView {
     // to the struck body and re-projected to its CURRENT world transform every frame (the sim's BodyAnchor),
     // so coating follows the body — and drops to the floor when it topples to a corpse. depthTest ON (V56).
     const zgGeo = registry.track(new SphereGeometry(1, 7, 6), 'geometry', 'blood.zombieGoreGeo');
-    const zgMat = registry.track(new MeshBasicMaterial({ name: 'blood.zombieGore', toneMapped: false }), 'material', 'blood.zombieGoreMat');
+    const zgMat = registry.track(new MeshStandardMaterial({ name: 'blood.zombieGore', roughness: 0.55, metalness: 0 }), 'material', 'blood.zombieGoreMat');
     this.zgMesh = registry.track(new InstancedMesh(zgGeo, zgMat, Math.max(1, settings.zombieGorePoolSize)), 'buffer', 'blood.zombieGoreMesh');
     primeInstanced(this.zgMesh);
     this.zgMesh.renderOrder = 2; // over the corpse + floor decals so the coating reads

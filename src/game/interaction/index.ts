@@ -8,6 +8,7 @@ export {
 } from './resolve';
 export {
   nearestInteractable,
+  hoveredInteractable,
   interactionActionLabel,
   interactionPrompt,
   highlightBoxFor,

@@ -1,6 +1,6 @@
 // T60 — nearest-interactable resolution + the "{key} to {action}" prompt picks the right verb by target type.
 import { describe, it, expect } from 'vitest';
-import { nearestInteractable, interactionActionLabel, interactionPrompt } from './nearest';
+import { nearestInteractable, hoveredInteractable, interactionActionLabel, interactionPrompt } from './nearest';
 import { resolveInteractions } from './resolve';
 import type { InteractionTargetWorld } from './nearest';
 
@@ -17,6 +17,32 @@ describe('nearest interactable + prompt (T60)', () => {
 
   it('returns null when nothing is in reach', () => {
     expect(nearestInteractable([door, container, windowT], 100, 100, 3)).toBeNull();
+  });
+
+  it('HOVER pick (T136): among in-reach targets, the MOUSE chooses which one — disambiguates adjacent targets', () => {
+    // door at (0,0) + container at (1,0); player at (0,0) is within reach (3 m) of BOTH. The pointer decides.
+    const closeContainer: InteractionTargetWorld = { kind: 'container', x: 1, z: 0, label: 'Cupboard' };
+    const targets = [door, closeContainer];
+    // pointer hovering the CONTAINER → the container is picked (even though the door is closer to the player).
+    expect(hoveredInteractable(targets, 0, 0, 3, 1.2, 0)?.target.kind).toBe('container');
+    // sweep the pointer onto the DOOR → the door is picked.
+    expect(hoveredInteractable(targets, 0, 0, 3, -0.2, 0)?.target.kind).toBe('door');
+    // distanceMeters stays the PLAYER→target reach (prompt anchor), not the pointer distance.
+    expect(hoveredInteractable(targets, 0, 0, 3, 1.2, 0)?.distanceMeters).toBeCloseTo(1);
+  });
+
+  it('HOVER pick still requires the target to be IN REACH of the player (pointer alone never reaches)', () => {
+    // pointer sits right on the far container, but the player at (0,0) is out of its reach (10 m > 3) → null.
+    expect(hoveredInteractable([door, container], 0, 0, 3, 10, 0)?.target.kind).toBe('door'); // door is in reach
+    expect(hoveredInteractable([container], 0, 0, 3, 10, 0)).toBeNull(); // only the far one → nothing in reach
+  });
+
+  it('HOVER pick honours a hover RADIUS — pointer far from every in-reach target selects NONE (T136 hold-last)', () => {
+    // door in reach at (0,0); pointer at (10,0) is beyond the 1.4 m hover radius → not hovered → null (the runtime
+    // then HOLDS its last selection so moving the cursor to the menu over empty floor doesn't drop focus).
+    expect(hoveredInteractable([door], 0, 0, 3, 10, 0, 1.4)).toBeNull();
+    // pointer ON the door (within the radius) → selects it.
+    expect(hoveredInteractable([door], 0, 0, 3, 0.2, 0, 1.4)?.target.kind).toBe('door');
   });
 
   it('the prompt action depends on the nearest target TYPE + state', () => {

@@ -255,8 +255,8 @@ export const weaponsConfig = registerDomain('weapons', {
   }),
 
   // pistol ammo — a full magazine of 12 with a few spare mags in reserve; quick reload + quick swap.
-  pistolMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Pistol magazine capacity in rounds (T74).', default: 12, min: 1, max: 1000, integer: true }),
-  pistolReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Pistol spare rounds held in reserve, fed into the magazine on reload (T74).', default: 48, min: 0, max: 100_000, integer: true }),
+  pistolMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Pistol magazine capacity in rounds (T74). Bumped to 21 (mag) + 105 reserve = 126 total for easier testing.', default: 21, min: 1, max: 1000, integer: true }),
+  pistolReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Pistol spare rounds held in reserve, fed into the magazine on reload (T74). 105 reserve + 21 mag = 126 total (testing).', default: 105, min: 0, max: 100_000, integer: true }),
   pistolReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a pistol reload takes; fire is blocked until it settles (T74).', default: 45, min: 1, max: 6000, integer: true }),
   pistolSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the pistol via cycleWeapon; fire is blocked until ready (T74).', default: 9, min: 0, max: 6000, integer: true }),
 

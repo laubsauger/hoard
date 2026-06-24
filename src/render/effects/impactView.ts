@@ -24,6 +24,7 @@ import {
   IcosahedronGeometry,
   CircleGeometry,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   AdditiveBlending,
   Object3D,
   Color,
@@ -658,10 +659,13 @@ export class ImpactView {
 
     // ---- bullet holes: dark disc projected on the surface. V56 depth policy. ----
     const holeGeo = registry.track(new CircleGeometry(0.5, 16), 'geometry', 'impact.holeGeo');
+    // LIT (not unlit) so the hole obeys scene light — dark in a dark room, lit by the flashlight — instead of
+    // glowing. Matte. Dark base; the per-instance colour + lighting do the rest.
     const holeMat = registry.track(
-      new MeshBasicMaterial({
+      new MeshStandardMaterial({
         name: 'impact.hole',
-        toneMapped: false,
+        roughness: 0.9,
+        metalness: 0,
         transparent: true,
         depthWrite: false,
         polygonOffset: true,
@@ -677,10 +681,13 @@ export class ImpactView {
 
     // ---- wounds: dark maroon mark on the body. V56 depth policy. ----
     const woundGeo = registry.track(new CircleGeometry(0.5, 16), 'geometry', 'impact.woundGeo');
+    // LIT so the wound mark obeys scene light (dark on the body in a dark room, lit by the flashlight) — was an
+    // unlit decal that glowed. The reveal fade still rides the per-instance colour darkening (V90).
     const woundMat = registry.track(
-      new MeshBasicMaterial({
+      new MeshStandardMaterial({
         name: 'impact.wound',
-        toneMapped: false,
+        roughness: 0.7,
+        metalness: 0,
         transparent: true,
         depthWrite: false,
         polygonOffset: true,

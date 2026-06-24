@@ -39,7 +39,10 @@ describe('container fixed placement + active highlight (BUG1/T60)', () => {
 
   it('walking up to the cupboard makes it the nearest interactable + emits a sized highlight box', () => {
     const rt = makeRuntime();
-    const cup = rt.interactables().find((t) => t.kind === 'container')!;
+    // T135: target the Kitchen Cupboard specifically — it's anchored in the player's OWN (open-plan kitchen) room
+    // now, so it's reachable by a straight walk; the generic "first container" could be furniture sealed behind
+    // the captive room's closed interior door.
+    const cup = rt.interactables().find((t) => t.kind === 'container' && t.label === 'Kitchen Cupboard')!;
     const range = resolveDomain(structuresConfig, TIER).interactionRangeMeters;
     // step toward the cupboard until right beside it (walkable interior path; slides on walls). At the finer
     // 1 m nav resolution we must stand BESIDE the cabinet (a stop ~one wall-width short still has the partition
@@ -63,5 +66,25 @@ describe('container fixed placement + active highlight (BUG1/T60)', () => {
     expect(hl!.sizeY).toBeCloseTo(cfg.cupboardHeightMeters);
     expect(hl!.sizeZ).toBeCloseTo(cfg.cupboardDepthMeters);
     expect(hl!.y).toBeCloseTo(cfg.cupboardHeightMeters / 2);
+  });
+
+  it('T136: HOLDS the hover selection over empty world — moving the cursor to the menu does not drop focus', () => {
+    const rt = makeRuntime();
+    const cup = rt.interactables().find((t) => t.kind === 'container' && t.label === 'Kitchen Cupboard')!;
+    // walk up beside the cupboard (same approach as the walk test).
+    for (let i = 0; i < 600; i++) {
+      const p = rt.player();
+      const dx = cup.x - p.x;
+      const dz = cup.z - p.z;
+      if (Math.hypot(dx, dz) <= 0.8) break;
+      rt.movePlayer(dx, dz, 0.1);
+    }
+    // hover the cupboard → it is the active interactable.
+    rt.setPointerWorld({ x: cup.x, z: cup.z });
+    expect(rt.nearestInteractableTarget()?.label).toBe('Kitchen Cupboard');
+    // sweep the cursor far into EMPTY world (heading to the action menu / loot pane) → the selection HOLDS on the
+    // cupboard instead of dropping, so the menu still acts on it (T136 hold-last).
+    rt.setPointerWorld({ x: cup.x + 50, z: cup.z + 50 });
+    expect(rt.nearestInteractableTarget()?.label).toBe('Kitchen Cupboard');
   });
 });

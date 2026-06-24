@@ -88,8 +88,10 @@ import {
 } from '@/game/scene';
 import {
   nearestInteractable,
+  hoveredInteractable,
   interactionPrompt,
   highlightBoxFor,
+  type NearestInteractable,
   type InteractionTargetWorld,
   type InteractionPrompt,
   type InteractionHighlightTarget,
@@ -114,6 +116,10 @@ import {
 import type { Now } from '@/stores';
 
 const REFERENCE_TIER: QualityTier = 'desktop-high';
+/** T136: how close (m) the mouse-pointer ground point must be to an interactable's centre to HOVER-select it.
+ *  Generous (~1.5 cells) so hovering near an object picks it; beyond it the last selection is HELD (so moving
+ *  the cursor to the action menu / loot pane over empty floor never drops focus). */
+const INTERACTION_HOVER_RADIUS_METERS = 1.4;
 /** Synthetic entity id for world loot containers — a high fixed space that never collides with minted
  *  entity ids, so seeding world loot does not perturb the IdFactory counters (determinism/replay, V26). */
 const WORLD_CONTAINER_ENTITY = 0x7fff_0001;
@@ -1227,14 +1233,67 @@ export class GameRuntime {
     return alongX ? 0 : Math.PI / 2;
   }
 
+  /** T136: the live mouse-pointer world point (ground intersection), set by the render input each frame, or null
+   *  (no pointer / ray parallel). Drives HOVER selection of which in-reach interactable is the active one. */
+  private pointerWorld: { x: number; z: number } | null = null;
+  /** T136: nav cell of the last HOVER-picked interactable — HELD while the cursor is over empty world (e.g. on
+   *  its way to the action menu / loot pane), so the selection doesn't drop just because the mouse left the
+   *  object. −1 = none held. */
+  private lastPickedCell = -1;
+
+  /** T136: publish the mouse-pointer world point so the player can HOVER to choose which in-reach interactable is
+   *  highlighted/ready (vs always the nearest one). Render input only (V2 — never sim state); null clears it. */
+  setPointerWorld(point: { x: number; z: number } | null): void {
+    this.pointerWorld = point;
+  }
+
+  /** Nav cell a world target sits in (the cell its centre falls in) — stable per interactable, used to HOLD the
+   *  hover selection across frames (T136). */
+  private cellOfTarget(t: InteractionTargetWorld): number {
+    const cs = this.scene.navGrid.settings.navCellSize;
+    return this.scene.navGrid.index(Math.floor(t.x / cs), Math.floor(t.z / cs));
+  }
+
+  /** The ACTIVE interactable (T60/T136): among the targets in reach, the one the MOUSE is OVER (within
+   *  `INTERACTION_HOVER_RADIUS_METERS`) when a pointer world point is published — so the player hovers to choose
+   *  WHICH of several adjacent targets is selected. When the cursor is over EMPTY world (near no target — e.g.
+   *  travelling to the action menu / loot pane), the last picked target is HELD (so the selection doesn't drop);
+   *  if it left reach, fall back to the one nearest the player. All three public interactable readouts route here
+   *  so the highlight, the HUD prompt, and the verb wheel always agree on the SAME target. */
+  private pickInteractable(): NearestInteractable | null {
+    const targets = this.visibleInteractables();
+    const range = this.structuresCfg.interactionRangeMeters;
+    const px = this.playerPos.x;
+    const pz = this.playerPos.z;
+    if (this.pointerWorld) {
+      const hovered = hoveredInteractable(targets, px, pz, range, this.pointerWorld.x, this.pointerWorld.z, INTERACTION_HOVER_RADIUS_METERS);
+      if (hovered) {
+        this.lastPickedCell = this.cellOfTarget(hovered.target);
+        return hovered;
+      }
+      // Cursor over empty world → HOLD the last picked target while it stays in reach (so moving the mouse to the
+      // menu / pane doesn't drop focus); else fall through to the nearest.
+      if (this.lastPickedCell >= 0) {
+        const held = targets.find((t) => this.cellOfTarget(t) === this.lastPickedCell);
+        if (held) {
+          const reach = Math.hypot(held.x - px, held.z - pz);
+          if (reach <= range) return { target: held, distanceMeters: reach };
+        }
+      }
+    }
+    const near = nearestInteractable(targets, px, pz, range);
+    this.lastPickedCell = near ? this.cellOfTarget(near.target) : -1;
+    return near;
+  }
+
   /**
-   * The NEAREST interactable in reach as a placed + SIZED highlight box (world centre + axis-aligned bounds +
-   * kind), or null when nothing is in reach (T60/V29). The render lane draws ONE colour-coded glowing outline
-   * at this box so the player sees WHICH object the "{key} to {action}" prompt refers to. Pure read of the
-   * live sim state — the frame loop polls it each frame and hides the highlight when this returns null.
+   * The ACTIVE interactable in reach as a placed + SIZED highlight box (world centre + axis-aligned bounds +
+   * kind), or null when nothing is in reach (T60/V29/T136). The render lane draws ONE colour-coded glowing
+   * outline at this box so the player sees WHICH object the "{key} to {action}" prompt refers to — the one under
+   * the mouse when hovering, else the nearest. Pure read of the live sim state — polled each frame.
    */
   nearestInteractableHighlight(): InteractionHighlightTarget | null {
-    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = this.pickInteractable();
     if (!near) return null;
     // GENERIC nav-cell resolution (T113/V79): the cell the target's world centre falls in — the SAME index the
     // scene builders tag their interactable meshes with (grid.index(floor(x/cs), floor(z/cs)) == grid.index(cx,cy)
@@ -1249,13 +1308,14 @@ export class GameRuntime {
   /** The "{key} to {action}" prompt for the NEAREST interactable in reach, or null (T60). Pure read of the
    *  live sim state — the HUD polls it each frame and re-renders only when it changes (V1/V11). */
   nearestInteractionPrompt(key: string): InteractionPrompt | null {
-    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = this.pickInteractable();
     return near ? interactionPrompt(near.target, key) : null;
   }
 
-  /** The NEAREST interactable target in reach (full state), or null — the wheel resolves its gated verbs. */
+  /** The ACTIVE interactable target in reach (full state), or null — the wheel resolves its gated verbs. Hover-
+   *  picked (T136) so pressing the interact key acts on the SAME target the highlight + prompt point at. */
   nearestInteractableTarget(): InteractionTargetWorld | null {
-    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = this.pickInteractable();
     return near ? near.target : null;
   }
 

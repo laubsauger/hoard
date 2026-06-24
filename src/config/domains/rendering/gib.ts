@@ -163,8 +163,8 @@ export const gibFields = {
   gibEmissiveIntensity: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Low emissive intensity of the gib material so dark gore reads on the dark floor without glowing (B6, T76/V52).',
-    default: 0.6,
+    doc: 'Emissive intensity of the gib material. LOWERED 0.6→0.1 so gore does NOT self-glow in a dark room — it now obeys the scene light + flashlight like the lit floor blood / wounds; a faint floor only so a chunk is not pure-black, never a glow with zero light reaching it (T76/V52, T137).',
+    default: 0.1,
     min: 0,
     max: 4,
   }),
