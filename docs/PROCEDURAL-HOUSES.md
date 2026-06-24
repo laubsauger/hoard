@@ -87,3 +87,16 @@ from "perimeter cells" to "room partitions from the FloorPlan".
 ## Research to gather (ground in truth)
 Real suburban floor plans (ranch/bungalow/two-storey) + PZ TileZed/BuildingEd room-def layouts → encode 3–5 as
 templates. Room-def → loot mapping mirrors PZ's room-definition item spawns.
+
+## P3 multi-floor model (chosen)
+Level dimension via **per-level nav grids**: the scene carries `levels: NavGrid[]` (index 0 = ground/district,
+1 = upstairs). Most of the world is level 0; level 1 is SPARSE — only the cells under a 2-storey house's upper
+rooms exist (walkable), the rest blocked. An agent (player + zombie) gains a `level: number` (default 0).
+**Stairs** are a vertical LINK: `(level 0, stairCell) ↔ (level 1, stairCell)` at the SAME world XZ — a portal
+edge in the nav graph. Movement/flow-field/pathfinding traverse the link (climb); perception + sound are
+per-level with attenuated bleed across a stair/floor link. Render stacks level-1 geometry at +storeyHeight Y at
+the same XZ (looks like a real upstairs); the cutaway shows the player's CURRENT level (ghost levels above).
+**Backward-compat is the green-keeper:** a 1-storey house / all outdoors has no level-1 cells, every agent stays
+level 0, every system defaults to level 0 → byte-identical to today, so the existing suite stays green. Staged:
+(P3a) per-level nav + stair-link API; (P3b) agent level + climb in movement/flow; (P3c) per-level perception+
+sound; (P3d) render stacking + per-level cutaway + stairs mesh; (P3e) cityDistrict emits some colonial-2storey.
