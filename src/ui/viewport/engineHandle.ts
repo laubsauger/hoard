@@ -49,6 +49,9 @@ export interface EngineHandle {
   nearestInteractable(): InteractionTargetWorld | null;
   /** T59: open a world container's loot panel (the "Search/Loot" verb for a storage target). */
   loot(): void;
+  /** T138: USE (consume) one unit of a consumable from the player inventory — eat/drink/treat. Re-publishes the
+   *  inventory so the reduced count surfaces immediately; the HUD survival vitals update on the next snapshot. */
+  useItem(item: number): void;
   /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
    *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
   worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
@@ -131,6 +134,12 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       // of interaction range (item A — the loot panel is proximity-gated, unlike a manual `I` inventory).
       inventoryViewStore.getState().setLootAnchor(t.label);
       uiStore.getState().openPanel('inventory');
+    },
+    useItem: (item) => {
+      if (getRuntime().useItem(item)) {
+        gameAudio.containerOpen(); // a soft confirmation tick on a successful use (reuses the cardboard sfx)
+        publishInventory(); // re-surface the reduced count immediately (V1)
+      }
     },
     worldToScreen: (x, y, z) => {
       const rect = canvas.getBoundingClientRect();

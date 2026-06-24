@@ -37,6 +37,7 @@ export function Hud() {
   const bleeding = usePlayerView((s) => s.snapshot?.bleeding ?? null);
   const stress = usePlayerView((s) => s.snapshot?.stress ?? null);
   const hunger = usePlayerView((s) => s.snapshot?.hunger ?? null);
+  const thirst = usePlayerView((s) => s.snapshot?.thirst ?? null);
   const stamina = usePlayerView((s) => s.snapshot?.stamina ?? null);
   const ammoMag = usePlayerView((s) => s.snapshot?.ammoMagazine ?? null);
   const ammoReserve = usePlayerView((s) => s.snapshot?.ammoReserve ?? null);
@@ -64,6 +65,7 @@ export function Hud() {
         <Vital label="Bleed" value={bleeding} />
         <Vital label="Stress" value={stress} />
         <Vital label="Hunger" value={hunger} />
+        <Vital label="Thirst" value={thirst} />
         <Vital label="Stam" value={stamina === null ? null : stamina * 100} />
         <div className="hbn-vital">
           <span className="hbn-vital__label">AMMO</span>

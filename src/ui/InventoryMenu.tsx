@@ -8,7 +8,8 @@ import { useEffect } from 'react';
 import { useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
 import { inventoryViewStore, type ContainerView } from '../stores/inventoryView';
-import { buildDefaultCatalog } from '../game/inventory';
+import { buildDefaultCatalog, isConsumable } from '../game/inventory';
+import type { EngineHandle } from './viewport/engineHandle';
 
 const CATALOG = buildDefaultCatalog();
 function itemName(id: number): string {
@@ -41,10 +42,13 @@ function Pane({
   view,
   onItemClick,
   action,
+  onUse,
 }: {
   view: ContainerView | undefined;
   onItemClick: (item: number) => void;
   action: string;
+  /** T138: when set, a CONSUMABLE item also gets a "Use" button (eat/drink/treat) — only the player pane wires it. */
+  onUse?: (item: number) => void;
 }) {
   if (!view) return <div className="hbn-inv__pane hbn-inv__pane--empty">nothing nearby</div>;
   return (
@@ -56,12 +60,17 @@ function Pane({
       <ul className="hbn-inv__list">
         {view.slots.length === 0 && <li className="hbn-inv__empty">empty</li>}
         {view.slots.map((s) => (
-          <li key={s.item}>
+          <li key={s.item} className="hbn-inv__row">
             <button type="button" className={`hbn-inv__item cat-${itemCategory(s.item)}`} onClick={() => onItemClick(s.item)} title={action}>
               <span className="hbn-inv__name">{itemName(s.item)}</span>
               {s.count > 1 && <span className="hbn-inv__count">×{s.count}</span>}
               <span className="hbn-inv__action">{action}</span>
             </button>
+            {onUse && isConsumable(s.item) && (
+              <button type="button" className="hbn-inv__use" onClick={() => onUse(s.item)} title="Use this item">
+                use
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -69,7 +78,7 @@ function Pane({
   );
 }
 
-export function InventoryMenu() {
+export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
   const open = useUi((s) => s.activePanel === 'inventory');
   const containers = useInventoryView((s) => s.containers);
   const openContainer = useInventoryView((s) => s.openContainer);
@@ -106,10 +115,15 @@ export function InventoryMenu() {
   return (
     <div className="hbn-inv" role="dialog" aria-label="Inventory">
       <div className="hbn-inv__frame">
-        <Pane view={player} action="store ▸" onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)} />
+        <Pane
+          view={player}
+          action="store ▸"
+          onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)}
+          onUse={(item) => handle?.useItem(item)}
+        />
         <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />
       </div>
-      <p className="hbn-inv__hint">I / Esc to close · click an item to transfer</p>
+      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “use” to eat / drink / bandage</p>
     </div>
   );
 }

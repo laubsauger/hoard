@@ -597,6 +597,15 @@ body,
 .hbn-inv__count { font: 11px ui-monospace, Menlo; color: #9fb0cc; }
 .hbn-inv__action { font: 9px ui-monospace, Menlo; color: #5aa0ff; opacity: 0; }
 .hbn-inv__item:hover .hbn-inv__action { opacity: 1; }
+/* T138: a row = the transfer button + an optional "use" button (consumables). */
+.hbn-inv__row { display: flex; align-items: center; gap: 4px; }
+.hbn-inv__row .hbn-inv__item { flex: 1; }
+.hbn-inv__use {
+  flex: 0 0 auto; padding: 6px 10px; border: 0; border-radius: 6px; cursor: pointer;
+  font: 600 10px ui-monospace, Menlo; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #0a1410; background: #22c55e;
+}
+.hbn-inv__use:hover { background: #34d76b; }
 .hbn-inv__item.cat-weapon { border-left-color: #ef4444; }
 .hbn-inv__item.cat-ammo { border-left-color: #f59e0b; }
 .hbn-inv__item.cat-food, .hbn-inv__item.cat-water { border-left-color: #22c55e; }

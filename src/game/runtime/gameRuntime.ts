@@ -47,7 +47,7 @@ import {
   type PersistenceAdapter,
 } from '@/game/persistence';
 import { RuntimePersistence } from './runtimePersistence';
-import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot } from '@/game/inventory';
+import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot, consumeEffect } from '@/game/inventory';
 import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
 import type { ContainerView } from '@/stores/inventoryView';
 import { resolveDomain } from '@/config/registry';
@@ -640,6 +640,22 @@ export class GameRuntime {
       out.push({ container: name, capacity: 0, weight: this.inventory.containerWeight(ref), slots });
     }
     return out;
+  }
+
+  /** T138: USE (consume) one unit of `item` from the PLAYER inventory — eat (reduce hunger), drink (reduce
+   *  thirst), or treat a wound (medical: clot bleeding, close a wound, knock infection) — then deduct it. Returns
+   *  true only if `item` is a consumable the player actually carries (else no-op). The HUD reflects the new
+   *  survival state on the next published snapshot; the caller re-publishes the inventory for the reduced count. */
+  useItem(item: number): boolean {
+    const eff = consumeEffect(item);
+    if (!eff) return false;
+    const ref: ContainerRef = { entity: this.playerEntity, container: 'player' };
+    if (this.inventory.count(ref, item as ItemId) < 1) return false;
+    if (eff.kind === 'eat') this.playerSurvival.eat(eff.amount);
+    else if (eff.kind === 'drink') this.playerSurvival.drink(eff.amount);
+    else this.playerSurvival.treatWound(eff.amount);
+    this.inventory.take(ref, item as ItemId, 1);
+    return true;
   }
 
   /** Transfer a whole item stack between two named containers (T85). Returns true on success. */

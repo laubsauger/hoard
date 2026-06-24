@@ -55,7 +55,7 @@ export function App() {
           <Controls handle={handle} />
           <SettingsPanel />
           <PauseMenu />
-          <InventoryMenu />
+          <InventoryMenu handle={handle} />
           <CharacterPanel />
           <InteractionPrompt handle={handle} />
           <InteractionWheel handle={handle} />
