@@ -12,7 +12,7 @@
 // We go further: the instance transform is no longer a CPU-built instanceMatrix at all. It is produced by a
 // compute shader into a storage buffer and consumed via material.positionNode (the canonical WebGPU/TSL path).
 
-import { BoxGeometry, Color, InstancedMesh, Matrix4, type Object3D } from 'three';
+import { BoxGeometry, Color, DynamicDrawUsage, InstancedBufferAttribute, InstancedMesh, Matrix4, type Object3D } from 'three';
 import {
   MeshStandardNodeMaterial,
   type ComputeNode,
@@ -21,6 +21,7 @@ import {
 } from 'three/webgpu';
 import {
   Fn,
+  attribute,
   cos,
   float,
   fract,
@@ -135,6 +136,10 @@ export class CrowdLimbs {
   // Per-frame limbed inputs (compacted to the front) + scratch for instance-matrix composition.
   private readonly pose: Float32Array;
   private readonly scaleArr: Float32Array;
+  /** Per-figure reveal alpha (V65) — copied into every part's instFade attribute each frame so figures FADE
+   *  (never shrink). */
+  private readonly fadeArr: Float32Array;
+  private readonly fadeAttrs: InstancedBufferAttribute[] = [];
   private readonly anatomy: Uint32Array;
   private readonly phase: Float32Array;
   private readonly matScratch = new Float32Array(FLOATS_PER_MAT4);
@@ -157,7 +162,6 @@ export class CrowdLimbs {
       'crowd.limbMaterial',
     );
 
-    const baseColor = new Color(CROWD_LIMB_COLOR);
     const meshes: InstancedMesh[] = [];
     for (const part of CROWD_LIMB_PARTS as readonly CrowdLimbPart[]) {
       const geo = registry.track(
@@ -171,14 +175,21 @@ export class CrowdLimbs {
       mesh.frustumCulled = false; // figures span the crowd bounds; cluster-cull later (T30)
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      // Pre-create instanceColor (r184 binding-safe) so the color attribute exists before first draw.
-      for (let i = 0; i < this.budget; i++) mesh.setColorAt(i, baseColor);
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      // V65: per-instance reveal ALPHA so figures FADE in/out (never scale/shrink — height stays constant). The
+      // limb uses NO instanceColor (it's a flat colour, no per-instance variation), which frees the vertex
+      // buffer this `instFade` attribute needs: position+normal+uv + instanceMatrix×4 + instFade = 8 (the WebGPU
+      // limit). The shared material reads `instFade` as opacity (set below).
+      const fadeAttr = new InstancedBufferAttribute(new Float32Array(this.budget).fill(1), 1);
+      fadeAttr.setUsage(DynamicDrawUsage);
+      geo.setAttribute('instFade', fadeAttr);
+      this.fadeAttrs.push(fadeAttr);
       registry.track(mesh, 'buffer', `crowd.limbMesh.${part.id}`);
       parent.add(mesh);
       meshes.push(mesh);
     }
     this.meshes = meshes;
+    this.material.transparent = true;
+    this.material.opacityNode = attribute('instFade', 'float');
     this.placements = CROWD_LIMB_PARTS.map((p) => ({ offset: p.offset, swingSign: p.swingSign }));
     this.severBits = CROWD_LIMB_PARTS.map((p) => {
       const region = LIMB_REGION[p.id];
@@ -187,6 +198,7 @@ export class CrowdLimbs {
 
     this.pose = new Float32Array(this.budget * FLOATS_PER_LIMB_POSE);
     this.scaleArr = new Float32Array(this.budget);
+    this.fadeArr = new Float32Array(this.budget).fill(1);
     this.anatomy = new Uint32Array(this.budget);
     this.phase = new Float32Array(this.budget);
   }
@@ -205,6 +217,7 @@ export class CrowdLimbs {
       scaleMax: this.scaleMax,
       maxSimTier: this.maxSimTier,
       visibility,
+      outFade: this.fadeArr,
     });
 
     for (let part = 0; part < this.meshes.length; part++) {
@@ -233,6 +246,10 @@ export class CrowdLimbs {
         this.mat4.fromArray(this.matScratch);
         mesh.setMatrixAt(i, this.mat4);
       }
+      // V65: copy this frame's per-figure reveal alpha into the part's instanced opacity attribute.
+      const fa = this.fadeAttrs[part]!;
+      (fa.array as Float32Array).set(this.fadeArr.subarray(0, liveCount));
+      fa.needsUpdate = true;
       mesh.count = liveCount;
       mesh.instanceMatrix.needsUpdate = true;
     }

@@ -40,6 +40,9 @@ export interface LimbPackOptions {
    * not redraw it) but writes no instance. Undefined = no cull.
    */
   readonly visibility?: VisionCull | undefined;
+  /** Per-figure reveal ALPHA output (V65): the fade is written here, NOT baked into scale, so figures fade
+   *  in/out instead of shrinking. Compacted to the front like the other outputs. */
+  readonly outFade?: Float32Array | undefined;
 }
 
 export interface LimbPackResult {
@@ -62,7 +65,7 @@ export function packLimbInputs(
   outPhase: Float32Array,
   opts: LimbPackOptions,
 ): LimbPackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility, outFade } = opts;
   if (count < 0) throw new Error(`count must be >= 0, got ${count}`);
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
   if (outPose.length < capacity * FLOATS_PER_LIMB_POSE) {
@@ -104,10 +107,10 @@ export function packLimbInputs(
     outPose[p + 1] = position[slot * 3 + 1]!;
     outPose[p + 2] = position[slot * 3 + 2]!;
     outPose[p + 3] = heading[slot]!;
-    // The limbed figure path keeps the SCALE fade (the per-instance alpha used by the box crowd would need a
-    // 9th vertex buffer here — over the WebGPU 8-buffer limit — since limbs use a real instanceMatrix+color).
-    // Limbed figures are few + usually at full reveal near the player, so the slight shrink is rarely seen.
-    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax) * fade;
+    // V65: FULL scale always — the reveal fade is per-instance ALPHA (outFade), so figures fade in/out without
+    // any height/scale change (dropping instanceColor freed the vertex buffer instFade needs on the limb mesh).
+    outScale[live] = variationScale(seed, variationCount, scaleMin, scaleMax);
+    if (outFade) outFade[live] = fade;
     outAnatomy[live] = anatomyFlags[slot]!;
     outPhase[live] = animPhase[slot]!;
     live++;
