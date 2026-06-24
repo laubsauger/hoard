@@ -56,6 +56,8 @@ import type { HouseStyleResolver } from './houseStyle';
 // consts (V4 — no magic tilt literal). ----
 /** Collapsed-roof tilt about Z (radians). Gentle enough to read as a sagging caved roof without a steep slab. */
 const COLLAPSED_ROOF_SAG_RADIANS = 0.1;
+/** How far OUT from the wall face (m) foundation plants sit — into the yard, not merged into the wall plane. */
+const IVY_YARD_OFFSET_METERS = 0.4;
 
 // ---- procedural asphalt-shingle roof (house polish #6) — no texture files: a TSL colorNode that bands the
 // roof tint into horizontal shingle COURSES (dark seam every `course` m of world Y, like the cladding grooves),
@@ -446,7 +448,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     // fade-surface order stays deterministic: [upper-wall sides…] → [roof] → [interior partition edges…].
     buildInteriorWalls(bi, style, wallH);
     buildPorch(b, bi, style);
-    collectIvy(b, style, grid, ivyMatrices, house !== undefined);
+    collectIvy(b, style, grid, ivyMatrices, house);
     collectDebris(b, style, debrisMatrices, debrisColors);
   });
 
@@ -738,12 +740,20 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
 
   /** Accrue per-house ivy/overgrowth instances climbing the EXTERIOR wall faces, scaled by style.ivy. The
    *  caller flushes one shared instanced mesh for the whole district. */
-  function collectIvy(b: CellRect, style: HouseStyle, navGrid: NavGrid, out: Matrix4[], templated: boolean): void {
+  function collectIvy(b: CellRect, style: HouseStyle, navGrid: NavGrid, out: Matrix4[], house: PlacedHouse | undefined): void {
     if (style.ivy <= 0) return;
     const cs = navCellSize;
     const wallH = cfg.world.buildingWallHeightMeters * Math.max(1, style.storeys);
     const reach = style.ivy * wallH;
     const patches = Math.max(1, Math.round(reach / cfg.ivyPatchMeters));
+    const templated = house !== undefined;
+    // Don't grow plants in front of a WINDOW or DOOR opening — they belong on solid wall, set a bit out into the
+    // yard (not merged into the wall plane). Skip the opening cells.
+    const openingCells = new Set<number>();
+    if (house) {
+      for (const w of house.windows) openingCells.add(navGrid.index(w.cx, w.cy));
+      for (const dr of house.doors) openingCells.add(navGrid.index(dr.cx, dr.cy));
+    }
     const q = new Quaternion();
     const s = new Vector3(1, 1, 1);
     const pos = new Vector3();
@@ -755,6 +765,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
         // walkable rooms (no blocked ring) — every perimeter cell carries an exterior edge-wall face, so ivy
         // climbs them all.
         if (!templated && !navGrid.isBlocked(idx)) continue;
+        if (openingCells.has(idx)) continue; // not in front of a window/door
         const cellRoll = hash01(style.seed, 5100 + cx * 31 + cy * 7);
         if (cellRoll > style.ivy) continue; // denser ivy on more overgrown houses
         // outward face normal: pick the first open neighbour direction.
@@ -772,7 +783,8 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
             return;
           }
           const y = (p + 0.5) * cfg.ivyPatchMeters * 0.85;
-          pos.set(wx + nx * 0.06, y, wz + nz * 0.06);
+          // sit the plant a bit OUT into the yard (0.4 m beyond the wall face), not merged into the wall plane.
+          pos.set(wx + nx * IVY_YARD_OFFSET_METERS, y, wz + nz * IVY_YARD_OFFSET_METERS);
           out.push(new Matrix4().compose(pos, q, s));
         }
       }

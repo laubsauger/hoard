@@ -88,7 +88,8 @@ const SINGLE_STOREY_TEMPLATES: readonly HouseTemplate[] = HOUSE_TEMPLATES.filter
  *  fixed compact template (a small bungalow) so the sheltered start is consistent. */
 function templateForLot(i: number, j: number): HouseTemplate {
   if (i === PLAYER_COL && j === PLAYER_ROW) {
-    return SINGLE_STOREY_TEMPLATES.find((t) => t.id === 'bungalow-2bed') ?? SINGLE_STOREY_TEMPLATES[0]!;
+    // a roomier starting home (ranch-3bed, 9×6) for a consistent, slightly larger sheltered start.
+    return SINGLE_STOREY_TEMPLATES.find((t) => t.id === 'ranch-3bed') ?? SINGLE_STOREY_TEMPLATES[0]!;
   }
   const n = SINGLE_STOREY_TEMPLATES.length;
   const idx = Math.min(n - 1, Math.floor(lotRand(i, j, 11) * n));
