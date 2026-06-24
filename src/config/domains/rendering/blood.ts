@@ -362,14 +362,6 @@ export const bloodFields = {
     min: 0.5,
     max: 3,
   }),
-  bloodPlayerGoreBodyRadiusMeters: num({
-    owner: 'rendering',
-    unit: 'meters',
-    doc: 'Radial distance from the player body centre at which body-gore splats sit (on the body surface) — a BODY-LOCAL offset added to the tracked player world position each frame (T79).',
-    default: 0.5,
-    min: 0.05,
-    max: 3,
-  }),
   bloodPlayerGoreBodyHeightMinMeters: num({
     owner: 'rendering',
     unit: 'meters',
@@ -432,14 +424,6 @@ export const bloodFields = {
     min: 1,
     max: 32,
     integer: true,
-  }),
-  bloodZombieGoreBodyRadiusMeters: num({
-    owner: 'rendering',
-    unit: 'meters',
-    doc: 'Radial distance from a zombie body axis at which body-gore splats sit — sized to HUG the thin humanoid limbs (much smaller than the player body), so coating gore stays ON the mesh surface instead of floating on a fat cylinder (V48 surface-anchoring).',
-    default: 0.16,
-    min: 0.03,
-    max: 1,
   }),
   bloodZombieGoreHeightJitterMeters: num({
     owner: 'rendering',

@@ -7,9 +7,12 @@ import {
   resolveCombatFeedbackSettings,
   clamp01,
   regionImpactHeight,
+  regionBodyRadius,
+  silhouetteRadiusAtHeight,
   sprayParticleOffset,
   type IngestContext,
   type RegionHeights,
+  type RegionRadii,
   type SprayBallistics,
 } from './combatFeedback';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
@@ -141,6 +144,31 @@ describe('B14/T71 — energy clamp + region height + directional velocity spray 
     expect(regionImpactHeight('legLeft', h)).toBe(h.leg);
     expect(h.head).toBeGreaterThan(h.torso);
     expect(h.torso).toBeGreaterThan(h.leg);
+  });
+
+  it('maps the struck region to its body silhouette half-width (torso widest — a humanoid, not a cylinder)', () => {
+    const r: RegionRadii = { head: 0.12, torso: 0.24, leg: 0.14 };
+    expect(regionBodyRadius('head', r)).toBe(r.head);
+    expect(regionBodyRadius('neck', r)).toBe(r.head);
+    expect(regionBodyRadius('torsoUpper', r)).toBe(r.torso);
+    expect(regionBodyRadius('armLeft', r)).toBe(r.torso);
+    expect(regionBodyRadius('legRight', r)).toBe(r.leg);
+    expect(r.torso).toBeGreaterThan(r.head); // shoulders wider than the head
+    expect(r.torso).toBeGreaterThan(r.leg);
+  });
+
+  it('silhouetteRadiusAtHeight tapers leg→torso→head and clamps flat outside the band span', () => {
+    const h: RegionHeights = settings.regionHeights;
+    const r: RegionRadii = { head: 0.12, torso: 0.24, leg: 0.14 };
+    expect(silhouetteRadiusAtHeight(h.leg, h, r)).toBeCloseTo(r.leg, 6); // band anchors hit exactly
+    expect(silhouetteRadiusAtHeight(h.torso, h, r)).toBeCloseTo(r.torso, 6);
+    expect(silhouetteRadiusAtHeight(h.head, h, r)).toBeCloseTo(r.head, 6);
+    expect(silhouetteRadiusAtHeight(-5, h, r)).toBeCloseTo(r.leg, 6); // below the feet → clamp to leg
+    expect(silhouetteRadiusAtHeight(99, h, r)).toBeCloseTo(r.head, 6); // above the head → clamp to head
+    // mid-band interpolation sits strictly between the two anchors (widest at torso → narrows toward head).
+    const midUp = silhouetteRadiusAtHeight((h.torso + h.head) / 2, h, r);
+    expect(midUp).toBeLessThan(r.torso);
+    expect(midUp).toBeGreaterThan(r.head);
   });
 
   it('carries the struck region from hitReaction onto the spray record', () => {

@@ -40,7 +40,13 @@ import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
-import { regionImpactHeight, type RegionHeights } from './combatFeedback';
+import {
+  regionImpactHeight,
+  regionBodyRadius,
+  silhouetteRadiusAtHeight,
+  type RegionHeights,
+  type RegionRadii,
+} from './combatFeedback';
 
 /** Gore palette key. Only `blood` is emitted today (our VisualEvent carries no archetype); ichor/burned are
  *  structured in so they plug in unchanged once an archetype rides the event (noted in the report). */
@@ -124,7 +130,6 @@ export interface BloodSettings {
   readonly playerGoreLifeSeconds: number;
   readonly playerGoreSizeMeters: number;
   readonly playerGoreBrightness: number;
-  readonly playerGoreBodyRadiusMeters: number;
   readonly playerGoreBodyHeightMinMeters: number;
   readonly playerGoreBodyHeightMaxMeters: number;
   readonly playerGoreSplatsPerCoat: number;
@@ -133,9 +138,10 @@ export interface BloodSettings {
   // ---- Bug A: zombie body-gore (follows the struck body to the corpse) ----
   readonly zombieGorePoolSize: number;
   readonly zombieGoreSplatsPerHit: number;
-  readonly zombieGoreBodyRadiusMeters: number;
   readonly zombieGoreHeightJitterMeters: number;
   readonly regionHeights: RegionHeights;
+  /** Body silhouette half-widths (head/torso/leg) so gore hugs the humanoid mesh, not a fat cylinder. */
+  readonly regionRadii: RegionRadii;
 }
 
 /**
@@ -202,7 +208,6 @@ export function resolveBloodSettings(tier: QualityTier): BloodSettings {
     playerGoreLifeSeconds: resolve(renderingConfig.bloodPlayerGoreLifeSeconds, tier),
     playerGoreSizeMeters: resolve(renderingConfig.bloodPlayerGoreSizeMeters, tier),
     playerGoreBrightness: resolve(renderingConfig.bloodPlayerGoreBrightness, tier),
-    playerGoreBodyRadiusMeters: resolve(renderingConfig.bloodPlayerGoreBodyRadiusMeters, tier),
     playerGoreBodyHeightMinMeters: resolve(renderingConfig.bloodPlayerGoreBodyHeightMinMeters, tier),
     playerGoreBodyHeightMaxMeters: resolve(renderingConfig.bloodPlayerGoreBodyHeightMaxMeters, tier),
     playerGoreSplatsPerCoat: resolve(renderingConfig.bloodPlayerGoreSplatsPerCoat, tier),
@@ -210,12 +215,16 @@ export function resolveBloodSettings(tier: QualityTier): BloodSettings {
     puddlePickupWetnessPerSecond: resolve(renderingConfig.bloodPuddlePickupWetnessPerSecond, tier),
     zombieGorePoolSize: resolve(renderingConfig.bloodZombieGorePoolSize, tier),
     zombieGoreSplatsPerHit: resolve(renderingConfig.bloodZombieGoreSplatsPerHit, tier),
-    zombieGoreBodyRadiusMeters: resolve(renderingConfig.bloodZombieGoreBodyRadiusMeters, tier),
     zombieGoreHeightJitterMeters: resolve(renderingConfig.bloodZombieGoreHeightJitterMeters, tier),
     regionHeights: {
       head: resolve(renderingConfig.combatGoreHeightHeadMeters, tier),
       torso: resolve(renderingConfig.combatGoreHeightTorsoMeters, tier),
       leg: resolve(renderingConfig.combatGoreHeightLegMeters, tier),
+    },
+    regionRadii: {
+      head: resolve(renderingConfig.combatGoreRadiusHeadMeters, tier),
+      torso: resolve(renderingConfig.combatGoreRadiusTorsoMeters, tier),
+      leg: resolve(renderingConfig.combatGoreRadiusLegMeters, tier),
     },
   };
 }
@@ -674,7 +683,6 @@ export class BloodSim {
     if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
     count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
     const srcAng = Math.atan2(-dz, -dx); // the body side facing the blood source
-    const R = s.playerGoreBodyRadiusMeters;
     const hRange = s.playerGoreBodyHeightMaxMeters - s.playerGoreBodyHeightMinMeters;
     const bright = s.playerGoreBrightness;
     for (let k = 0; k < count; k++) {
@@ -683,8 +691,11 @@ export class BloodSim {
       this.pgHead = (this.pgHead + 1) % this.pgX.length;
       if (this.pgCount < this.pgX.length) this.pgCount++;
       const ang = srcAng + (rnd() - 0.5) * 2.2; // biased to the near side
+      const y = s.playerGoreBodyHeightMinMeters + rnd() * hRange;
+      // Radius tapers with HEIGHT to the humanoid silhouette (narrow legs/head, wide torso) — not a fat cylinder.
+      const R = silhouetteRadiusAtHeight(y, s.regionHeights, s.regionRadii);
       this.pgX[i] = Math.cos(ang) * R;
-      this.pgY[i] = s.playerGoreBodyHeightMinMeters + rnd() * hRange;
+      this.pgY[i] = y;
       this.pgZ[i] = Math.sin(ang) * R;
       this.pgSize[i] = s.playerGoreSizeMeters * (0.7 + rnd() * 0.9);
       this.pgAge[i] = 0;
@@ -717,9 +728,9 @@ export class BloodSim {
     if (ctx.reduceFlashes) count = Math.max(1, Math.round(count * 0.5)); // V29 — thin
     count = Math.max(1, Math.round(count * ctx.goreIntensity)); // V29 — intensity scales coating volume
     // Anchor coating gore to the SURFACE of the struck region, not a fat full-body cylinder (the float bug):
-    // a body-hugging radius (zombies are thin humanoids — the 0.5 m player radius left splats in mid-air) at
-    // the STRUCK region's height band (head/torso/leg), biased to the wound-facing hemisphere.
-    const R = s.zombieGoreBodyRadiusMeters;
+    // the body-hugging radius is the silhouette half-width AT the struck band (narrow head, wide torso, narrow
+    // leg — a constant radius left splats floating off the thin humanoid), biased to the wound-facing hemisphere.
+    const R = regionBodyRadius(region, s.regionRadii);
     const baseH = regionImpactHeight(region, s.regionHeights);
     const jit = s.zombieGoreHeightJitterMeters;
     const bright = s.playerGoreBrightness;

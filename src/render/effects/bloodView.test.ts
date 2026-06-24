@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { BloodSim, resolveBloodSettings, dropletStreakDims, type BloodIngestContext, type SurfaceHit, type SurfaceProjector, type BodyAnchor } from './bloodView';
+import { silhouetteRadiusAtHeight } from './combatFeedback';
 import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import type { EntityId, EventId, StimulusId } from '../../game/core/contracts/ids';
 
@@ -276,12 +277,14 @@ describe('Blood JUICE — player BODY-gore coating (T79)', () => {
     const s = new BloodSim(settings);
     s.consume([hitReaction(1, 1, 0), bloodSpray(0.5, 0, 0.5)], atPlayer);
     expect(s.playerGoreCount).toBeGreaterThan(0);
-    // Offsets are BODY-LOCAL (around + up the body), NOT the world spray coordinate.
+    // Offsets are BODY-LOCAL (around + up the body), NOT the world spray coordinate. The radial distance is the
+    // humanoid SILHOUETTE half-width at that splat's height (tapered), not a constant cylinder radius.
     for (let i = 0; i < s.playerGoreCount; i++) {
       const radial = Math.hypot(s.pgX[i]!, s.pgZ[i]!);
-      expect(radial).toBeCloseTo(settings.playerGoreBodyRadiusMeters, 5);
-      expect(s.pgY[i]!).toBeGreaterThanOrEqual(settings.playerGoreBodyHeightMinMeters - 1e-6);
-      expect(s.pgY[i]!).toBeLessThanOrEqual(settings.playerGoreBodyHeightMaxMeters + 1e-6);
+      const y = s.pgY[i]!;
+      expect(radial).toBeCloseTo(silhouetteRadiusAtHeight(y, settings.regionHeights, settings.regionRadii), 5);
+      expect(y).toBeGreaterThanOrEqual(settings.playerGoreBodyHeightMinMeters - 1e-6);
+      expect(y).toBeLessThanOrEqual(settings.playerGoreBodyHeightMaxMeters + 1e-6);
     }
   });
 

@@ -66,6 +66,49 @@ export function regionImpactHeight(region: AnatomyRegion, h: RegionHeights): num
   }
 }
 
+/** Body SILHOUETTE half-widths per anatomical band (the radial distance gore sits off the body axis). A
+ *  humanoid tapers — narrow head, wide shoulders/torso, narrow legs — so gore hugs the mesh, not a capsule. */
+export interface RegionRadii {
+  readonly head: number;
+  readonly torso: number;
+  readonly leg: number;
+}
+
+/** Map a struck region to the body silhouette half-width at that band (the companion of regionImpactHeight). */
+export function regionBodyRadius(region: AnatomyRegion, r: RegionRadii): number {
+  switch (region) {
+    case 'head':
+    case 'neck':
+      return r.head;
+    case 'torsoUpper':
+    case 'torsoLower':
+    case 'armLeft':
+    case 'armRight':
+      return r.torso;
+    case 'legLeft':
+    case 'legRight':
+      return r.leg;
+  }
+}
+
+/**
+ * Body silhouette half-width at an arbitrary HEIGHT up the body, piecewise-linear through the three band
+ * anchors (leg→torso→head). Used where gore is placed by height rather than a known struck region (ambient
+ * player coating): a splat low on the body gets the narrow leg width, mid-body the wide torso, high the narrow
+ * head — so the coating follows the humanoid taper instead of a constant-radius cylinder. Heights are assumed
+ * ordered leg < torso < head (the config defaults), and the curve clamps flat outside that span.
+ */
+export function silhouetteRadiusAtHeight(y: number, h: RegionHeights, r: RegionRadii): number {
+  if (y <= h.leg) return r.leg;
+  if (y >= h.head) return r.head;
+  if (y <= h.torso) {
+    const t = (y - h.leg) / Math.max(1e-6, h.torso - h.leg);
+    return r.leg + (r.torso - r.leg) * t;
+  }
+  const t = (y - h.torso) / Math.max(1e-6, h.head - h.torso);
+  return r.torso + (r.head - r.torso) * t;
+}
+
 export interface SprayBallistics {
   readonly velocityMps: number;
   readonly upwardMps: number;

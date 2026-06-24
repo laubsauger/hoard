@@ -138,4 +138,32 @@ export const combatFeedbackFields = {
     min: 0,
     max: 5,
   }),
+  // Body SILHOUETTE half-widths (region->radius map): the radial distance from the body axis at which gore
+  // splats sit at each anatomical band. A humanoid is NOT a fat cylinder — narrow at the head, widest at the
+  // shoulders/torso, narrow again at the legs. Body-gore uses these (per region for a known hit, interpolated
+  // by height for ambient player coating) so splats hug the rigged mesh instead of floating on a capsule.
+  combatGoreRadiusHeadMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Body silhouette half-width at the HEAD band — gore splats on a head hit sit this far off the body axis.',
+    default: 0.12,
+    min: 0.02,
+    max: 1,
+  }),
+  combatGoreRadiusTorsoMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Body silhouette half-width at the TORSO/shoulder band (the widest) — gore splats on a torso/arm hit sit this far off the body axis.',
+    default: 0.24,
+    min: 0.02,
+    max: 1,
+  }),
+  combatGoreRadiusLegMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Body silhouette half-width at the LEG band — gore splats on a leg hit sit this far off the body axis.',
+    default: 0.14,
+    min: 0.02,
+    max: 1,
+  }),
 };
