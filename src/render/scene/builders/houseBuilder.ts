@@ -447,7 +447,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     // interior partitions push AFTER this building's exterior upper-wall sides + roof, so the per-building
     // fade-surface order stays deterministic: [upper-wall sides…] → [roof] → [interior partition edges…].
     buildInteriorWalls(bi, style, wallH);
-    buildPorch(b, bi, style);
+    buildPorch(b, bi, style, house);
     collectIvy(b, style, grid, ivyMatrices, house);
     collectDebris(b, style, debrisMatrices, debrisColors);
   });
@@ -702,36 +702,68 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     fadeSurfaces.push({ object: group, material: roofMat, kind: 'roof', outwardNormal: null, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, halfX: rw / 2, halfZ: rd / 2, opacity: 1 });
   }
 
-  /** A covered front porch at the house's street door: deck + posts + a low shed roof. Always visible (it sits
-   *  outside the footprint, so it is not a cutaway occluder). */
-  function buildPorch(b: CellRect, bi: number, style: HouseStyle): void {
+  /** A covered front entry porch CENTRED on the house's street door, projecting outward along the door's own
+   *  outward normal (templated houses carry the door cell + direction; legacy houses fall back to the south
+   *  exit cell). Deck + posts + a low shed roof. Always visible (it sits outside the footprint, so it is not a
+   *  cutaway occluder). The deck rests just ABOVE the grass paint plane so it never z-fights the lawn. */
+  function buildPorch(b: CellRect, bi: number, style: HouseStyle, house: PlacedHouse | undefined): void {
     if (!style.hasPorch) return;
     const cs = navCellSize;
-    const door = ts.exitCells.find((e) => e.cx >= b.minCx && e.cx <= b.maxCx && e.cy >= b.minCy && e.cy <= b.maxCy);
-    if (!door) return;
+    // Door cell + outward direction. Templated: the front door (doors[0]) is the first exterior door and carries
+    // its outward edge. Legacy: the exit cell on the south perimeter (the only side the old block opened).
+    let doorCx: number;
+    let doorCy: number;
+    let nx: number;
+    let nz: number;
+    const front = house?.doors[0];
+    if (front) {
+      doorCx = front.cx;
+      doorCy = front.cy;
+      nx = front.dir === 'e' ? 1 : front.dir === 'w' ? -1 : 0;
+      nz = front.dir === 's' ? 1 : front.dir === 'n' ? -1 : 0;
+    } else {
+      const exit = ts.exitCells.find((e) => e.cx >= b.minCx && e.cx <= b.maxCx && e.cy >= b.minCy && e.cy <= b.maxCy);
+      if (!exit) return;
+      doorCx = exit.cx;
+      doorCy = exit.cy;
+      nx = 0;
+      nz = 1; // legacy block doors face south
+    }
     const depth = Math.min(cfg.world.housePorchDepthMeters, cs * 1.2); // porch run out from the wall
-    const width = cs * 2.2;
-    const dx = (door.cx + 0.5) * cs;
-    const southZ = (b.maxCy + 1) * cs; // door is on the south perimeter
-    const outZ = southZ + depth / 2;
+    const width = cs * 2.2; // span ALONG the wall (perpendicular to the outward normal)
+    // Deck centre: door-cell centre, pushed out by half a cell (to the wall face) + half the porch depth.
+    const cellCx = (doorCx + 0.5) * cs;
+    const cellCz = (doorCy + 0.5) * cs;
+    const outDist = cs / 2 + depth / 2;
+    const px = cellCx + nx * outDist;
+    const pz = cellCz + nz * outDist;
+    // BoxGeometry footprint: `width` runs along the wall, `depth` runs along the normal. Swap X/Z for e/w doors.
+    const alongX = nz !== 0; // n/s door → wall runs along X; e/w door → wall runs along Z
+    const footW = alongX ? width : depth;
+    const footD = alongX ? depth : width;
     const mat = res.mat(`porch.${bi}`, { color: style.trimColor, roughness: 0.9 });
     const group = new Group();
-    // deck
-    const deck = new Mesh(res.geo(`porch.deck.${bi}`, new BoxGeometry(width, 0.16, depth)), mat);
-    deck.position.set(dx, 0.08, outZ);
+    // deck — a thin slab resting just above the grass paint (y=0.08) so it never z-fights the lawn or base ground.
+    const DECK_THICK = 0.14;
+    const DECK_Y = 0.17; // bottom = 0.10 > grass plane (0.08); top = 0.24
+    const deck = new Mesh(res.geo(`porch.deck.${bi}`, new BoxGeometry(footW, DECK_THICK, footD)), mat);
+    deck.position.set(px, DECK_Y, pz);
     deck.receiveShadow = true;
     group.add(deck);
     // roof
     const roofY = cfg.porchHeightMeters;
-    const proof = new Mesh(res.geo(`porch.roof.${bi}`, new BoxGeometry(width + 0.3, 0.12, depth + 0.2)), mat);
-    proof.position.set(dx, roofY, outZ);
+    const proof = new Mesh(res.geo(`porch.roof.${bi}`, new BoxGeometry(footW + 0.3, 0.12, footD + 0.2)), mat);
+    proof.position.set(px, roofY, pz);
     proof.castShadow = true;
     group.add(proof);
-    // posts at the outer corners
+    // posts at the two outer corners (far edge of the porch, at each end of the wall-span axis)
     const postGeo = res.geo(`porch.post.${bi}`, new BoxGeometry(0.14, roofY, 0.14));
-    for (const ox of [-width / 2 + 0.1, width / 2 - 0.1]) {
+    const farX = px + nx * (depth / 2 - 0.15); // outer (away-from-house) edge
+    const farZ = pz + nz * (depth / 2 - 0.15);
+    for (const off of [-width / 2 + 0.1, width / 2 - 0.1]) {
       const post = new Mesh(postGeo, mat);
-      post.position.set(dx + ox, roofY / 2, southZ + depth - 0.15);
+      // offset runs along the wall-span axis (X for n/s doors, Z for e/w doors)
+      post.position.set(farX + (alongX ? off : 0), roofY / 2, farZ + (alongX ? 0 : off));
       post.castShadow = true;
       group.add(post);
     }

@@ -35,8 +35,10 @@ export function buildGround(ctx: BuildContext, cfg: GroundConfig): void {
   const ground = new Mesh(
     res.geo('ground.geo', new PlaneGeometry(width + margin, depth + margin)),
     // polygonOffset pushes the base verge BACK in depth so the suburban paint layered on top never z-fights it
-    // (the layers are near-coplanar — tiny Y gaps alone aren't enough at iso distance; the depth bias is).
-    res.mat('ground', { color: 0x57564a, roughness: 0.98, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+    // (the layers are near-coplanar — tiny Y gaps alone aren't enough at iso distance; the depth bias is). A big
+    // bias (4) is needed because at far zoom the depth buffer loses precision and a small bias washed out → the
+    // near-black asphalt paint started z-fighting this dark base verge.
+    res.mat('ground', { color: 0x57564a, roughness: 0.98, polygonOffset: true, polygonOffsetFactor: 4, polygonOffsetUnits: 4 }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(width / 2, 0, depth / 2);
