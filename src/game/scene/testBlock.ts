@@ -216,7 +216,7 @@ export function segmentCrossesWall(
  * target's own cells never block. Walks the segment sampling the scene's `isWalkableWorld`.
  */
 export function hasLineOfSight(
-  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
   x0: number,
   z0: number,
   x1: number,
@@ -225,6 +225,10 @@ export function hasLineOfSight(
   const dx = x1 - x0;
   const dz = z1 - z0;
   const dist = Math.hypot(dx, dz);
+  // Interior partition (edge-wall) occlusion: a ray crossing a walled cell edge is blocked, so sight + sound
+  // don't pass through interior walls (open doorways/windows still pass — those are clear edges/cells). The
+  // narrow LOS mocks that expose only isWalkableWorld keep pure cell-occlusion (no navGrid → no edge test).
+  if (scene.navGrid && segmentCrossesWall(scene.navGrid, x0, z0, x1, z1)) return false;
   const steps = Math.max(1, Math.ceil(dist / LOS_STEP_METERS));
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
@@ -238,7 +242,7 @@ export function hasLineOfSight(
  * debug overlay to crop a vision cone at walls. Returns `maxDist` if the ray stays clear.
  */
 export function rayDistanceToWall(
-  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
   x: number,
   z: number,
   heading: number,
@@ -246,10 +250,35 @@ export function rayDistanceToWall(
 ): number {
   const dx = Math.cos(heading);
   const dz = Math.sin(heading);
-  const steps = Math.max(1, Math.ceil(maxDist / LOS_STEP_METERS));
+  // Stop the ray at the first interior edge-wall it would cross too (an occluder), not just a blocked cell, so
+  // the crop hugs partitions the way it hugs the sealed shell. Tracked incrementally (O(steps)) — the cell the
+  // ray is in is remembered and the cross-edge is tested only on a cell transition. Edge-walls are tested only
+  // when a navGrid is available (production always carries one; the narrow vision mocks keep cell-occlusion).
+  const grid = scene.navGrid;
+  const cs = grid ? grid.settings.navCellSize : 0;
+  // sample finely enough that a cell transition is never skipped when edge-walls are in play (quarter cell).
+  const stepM = grid ? Math.min(LOS_STEP_METERS, cs * 0.25) : LOS_STEP_METERS;
+  const steps = Math.max(1, Math.ceil(maxDist / stepM));
+  let pcx = grid ? Math.floor(x / cs) : 0;
+  let pcy = grid ? Math.floor(z / cs) : 0;
   for (let i = 1; i <= steps; i++) {
     const d = (i / steps) * maxDist;
-    if (!scene.isWalkableWorld(x + dx * d, z + dz * d)) return d;
+    const px = x + dx * d;
+    const pz = z + dz * d;
+    if (!scene.isWalkableWorld(px, pz)) return d;
+    if (grid) {
+      const cx = Math.floor(px / cs);
+      const cy = Math.floor(pz / cs);
+      if (cx !== pcx || cy !== pcy) {
+        const sx = Math.sign(cx - pcx);
+        const sy = Math.sign(cy - pcy);
+        const fromIn = pcx >= 0 && pcy >= 0 && pcx < grid.width && pcy < grid.height;
+        const toIn = cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
+        if (fromIn && toIn && !grid.canStep(pcx, pcy, sx, sy)) return d;
+        pcx = cx;
+        pcy = cy;
+      }
+    }
   }
   return maxDist;
 }
@@ -262,7 +291,7 @@ export function rayDistanceToWall(
  * debug overlay (which builds its cone mesh from these distances), so they always agree.
  */
 export function castVisibilityFan(
-  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
   x: number,
   z: number,
   heading: number,
@@ -287,7 +316,7 @@ export function castVisibilityFan(
  * construction. (`fovHalf >= π` = omnidirectional, range-only + LOS.)
  */
 export function seesWithinFan(
-  scene: Pick<TestBlock, 'isWalkableWorld'>,
+  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
   x: number,
   z: number,
   heading: number,
