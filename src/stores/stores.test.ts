@@ -100,11 +100,11 @@ describe('persistence partition (V11 — only settings + session persist)', () =
 });
 
 describe('audio volume buses (master / sound / music) — settings store', () => {
-  it('exposes three independent volume primitives; master MUTED by default (headless-safe)', () => {
+  it('exposes three independent volume primitives; master ON by default (audio plays on first gesture)', () => {
     const s = createSettingsStore().getState();
-    // Sound is off by default (master 0) so headless/CDP + fresh sessions are silent; player raises it.
-    expect(s.masterVolume).toBe(0);
-    // The bus levels under master are preserved so unmuting restores a sensible mix.
+    // Sound is on by default (master 0.8); the AudioContext still only starts on a user gesture, so nothing
+    // actually plays in headless/CDP (no gesture) regardless.
+    expect(s.masterVolume).toBe(0.8);
     expect(s.sfxVolume).toBe(0.8);
     expect(s.musicVolume).toBe(0.5);
   });

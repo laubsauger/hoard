@@ -62,10 +62,10 @@ export function createSettingsStore() {
       persist(
         (set) => ({
           qualityTierOverride: null,
-          // Sound is MUTED by default (master 0) — headless/CDP + fresh sessions start silent; the player
-          // raises Master in Settings to enable audio. SFX/Music bus levels are preserved so unmuting restores
-          // a sensible mix.
-          masterVolume: 0,
+          // Sound is ON by default (master 0.8) — fresh sessions play audio without the player having to unmute
+          // first. The AudioContext still only starts on the first user gesture (autoplay policy), so nothing
+          // plays until interaction regardless. Lower Master in Settings to quieten/mute.
+          masterVolume: 0.8,
           sfxVolume: 0.8,
           musicVolume: 0.5,
           goreIntensity: A11Y.goreIntensityDefault,
