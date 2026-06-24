@@ -19,6 +19,8 @@ import {
   Quaternion,
   Vector3,
 } from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
+import { color, float, fract, positionWorld, smoothstep } from 'three/tsl';
 import {
   buildingsOf,
   roofHoles,
@@ -59,6 +61,10 @@ export interface HouseConfig {
   /** Fraction of facade windows that start boarded over (world.houseWindowBoardedFraction). */
   readonly windowBoardedFraction: number;
   readonly clapboardSpacing: number;
+  /** Darken amount of the lap-siding shadow groove at each board seam (TSL wall colorNode). */
+  readonly clapboardGrooveDarken: number;
+  /** Width of the shadow groove as a fraction of one board spacing. */
+  readonly clapboardGrooveWidthRatio: number;
   readonly roofOverhang: number;
   readonly chimneyMeters: number;
   readonly porchHeightMeters: number;
@@ -92,6 +98,27 @@ export function upperWallOutwardNormal(
   const east = faces.some((f) => f.along === 'z' && f.dx > 0);
   const sx = west && !east ? -1 : east && !west ? 1 : wx < centerX ? -1 : 1;
   return { x: sx, z: 0 };
+}
+
+/**
+ * The wall cladding `colorNode` (TSL): the per-house tint with a thin horizontal lap-siding shadow groove cut
+ * into it every `spacing` metres of WORLD Y, so a SINGLE solid wall surface reads as stacked siding boards
+ * (no separate cladding geometry). `positionWorld.y` keeps the banding continuous across the base + upper wall
+ * split and across merged panels. `darken` is the groove depth (0..1, tint multiplied down); `widthRatio` is the
+ * groove thickness as a fraction of one board. Pure node construction — compiles at render, no GPU needed here.
+ */
+function claddingColorNode(
+  wallColorHex: number,
+  spacing: number,
+  darken: number,
+  widthRatio: number,
+) {
+  const base = color(wallColorHex);
+  // fract(y / spacing): 0 at a board seam, rising to ~1 just below the next seam.
+  const f = fract(positionWorld.y.div(spacing));
+  // smoothstep(0 → widthRatio) is 0 at the seam and 1 past the groove; invert so the seam is the dark line.
+  const seamDark = float(1).sub(smoothstep(0, widthRatio, f)).mul(darken);
+  return base.mul(float(1).sub(seamDark));
 }
 
 export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver, cfg: HouseConfig): HouseHandles {
@@ -179,7 +206,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
 
     // per-house clapboard tint (weathered); each building owns its base + per-direction upper + roof
     // materials so the cutaway fades ONLY this house and neighbours keep their colour (per-building, V59).
-    const baseMat = res.mat(`wallBase.${bi}`, { color: style.wallColor, roughness: 0.92 });
+    // Lap-siding via the MATERIAL (single solid mesh, no separate cladding geo): a node material whose colorNode
+    // is the per-house tint with a horizontal shadow groove per board (V4 spacing/groove from config).
+    const baseMat = res.nodeMat(`wallBase.${bi}`, new MeshStandardNodeMaterial({ roughness: 0.92 }));
+    baseMat.colorNode = claddingColorNode(style.wallColor, cfg.clapboardSpacing, cfg.clapboardGrooveDarken, cfg.clapboardGrooveWidthRatio);
     const baseParts: BoxGeometry[] = [];
     // T82/V58 DIRECTIONAL cutaway: bucket non-section upper walls by their cardinal OUTWARD normal so each
     // side fades INDEPENDENTLY — only the side(s) turned toward the camera fade. One merged mesh + one
@@ -307,7 +337,11 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       for (const [key, g] of upperByDir) {
         const upperGeoMerged = res.mergeBoxes(`wallUpper.geo.${bi}.${key}`, g.boxes);
         if (!upperGeoMerged) continue;
-        const upperMat = res.mat(`wallUpper.${bi}.${key}`, { color: style.wallColor, roughness: 0.92, transparent: true, opacity: 1 });
+        // Same lap-siding cladding as the base wall so siding stays CONTINUOUS across the cutaway split; the
+        // material MUST remain transparent-capable (opacity driven per-frame by the cutaway) — only the class +
+        // colorNode change, the transparent/opacity/polygonOffset/renderOrder + FadeSurface push order are intact.
+        const upperMat = res.nodeMat(`wallUpper.${bi}.${key}`, new MeshStandardNodeMaterial({ roughness: 0.92, transparent: true, opacity: 1 }));
+        upperMat.colorNode = claddingColorNode(style.wallColor, cfg.clapboardSpacing, cfg.clapboardGrooveDarken, cfg.clapboardGrooveWidthRatio);
         upperMat.polygonOffset = upperOffset.polygonOffset;
         upperMat.polygonOffsetFactor = upperOffset.polygonOffsetFactor;
         upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;

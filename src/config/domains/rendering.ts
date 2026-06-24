@@ -1520,6 +1520,18 @@ export const renderingConfig = registerDomain('rendering', {
     doc: 'Vertical spacing between horizontal clapboard/lap-siding trim lines on house walls (T87).',
     default: 0.5, min: 0.15, max: 2,
   }),
+  /** How dark the lap-siding shadow groove gets at each board seam (fraction the wall tint is multiplied down). */
+  houseClapboardGrooveDarken: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Darken amount of the lap-siding shadow groove at each board seam (TSL wall colorNode banding).',
+    default: 0.34, min: 0, max: 1,
+  }),
+  /** Width of the shadow groove as a fraction of one clapboard spacing (the thin dark line under each board lip). */
+  houseClapboardGrooveWidthRatio: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Width of the lap-siding shadow groove as a fraction of one board spacing (thin dark line per seam).',
+    default: 0.16, min: 0.01, max: 0.5,
+  }),
   houseIvyPatchMeters: num({
     owner: 'rendering', unit: 'meters',
     doc: 'Edge size of one instanced ivy/overgrowth patch creeping a house wall (T87).',

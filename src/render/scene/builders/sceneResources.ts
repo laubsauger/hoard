@@ -4,11 +4,13 @@
 // decomposition; see docs/REFACTOR-godfiles.md). No GPU device needed — pure CPU object construction.
 
 import { MeshStandardMaterial, type BufferGeometry, type BoxGeometry } from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { Disposable, ResourceKind, ResourceRegistry } from '../../engine/resources';
 
 export class SceneResources {
   private readonly mats: MeshStandardMaterial[] = [];
+  private readonly nodeMats: MeshStandardNodeMaterial[] = [];
   private readonly geos: BufferGeometry[] = [];
 
   constructor(private readonly registry: ResourceRegistry) {}
@@ -24,6 +26,14 @@ export class SceneResources {
     const m = this.registry.track(new MeshStandardMaterial(opts), 'material', `block.${label}`);
     this.mats.push(m);
     return m;
+  }
+
+  /** Track a caller-built MeshStandardNodeMaterial (TSL colorNode walls etc) for V24 disposal — a passthrough,
+   *  since node materials carry their own node graph the caller must wire up. Counted in materialCount. */
+  nodeMat(label: string, material: MeshStandardNodeMaterial): MeshStandardNodeMaterial {
+    this.registry.track(material, 'material', `block.${label}`);
+    this.nodeMats.push(material);
+    return material;
   }
 
   /** Track + return a geometry (created by the caller). */
@@ -42,7 +52,7 @@ export class SceneResources {
   }
 
   get materialCount(): number {
-    return this.mats.length;
+    return this.mats.length + this.nodeMats.length;
   }
   get geometryCount(): number {
     return this.geos.length;

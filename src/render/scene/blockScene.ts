@@ -109,6 +109,8 @@ export class BlockScene {
   // styleFor(). Assigned in the constructor (needs runtime.scene). Shared by the house + openings builders.
   private readonly houseStyle: HouseStyleResolver;
   private readonly clapboardSpacing = resolve(renderingConfig.houseClapboardSpacingMeters, this.tierOf());
+  private readonly clapboardGrooveDarken = resolve(renderingConfig.houseClapboardGrooveDarken, this.tierOf());
+  private readonly clapboardGrooveWidthRatio = resolve(renderingConfig.houseClapboardGrooveWidthRatio, this.tierOf());
   private readonly ivyPatchMeters = resolve(renderingConfig.houseIvyPatchMeters, this.tierOf());
   private readonly debrisMeters = resolve(renderingConfig.houseDebrisMeters, this.tierOf());
   private readonly porchHeightMeters = resolve(renderingConfig.housePorchHeightMeters, this.tierOf());
@@ -295,6 +297,8 @@ export class BlockScene {
       houseWindowStride: this.world.houseWindowStride,
       windowBoardedFraction: this.windowBoardedFraction,
       clapboardSpacing: this.clapboardSpacing,
+      clapboardGrooveDarken: this.clapboardGrooveDarken,
+      clapboardGrooveWidthRatio: this.clapboardGrooveWidthRatio,
       roofOverhang: this.roofOverhang,
       chimneyMeters: this.chimneyMeters,
       porchHeightMeters: this.porchHeightMeters,

@@ -4,7 +4,7 @@
 // `exactOptionalPropertyTypes` stays satisfied. Mutable fields (opacity, current) are annotated where systems
 // write them.
 
-import type { Object3D, Mesh, MeshStandardMaterial } from 'three';
+import type { Object3D, Mesh, Material, MeshStandardMaterial } from 'three';
 import type { VecXZ } from '../../world/visibility';
 
 /**
@@ -15,7 +15,9 @@ import type { VecXZ } from '../../world/visibility';
  */
 export interface FadeSurface {
   readonly object: Object3D;
-  readonly material: MeshStandardMaterial;
+  /** The CutawaySystem only mutates `opacity`/`depthWrite` (both on `Material`), so the wall siding can swap to a
+   *  `MeshStandardNodeMaterial` (TSL cladding) while the roof stays a `MeshStandardMaterial` — both are `Material`. */
+  readonly material: Material;
   readonly kind: 'roof' | 'upperWall';
   readonly outwardNormal: VecXZ | null;
   readonly heightMeters: number;
