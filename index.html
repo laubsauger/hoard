@@ -4,9 +4,145 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:," />
-    <title>Ho(a)rdish by Nature</title>
+    <title>Hoard</title>
+    <style>
+      /* Instant boot splash — painted before the app bundle (~1.6 MB) and the GLB models (~7 MB) download, so a
+             first-time visitor never stares at a blank page. Removed by window.__hbnBoot.done() once the world has
+             rendered. Pure inline CSS (no stylesheet fetch) so it shows on the very first paint. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0a0b0c;
+      }
+    
+      #hbn-boot {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: radial-gradient(120% 90% at 50% 38%, #16181b 0%, #0a0b0c 70%);
+        color: #cdd2c4;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        transition: opacity 0.6s ease;
+      }
+    
+      #hbn-boot.hbn-boot--done {
+        opacity: 0;
+        pointer-events: none;
+      }
+    
+      #hbn-boot .hbn-boot__title {
+        font-size: clamp(22px, 4.4vw, 40px);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: #e7ead8;
+        text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6);
+      }
+    
+      #hbn-boot .hbn-boot__tag {
+        font-size: clamp(11px, 1.6vw, 14px);
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #6f7a5e;
+        margin-top: -10px;
+      }
+    
+      #hbn-boot .hbn-boot__track {
+        position: relative;
+        width: min(340px, 64vw);
+        height: 6px;
+        border-radius: 99px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+    
+      #hbn-boot .hbn-boot__fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0%;
+        border-radius: 99px;
+        background: linear-gradient(90deg, #5c7a33, #8fae5c);
+        box-shadow: 0 0 12px rgba(143, 174, 92, 0.5);
+        transition: width 0.28s ease;
+      }
+    
+      /* travelling sheen so the bar reads "working" even between progress updates */
+      #hbn-boot .hbn-boot__fill::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+        transform: translateX(-100%);
+        animation: hbn-boot-sheen 1.3s ease-in-out infinite;
+      }
+    
+      @keyframes hbn-boot-sheen {
+        100% {
+          transform: translateX(220%);
+        }
+      }
+    
+      #hbn-boot .hbn-boot__label {
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        color: #8a9277;
+        min-height: 1em;
+      }
+    
+      @media (prefers-reduced-motion: reduce) {
+        #hbn-boot .hbn-boot__fill::after {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="hbn-boot" role="status" aria-live="polite" aria-label="Loading">
+      <div class="hbn-boot__title">Hoard</div>
+      <div class="hbn-boot__tag">survive the horde</div>
+      <div class="hbn-boot__track">
+        <div id="hbn-boot-fill" class="hbn-boot__fill"></div>
+      </div>
+      <div id="hbn-boot-label" class="hbn-boot__label">Downloading…</div>
+    </div>
+    <script>
+      // Defined at parse time (classic inline script, runs before the deferred module bundle) so the app can
+      // drive the splash the instant its code executes. Monotonic: the bar never jumps backwards.
+      (function () {
+        var el = document.getElementById('hbn-boot')
+        var fill = document.getElementById('hbn-boot-fill')
+        var label = document.getElementById('hbn-boot-label')
+        var cur = 0
+        function set(p, text) {
+          p = p < 0 ? 0 : p > 1 ? 1 : p
+          if (p > cur) cur = p
+          if (fill) fill.style.width = (cur * 100).toFixed(1) + '%'
+          if (text && label) label.textContent = text
+        }
+        function done() {
+          set(1)
+          if (!el) return
+          var node = el // keep a ref for the removal timeout; null `el` now so done() is idempotent
+          el = null
+          node.classList.add('hbn-boot--done')
+          setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node) }, 650)
+        }
+        window.__hbnBoot = { set: set, done: done }
+        // Creep the bar while the bundle itself downloads (before any app code runs to report real progress).
+        var creep = setInterval(function () {
+          if (cur < 0.1) set(cur + 0.012)
+          else clearInterval(creep)
+        }, 120)
+        // Last resort: never trap a visitor behind the splash if init wedges (the error boundary handles real failures).
+        setTimeout(done, 30000)
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
