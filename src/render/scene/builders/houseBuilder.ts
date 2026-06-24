@@ -325,7 +325,6 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       }
     }
 
-    buildClapboard(b, bi, wallH, style, wallsGroup);
     buildRoofAssembly(b, bi, wallH, style, roofOffset);
     buildPorch(b, bi, style);
     collectIvy(b, style, grid, ivyMatrices);
@@ -336,116 +335,6 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
   buildDebris(debrisMatrices, debrisColors);
 
   return { fadeSurfaces, sectionMeshes };
-
-  /** Horizontal clapboard/lap-siding read: a stack of thin lap lines + base skirt + eave fascia, emitted PER SIDE
-   *  so each side's siding is a cutaway FADE SURFACE that fades in lockstep with that side's wall (V64). Before,
-   *  the lines were ONE non-fading mesh standing 4 cm proud — so when a wall faded for the cutaway the siding
-   *  stayed put as a floating "fence" detached from the wall. Now: nearly flush (polygon-offset, no gap) and
-   *  fades WITH the wall, so the wall + its siding read as ONE surface. Corner boards stay solid (building edge). */
-  function buildClapboard(b: CellRect, bi: number, wallH: number, style: HouseStyle, parent: Group): void {
-    const cs = navCellSize;
-    const minX = b.minCx * cs;
-    const maxX = (b.maxCx + 1) * cs;
-    const minZ = b.minCy * cs;
-    const maxZ = (b.maxCy + 1) * cs;
-    const cxw = (minX + maxX) / 2;
-    const czw = (minZ + maxZ) / 2;
-    const proud = 0.012; // nearly flush with the wall plane (polygon offset keeps it off the wall, no 4 cm gap)
-    const lineH = 0.05;
-    const lineT = 0.03;
-    const lines = Math.max(2, Math.round(wallH / cfg.clapboardSpacing));
-    const upperOff = resolveCutawayDepthOffset('upperWall', cfg.cutawayDepth);
-    // One transparent, fadeable lap-line mesh per exterior side (normal = the side it faces).
-    const buildSide = (key: string, normal: VecXZ, centerX: number, centerZ: number, boxes: BoxGeometry[]): void => {
-      const merged = res.mergeBoxes(`clapboard.${bi}.${key}`, boxes);
-      if (!merged) return;
-      const mat = res.mat(`trim.${bi}.${key}`, { color: style.trimColor, roughness: 0.85, transparent: true, opacity: 1 });
-      mat.polygonOffset = upperOff.polygonOffset;
-      mat.polygonOffsetFactor = upperOff.polygonOffsetFactor;
-      mat.polygonOffsetUnits = upperOff.polygonOffsetUnits;
-      const mesh = new Mesh(merged, mat);
-      mesh.castShadow = true;
-      mesh.renderOrder = upperOff.renderOrder;
-      root.add(mesh);
-      fadeSurfaces.push({ object: mesh, material: mat, kind: 'upperWall', outwardNormal: normal, heightMeters: wallH, buildingIndex: bi, centerX, centerZ, opacity: 1 });
-    };
-    const sides: { key: string; normal: VecXZ; centerX: number; centerZ: number; boxes: BoxGeometry[] }[] = [
-      { key: 'n', normal: { x: 0, z: -1 }, centerX: cxw, centerZ: minZ, boxes: [] },
-      { key: 's', normal: { x: 0, z: 1 }, centerX: cxw, centerZ: maxZ, boxes: [] },
-      { key: 'w', normal: { x: -1, z: 0 }, centerX: minX, centerZ: czw, boxes: [] },
-      { key: 'e', normal: { x: 1, z: 0 }, centerX: maxX, centerZ: czw, boxes: [] },
-    ];
-    const add = (arr: BoxGeometry[], geoW: number, geoH: number, geoD: number, x: number, y: number, z: number): void => {
-      const box = new BoxGeometry(geoW, geoH, geoD);
-      box.translate(x, y, z);
-      arr.push(box);
-    };
-    // T108: the cladding must BREAK at each window opening so the punched hole reads clean through the siding
-    // too (not a lap line running across the glass). Gather this building's windows per side (run-axis centre +
-    // vertical bands), derived from the SAME winByNav as the wall punch, so cladding + wall + pane all agree.
-    const half = winSpan / 2;
-    const sideWindowsOf = (cells: Array<readonly [number, number]>, wantNs: boolean): { center: number; bands: ReadonlyArray<readonly [number, number]> }[] => {
-      const out: { center: number; bands: ReadonlyArray<readonly [number, number]> }[] = [];
-      for (const [cxx, cyy] of cells) {
-        const w = winByNav.get(grid.index(cxx, cyy));
-        if (w && w.ns === wantNs) out.push({ center: wantNs ? (cxx + 0.5) * cs : (cyy + 0.5) * cs, bands: w.bands });
-      }
-      return out;
-    };
-    const colCells = (cx0: number): Array<readonly [number, number]> => {
-      const a: Array<readonly [number, number]> = [];
-      for (let cyy = b.minCy; cyy <= b.maxCy; cyy++) a.push([cx0, cyy]);
-      return a;
-    };
-    const rowCells = (cy0: number): Array<readonly [number, number]> => {
-      const a: Array<readonly [number, number]> = [];
-      for (let cxx = b.minCx; cxx <= b.maxCx; cxx++) a.push([cxx, cy0]);
-      return a;
-    };
-    const winsN = sideWindowsOf(rowCells(b.minCy), true);
-    const winsS = sideWindowsOf(rowCells(b.maxCy), true);
-    const winsW = sideWindowsOf(colCells(b.minCx), false);
-    const winsE = sideWindowsOf(colCells(b.maxCx), false);
-    // The remaining run segments of [lo, hi] after removing the window openings active at line band [y±h/2].
-    const segmentsAt = (lo: number, hi: number, wins: { center: number; bands: ReadonlyArray<readonly [number, number]> }[], y: number, h: number): [number, number][] => {
-      const blocked = wins
-        .filter((w) => w.bands.some(([yb, yt]) => yb < y + h / 2 && yt > y - h / 2))
-        .map((w) => [w.center - half, w.center + half] as [number, number])
-        .filter((iv) => iv[1] > lo && iv[0] < hi)
-        .sort((a2, b2) => a2[0] - b2[0]);
-      const out: [number, number][] = [];
-      let cur = lo;
-      for (const [bl, bh] of blocked) {
-        const s = Math.max(bl, lo);
-        if (s > cur) out.push([cur, s]);
-        cur = Math.max(cur, Math.min(bh, hi));
-      }
-      if (cur < hi) out.push([cur, hi]);
-      return out;
-    };
-    for (let k = 0; k <= lines; k++) {
-      const y = (k / lines) * (wallH - 0.1) + 0.05;
-      const h = k === 0 ? 0.18 : k === lines ? 0.12 : lineH; // fat skirt + fascia
-      for (const [s, e] of segmentsAt(minX - proud, maxX + proud, winsN, y, h)) add(sides[0]!.boxes, e - s, h, lineT, (s + e) / 2, y, minZ - proud);
-      for (const [s, e] of segmentsAt(minX - proud, maxX + proud, winsS, y, h)) add(sides[1]!.boxes, e - s, h, lineT, (s + e) / 2, y, maxZ + proud);
-      for (const [s, e] of segmentsAt(minZ - proud, maxZ + proud, winsW, y, h)) add(sides[2]!.boxes, lineT, h, e - s, minX - proud, y, (s + e) / 2);
-      for (const [s, e] of segmentsAt(minZ - proud, maxZ + proud, winsE, y, h)) add(sides[3]!.boxes, lineT, h, e - s, maxX + proud, y, (s + e) / 2);
-    }
-    for (const s of sides) buildSide(s.key, s.normal, s.centerX, s.centerZ, s.boxes);
-    // corner boards (vertical trim) — solid, at the building corners (not part of a single side's fade).
-    const cornerParts: BoxGeometry[] = [];
-    for (const [x, z] of [[minX, minZ], [maxX, minZ], [maxX, maxZ], [minX, maxZ]] as const) {
-      const c = new BoxGeometry(lineT * 1.6, wallH, lineT * 1.6);
-      c.translate(x, wallH / 2, z);
-      cornerParts.push(c);
-    }
-    const corners = res.mergeBoxes(`clapboard.corners.${bi}`, cornerParts);
-    if (corners) {
-      const cmesh = new Mesh(corners, res.mat(`trim.${bi}`, { color: style.trimColor, roughness: 0.85 }));
-      cmesh.castShadow = true;
-      parent.add(cmesh);
-    }
-  }
 
   /** Shaped roof (gable / hip / flat) + chimney + decay holes, grouped so the whole assembly is the building's
    *  cutaway fade surface (V20). A collapsed house sags its roof. */
