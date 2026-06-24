@@ -66,6 +66,15 @@ export const STUCK_ESCAPE_FAN: readonly { cos: number; sin: number }[] = ESCAPE_
   return { cos: Math.cos(a), sin: Math.sin(a) };
 });
 
+/** T137 idle-wander retry fan: the chosen amble heading FIRST (0°), then ever-wider offsets up to a full
+ *  reverse, so a wanderer that ambles into a wall/furniture re-aims to the first clear direction instead of
+ *  standing pinned for the whole interval (the "captive barely moves behind furniture" case). Fixed order (V26). */
+const WANDER_FAN_DEGREES: readonly number[] = [0, 45, -45, 90, -90, 135, -135, 180];
+const WANDER_FAN: readonly { cos: number; sin: number }[] = WANDER_FAN_DEGREES.map((deg) => {
+  const a = (deg * Math.PI) / 180;
+  return { cos: Math.cos(a), sin: Math.sin(a) };
+});
+
 /**
  * PURE stuck-escape selection (T134/V101): rotate the desired unit heading (dirX,dirZ) by each fan offset in
  * order and return the FIRST rotated heading the `isClear(edx,edz)` predicate accepts, or null if every fan
@@ -141,7 +150,13 @@ export function idleWanderDir(
   const bucket = Math.floor((tick + phase) / refresh);
   const seed = (Math.imul(slot + 1, 2654435761) ^ Math.imul(bucket + 1, 0x9e3779b1)) >>> 0;
   if (seed / 4294967296 < pauseChance) return { moving: false, dirX: 0, dirZ: 0 };
-  const angle = ((Math.imul(seed ^ 0x5bd1e995, 2246822519) >>> 0) / 4294967296) * (Math.PI * 2);
+  // MEANDER, don't teleport the heading: a per-slot base direction that sweeps SMOOTHLY bucket-to-bucket
+  // (a slow sinusoid), so consecutive ambles curve gently and the body ROAMS away from its spawn instead of
+  // picking fully-independent directions that random-walk in place (the "lone zombie looks stuck" case). Each
+  // slot gets its own base + sweep rate → the crowd still disperses in different directions. Pure (V26).
+  const base = ((Math.imul(slot + 1, 0x27d4eb2f) >>> 0) / 4294967296) * (Math.PI * 2);
+  const sweepRate = 0.35 + ((Math.imul(slot + 1, 0x165667b1) >>> 0) / 4294967296) * 0.5; // ~0.35..0.85 rad/bucket
+  const angle = base + Math.sin(bucket * sweepRate) * (Math.PI * 0.85); // smooth ±~150° sweep
   return { moving: true, dirX: Math.cos(angle), dirZ: Math.sin(angle) };
 }
 
@@ -470,17 +485,25 @@ export class HordeSimulation {
     }
     const speed = combatCfg.hordeMoveSpeed * combatCfg.hordeWanderSpeedFraction;
     const step = speed * clock.tickSeconds;
-    const nx = pos[0] + w.dirX * step;
-    const nz = pos[2] + w.dirZ * step;
     const grid = scene.navGrid;
-    zombies.setHeading(slot, Math.atan2(w.dirZ, w.dirX));
-    if (isWalkableRadius(scene, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
-      zombies.setPosition(slot, nx, pos[1], nz);
-      zombies.setVelocity(slot, w.dirX * speed, 0, w.dirZ * speed);
-      spatial.update(slot, nx, nz);
-    } else {
-      zombies.setVelocity(slot, 0, 0, 0); // blocked — hold; next interval picks a fresh direction
+    // Try the chosen amble heading, then ever-wider offsets, taking the first CLEAR step — so a wanderer that
+    // ambles toward a wall/furniture re-aims and keeps moving instead of standing pinned for the whole interval.
+    for (const r of WANDER_FAN) {
+      const dx = w.dirX * r.cos - w.dirZ * r.sin;
+      const dz = w.dirX * r.sin + w.dirZ * r.cos;
+      const nx = pos[0] + dx * step;
+      const nz = pos[2] + dz * step;
+      if (isWalkableRadius(scene, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
+        zombies.setPosition(slot, nx, pos[1], nz);
+        zombies.setHeading(slot, Math.atan2(dz, dx));
+        zombies.setVelocity(slot, dx * speed, 0, dz * speed);
+        spatial.update(slot, nx, nz);
+        return;
+      }
     }
+    // Genuinely boxed in on all sides this tick — hold + keep facing the desired heading.
+    zombies.setHeading(slot, Math.atan2(w.dirZ, w.dirX));
+    zombies.setVelocity(slot, 0, 0, 0);
   }
 
   /**
