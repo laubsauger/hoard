@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { allocateSoa, ZOMBIE_FIELDS } from '../../game/core/contracts/soa';
 import {
   packCrowdInputs,
+  computeFigureMask,
   variationSeed,
   variationScale,
   variationHash01,
@@ -35,6 +36,48 @@ function buffers() {
     meta: new Float32Array(CAP * FLOATS_PER_META),
   };
 }
+
+describe('computeFigureMask — distance-ranked figure/box LOD', () => {
+  // place `n` alive, eligible (simTier 0) zombies along +x at distances 1,2,3,… from the origin player.
+  const lineSoa = (n: number) => {
+    const s = makeSoa();
+    for (let i = 0; i < n; i++) {
+      s.alive[i] = 1;
+      s.simTier[i] = 0;
+      s.position[i * 3] = i + 1; // x = 1,2,3,… (z=0)
+    }
+    return s;
+  };
+
+  it('marks the NEAREST `budget` eligible zombies as figures, the farther ones as boxes', () => {
+    const s = lineSoa(5);
+    const mask = computeFigureMask(s.soa.views, 5, 0, 0, /*maxSimTier*/ 0, /*budget*/ 3);
+    expect(Array.from(mask.subarray(0, 5))).toEqual([1, 1, 1, 0, 0]); // 3 nearest are figures
+  });
+
+  it('all eligible are figures when they fit the budget', () => {
+    const s = lineSoa(3);
+    const mask = computeFigureMask(s.soa.views, 3, 0, 0, 0, 10);
+    expect(Array.from(mask.subarray(0, 3))).toEqual([1, 1, 1]);
+  });
+
+  it('nearness is to the PLAYER, not slot order — a far low slot loses to a near high slot', () => {
+    const s = makeSoa();
+    // slot 0 is FAR (x=100), slot 1 is NEAR (x=1): with budget 1, the near slot 1 wins despite its higher index.
+    s.alive[0] = 1; s.simTier[0] = 0; s.position[0] = 100;
+    s.alive[1] = 1; s.simTier[1] = 0; s.position[3] = 1;
+    const mask = computeFigureMask(s.soa.views, 2, 0, 0, 0, 1);
+    expect(Array.from(mask.subarray(0, 2))).toEqual([0, 1]);
+  });
+
+  it('excludes the dead and the over-max-tier (those are always boxes)', () => {
+    const s = lineSoa(3);
+    s.alive[1] = 0; // dead
+    s.simTier[2] = 3; // above maxSimTier
+    const mask = computeFigureMask(s.soa.views, 3, 0, 0, /*maxSimTier*/ 1, /*budget*/ 10);
+    expect(Array.from(mask.subarray(0, 3))).toEqual([1, 0, 0]);
+  });
+});
 
 describe('packCrowdInputs (V2/V3)', () => {
   it('packs a live zombie pose [x,y,z,heading] into the input buffer', () => {

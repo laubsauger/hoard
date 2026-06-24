@@ -538,7 +538,9 @@ export class BlockScene {
     // vision-cone fog-of-war is on, only members inside the player's wedge (cone+range+LOS) are packed (T98).
     // The construction-time prime / rebind (no flags) packs the FULL crowd — the cull is a live-loop concern.
     const visibility = flags && this.visionConeCullOn ? this.visionCull.build(this.runtime, dtSeconds, passiveRadiusMeters) : undefined;
-    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, visibility);
+    // Player position drives the crowd's distance-ranked figure/box LOD (nearest zombies are figures, far = boxes).
+    const playerPos = this.runtime.player();
+    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, playerPos.x, playerPos.z, visibility);
     // T131/V99: render the lingering CORPSE POOL as rigged zombie meshes (same bake) frozen + toppled along the
     // killing shot. No-op until all archetype GLBs bake in (the blob CorpseField covers that window). The corpse
     // `bornTick` is stamped in the runtime's absolute tick, so the topple ages against `absoluteTick`.

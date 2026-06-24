@@ -70,6 +70,7 @@ import {
   buildClipTable,
   clipForState,
   clipPhaseRateHz,
+  isFrozenIdle,
   isLocomotionState,
   locomotionRateHz,
   phaseToFrameRow,
@@ -642,7 +643,7 @@ export class RiggedCrowd {
    * slot's clip phase. Returns the total drawn count. No-op (returns 0) until every archetype is loaded.
    * Allocation-free per frame (V24): reuses the per-archetype Float32Arrays + the per-slot phase accumulator.
    */
-  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull): number {
+  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull, figureMask?: Uint8Array): number {
     if (!this.isReady) return 0;
 
     // Per-SLOT clip phase, lazily sized to the SoA count + seeded with a per-slot offset (mirrors the limb tier).
@@ -670,8 +671,13 @@ export class RiggedCrowd {
     let rank = 0;
     for (let s = 0; s < count; s++) {
       if (alive[s] === 0) continue;
-      if (simTier[s]! > this.maxSimTier) continue; // not near-band → drawn as a box
-      if (rank++ >= this.budget) continue; // beyond the pool cap → the box path draws this overflow figure
+      if (figureMask) {
+        // Distance-ranked partition — draw only the shared mask's near figures (identical to the box + limb passes).
+        if (figureMask[s] !== 1) continue;
+      } else {
+        if (simTier[s]! > this.maxSimTier) continue; // not near-band → drawn as a box
+        if (rank++ >= this.budget) continue; // beyond the pool cap → the box path draws this overflow figure
+      }
 
       // Vision-cone fog-of-war (T96) + perception v2 (V62): read the precomputed per-slot reveal, else the cone fade.
       let fade = 1;
@@ -690,7 +696,11 @@ export class RiggedCrowd {
       // Pace the clip to the member's ACTUAL ground speed so a slow shambler's legs don't windmill and a fast
       // runner's don't moonwalk (T128): cadence = speed / clip-stride for moving locomotion, natural rate else.
       const speed = Math.hypot(velocity[s * 3]!, velocity[s * 3 + 2]!);
-      const rate = locomotionRateHz(isLocomotionState(st), speed, slot.strideByName.get(clipName) ?? 0, clipPhaseRateHz(entry));
+      // FROZEN idle: an archetype with no real idle clip (runner → Casual_Walk fallback) holds a pose instead of
+      // walking on the spot while standing still (V96 asset limitation); else pace the clip to ground speed.
+      const rate = isFrozenIdle(CLIP_MAPS[slot.key], st)
+        ? 0
+        : locomotionRateHz(isLocomotionState(st), speed, slot.strideByName.get(clipName) ?? 0, clipPhaseRateHz(entry));
       // Per-slot cadence jitter (stable, deterministic) so members don't stride in identical-rate lockstep.
       const jitter = 1 + (variationHash01(s, CADENCE_SALT) - 0.5) * 2 * CADENCE_JITTER_SPREAD;
       const ph = advancePhase(slotPhase[s]!, rate * jitter, dtSeconds);

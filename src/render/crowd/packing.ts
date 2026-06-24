@@ -52,10 +52,63 @@ export interface PackOptions {
    */
   readonly limbedBudget?: number;
   /**
+   * Precomputed per-slot figure membership (1 = drawn as a near FIGURE by the limb/rigged path, so the box
+   * SKIPS it; 0 = the box draws it). DISTANCE-ranked (the nearest `limbedBudget` eligible slots to the player),
+   * so the box LOD lands on the FAR overflow — not arbitrary slot-order members, which made boxes appear on
+   * near zombies while far ones stayed figures. When absent, falls back to the legacy slot-order rank.
+   */
+  readonly figureMask?: Uint8Array | undefined;
+  /**
    * Optional vision-cone fog-of-war cull (T96): hide members outside the player's forward cone / range /
    * line-of-sight and fade those near the edges. Undefined = no cull (the whole horde draws).
    */
   readonly visibility?: VisionCull | undefined;
+}
+
+/**
+ * The shared figure/box partition (T30 LOD), DISTANCE-ranked. Returns a per-slot mask where 1 = this alive,
+ * limbed-eligible (simTier <= maxSimTier) slot is among the `budget` NEAREST to the player → drawn as a near
+ * figure (limb/rigged path); 0 = drawn as a box. The box, limb, AND rigged passes all consult this ONE mask,
+ * so they partition the live set identically AND the boxes fall on the far overflow rather than on whichever
+ * slots came first in SoA order (the "boxes on the nearest zombies" bug). Pure: the caller owns the player
+ * position; ties break by slot index for replay-stable (V26) selection. Pass `out` to reuse a scratch buffer.
+ */
+export function computeFigureMask(
+  views: FieldViews,
+  count: number,
+  playerX: number,
+  playerZ: number,
+  maxSimTier: number,
+  budget: number,
+  out?: Uint8Array,
+): Uint8Array {
+  const mask = out && out.length >= count ? out : new Uint8Array(count);
+  mask.fill(0, 0, count);
+  if (maxSimTier < 0 || budget <= 0) return mask; // limbed split disabled → everything is a box
+  const alive = requireView<Uint8Array>(views, 'alive');
+  const simTier = requireView<Uint8Array>(views, 'simTier');
+  const position = requireView<Float32Array>(views, 'position');
+  const eligible: number[] = [];
+  for (let s = 0; s < count; s++) {
+    if (alive[s]! === 0 || simTier[s]! > maxSimTier) continue;
+    eligible.push(s);
+  }
+  if (eligible.length <= budget) {
+    for (const s of eligible) mask[s] = 1;
+    return mask;
+  }
+  // More eligible than the budget → keep the NEAREST `budget` (nearest-first, slot tiebreak for determinism).
+  eligible.sort((a, b) => {
+    const dxa = position[a * 3]! - playerX;
+    const dza = position[a * 3 + 2]! - playerZ;
+    const dxb = position[b * 3]! - playerX;
+    const dzb = position[b * 3 + 2]! - playerZ;
+    const da = dxa * dxa + dza * dza;
+    const db = dxb * dxb + dzb * dzb;
+    return da !== db ? da - db : a - b;
+  });
+  for (let i = 0; i < budget; i++) mask[eligible[i]!] = 1;
+  return mask;
 }
 
 export interface PackResult {
@@ -133,6 +186,7 @@ export function packCrowdInputs(
     scaleMax,
     limbedMaxSimTier = -1,
     limbedBudget = Infinity,
+    figureMask,
     visibility,
   } = opts;
   if (count < 0 || count > capacity) throw new Error(`count ${count} exceeds capacity ${capacity}`);
@@ -158,7 +212,11 @@ export function packCrowdInputs(
   let figureRank = 0;
   for (let slot = 0; slot < count; slot++) {
     if (alive[slot]! === 0) continue;
-    if (simTier && simTier[slot]! <= limbedMaxSimTier) {
+    if (figureMask) {
+      // Distance-ranked partition: this slot is a near figure → the limb/rigged path draws it, skip the box.
+      if (figureMask[slot] === 1) continue;
+    } else if (simTier && simTier[slot]! <= limbedMaxSimTier) {
+      // Legacy slot-order fallback (no mask supplied — e.g. unit tests).
       if (figureRank < limbedBudget) {
         figureRank++;
         continue; // claimed by the limbed figure path (drawn or vision-culled there)

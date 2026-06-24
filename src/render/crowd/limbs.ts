@@ -192,6 +192,13 @@ export interface LimbPackOptions {
   /** Slots with simTier <= this are promoted to the limbed (figure) path (V13). */
   readonly maxSimTier: number;
   /**
+   * Distance-ranked figure membership (packing.computeFigureMask): 1 = this slot is a near figure → drawn here;
+   * else the box path draws it. When provided it REPLACES the slot-order rank so the figures are the NEAREST
+   * `budget` zombies, not the first in SoA order (the "boxes on the nearest zombies" fix). Same mask the box +
+   * rigged passes consult, so the partition is identical across all three.
+   */
+  readonly figureMask?: Uint8Array | undefined;
+  /**
    * Optional vision-cone fog-of-war cull (T96): hide figures outside the player's forward cone / range /
    * line-of-sight and fade those near the edges. A culled figure keeps its budget RANK (so the box path does
    * not redraw it) but writes no instance. Undefined = no cull.
@@ -245,7 +252,7 @@ export function packLimbInputs(
   reachState: Float32Array,
   opts: LimbPackOptions,
 ): LimbPackResult {
-  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, visibility, outFade, outReach, outSlot, dtSeconds, gait } = opts;
+  const { count, capacity, variationCount, scaleMin, scaleMax, maxSimTier, figureMask, visibility, outFade, outReach, outSlot, dtSeconds, gait } = opts;
   if (count < 0) throw new Error(`count must be >= 0, got ${count}`);
   if (scaleMin > scaleMax) throw new Error(`scale band invalid: ${scaleMin} > ${scaleMax}`);
   if (outPose.length < capacity * FLOATS_PER_LIMB_POSE) {
@@ -277,8 +284,15 @@ export function packLimbInputs(
   let rank = 0;
   for (let slot = 0; slot < count; slot++) {
     if (alive[slot]! === 0) continue;
-    if (simTier[slot]! > maxSimTier) continue; // not limbed-eligible → drawn as a box
-    if (rank++ >= capacity) continue; // beyond the pool cap (V13) → the box path renders this overflow figure
+    if (figureMask) {
+      // Distance-ranked partition: only the slots the shared mask marks as near figures are drawn here; the
+      // rest (including over-budget eligible ones) are boxes. Identical mask the box + rigged passes consult.
+      if (figureMask[slot] !== 1) continue;
+      if (live >= capacity) continue; // pool safety — the mask never marks more than the budget (<= capacity)
+    } else {
+      if (simTier[slot]! > maxSimTier) continue; // not limbed-eligible → drawn as a box
+      if (rank++ >= capacity) continue; // beyond the pool cap (V13) → the box path renders this overflow figure
+    }
 
     // Vision-cone fog-of-war (T96) + perception v2 (V62): read the precomputed per-slot reveal when the scene
     // supplied one (cone+near+memory+noise); else fall back to the pure cone fade.

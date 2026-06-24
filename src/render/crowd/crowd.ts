@@ -48,7 +48,7 @@ import {
 } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
-import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed, variationHash01, variationTint } from './packing';
+import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, computeFigureMask, variationSeed, variationHash01, variationTint } from './packing';
 import type { VisionCull } from './visionCull';
 import { RiggedCrowd } from './rigged';
 import {
@@ -292,7 +292,7 @@ export class CrowdLimbs {
    * matrix but keep their instance slot so indices stay aligned across parts. `dtSeconds` advances each
    * figure's gait phase at its per-state rate (T111/V75).
    */
-  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull): number {
+  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull, figureMask?: Uint8Array): number {
     // Per-SLOT gait phase accumulator (T111/V75). Lazily allocated to the SoA slot count + seeded with a
     // per-slot offset so figures never march in lockstep (mirrors the box tier's per-instance phase seed).
     if (!this.slotPhase || this.slotPhase.length < count) {
@@ -326,6 +326,7 @@ export class CrowdLimbs {
         scaleMin: this.scaleMin,
         scaleMax: this.scaleMax,
         maxSimTier: this.maxSimTier,
+        figureMask,
         visibility,
         outFade: this.fadeArr,
         outReach: this.reachArr, // per-slot EASED forward arm-raise (T122/V87)
@@ -405,6 +406,8 @@ export class Crowd {
   readonly settings: CrowdSettings;
   /** The TSL compute node the frame loop runs (renderer.compute(crowd.computeNode)) before each render. */
   readonly computeNode: ComputeNode;
+  /** Reused scratch for the per-frame distance-ranked figure/box mask (avoids a per-frame allocation). */
+  private figureMaskScratch?: Uint8Array;
   /**
    * Hero+active-tier block-limbed figures (T72). Its per-part meshes are parented UNDER `mesh`, so the
    * scene wiring is unchanged: scene.add(crowd.mesh) brings the figures along and crowd.update() drives
@@ -535,10 +538,24 @@ export class Crowd {
    * delta for the compute phase-advance. Returns the live instance count (also set as mesh.count so only
    * live instances are drawn). The transform mat4 itself is assembled later by renderer.compute(computeNode).
    */
-  update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull): number {
+  update(views: FieldViews, count: number, dtSeconds: number, playerX: number, playerZ: number, visibility?: VisionCull): number {
+    // Distance-ranked figure/box partition: the nearest `limbedBudget` eligible zombies to the player are the
+    // FIGURES; the rest are boxes. Computed ONCE here and shared by all three passes (box, limb, rigged) so the
+    // box LOD lands on the FAR overflow instead of arbitrary SoA-order members (the "boxes on the nearest
+    // zombies" bug). Reuses a scratch buffer to avoid a per-frame allocation.
+    this.figureMaskScratch = computeFigureMask(
+      views,
+      count,
+      playerX,
+      playerZ,
+      this.settings.limbedMaxSimTier,
+      this.settings.limbedBudget,
+      this.figureMaskScratch,
+    );
+    const figureMask = this.figureMaskScratch;
     // The box draws the horde (simTier above the limbed band) PLUS any limbed-tier figures that overflowed the
-    // limbed budget this frame — those fall through here instead of vanishing (§B culling fix). The figure /
-    // box split is partitioned by a shared budget rank, so every alive zombie is drawn by exactly one path.
+    // limbed budget this frame — those fall through here instead of vanishing (§B culling fix). Every alive
+    // zombie is drawn by exactly one path (box if its mask bit is 0, figure if 1).
     const { liveCount } = packCrowdInputs(views, this.poseInput, this.metaInput, {
       count,
       capacity: this.settings.capacity,
@@ -547,16 +564,17 @@ export class Crowd {
       scaleMax: this.settings.scaleMax,
       limbedMaxSimTier: this.settings.limbedMaxSimTier,
       limbedBudget: this.settings.limbedBudget,
+      figureMask,
       visibility,
     });
     // Near band: the RIGGED archetype crowd draws it once every GLB has baked in (T128); until then the
     // procedural limbed figures own it (no visible gap). Both consume the same partition the box reserved, so
     // exactly one path draws each near member. The unused path is hidden (0 instances).
     if (this.rigged.isReady) {
-      this.rigged.update(views, count, dtSeconds, visibility);
+      this.rigged.update(views, count, dtSeconds, visibility, figureMask);
       this.limbs.hide();
     } else {
-      this.limbs.update(views, count, dtSeconds, visibility);
+      this.limbs.update(views, count, dtSeconds, visibility, figureMask);
       this.rigged.hide();
     }
     this.mesh.count = liveCount;
