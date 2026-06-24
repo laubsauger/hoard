@@ -114,3 +114,6 @@ sound; (P3d) render stacking + per-level cutaway + stairs mesh; (P3e) cityDistri
 6. **Roof texture.** Roofs are flat single-color + lame — add shingle/material detail (procedural banding, no files).
 7. **Remove backward-compat after P3 lands.** Drop the single-level legacy paths/gating once multi-floor is real —
    don't carry legacy. (Do LAST, after P3d/e green.)
+8. **Collapsed-roof sag clamp.** `style.collapsed` tilts `buildRoofAssembly`'s roof (rotation.z) too far on one
+   side — the low edge dips BELOW the wall top so the walls poke through above the roof. Clamp the sag so the
+   roof's lowest point stays at/above the wall plate, or reduce the collapse tilt + raise the ridge to compensate.
