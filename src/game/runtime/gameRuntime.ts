@@ -77,6 +77,7 @@ import {
   type Vec3,
   type DoorView,
   type WindowView,
+  type FurnitureKind,
 } from '@/game/scene';
 import {
   nearestInteractable,
@@ -109,6 +110,19 @@ const REFERENCE_TIER: QualityTier = 'desktop-high';
 /** Synthetic entity id for world loot containers — a high fixed space that never collides with minted
  *  entity ids, so seeding world loot does not perturb the IdFactory counters (determinism/replay, V26). */
 const WORLD_CONTAINER_ENTITY = 0x7fff_0001;
+/** Friendly display labels for the container-bearing furniture kinds (P1d) — the base name a unique per-piece
+ *  loot-container label is derived from (deduped with a count suffix). Only the kinds furnishRoom ever marks as
+ *  containers appear here; a missing kind falls back to its raw kind string. */
+const FURNITURE_CONTAINER_LABEL: Partial<Record<FurnitureKind, string>> = {
+  fridge: 'Fridge',
+  dresser: 'Dresser',
+  wardrobe: 'Wardrobe',
+  bookshelf: 'Bookshelf',
+  sideboard: 'Sideboard',
+  medicineCabinet: 'Medicine Cabinet',
+  shelving: 'Shelving',
+  washer: 'Washer',
+};
 const HORDE_NAV_GROUP = 0;
 const ZOMBIE_AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Sight);
 /** Movement-layer mask for the window-attrition proximity query (T108) — "is a body up against this window". */
@@ -433,14 +447,36 @@ export class GameRuntime {
     // Each container is anchored at a FIXED authored cell (lootableContainerCells) — a corner of the player's
     // room, NOT the player cell — so it reads as an object in the world, not a thing that trails the player.
     const lootRng = mulberry32((opts.scatterSeed ?? 1) ^ 0x10c7);
-    lootableContainerCells(this.scene).forEach((placement, i) => {
-      const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + i) as EntityId, container: placement.label };
+    let containerSlot = 0;
+    lootableContainerCells(this.scene).forEach((placement) => {
+      const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + containerSlot++) as EntityId, container: placement.label };
       this.inventory.addContainer(ref, { type: 'cupboard' });
       this.namedContainers.set(placement.label, ref);
       const center = this.scene.cellCenter(placement.cell);
       this.worldContainers.push({ x: center.x, z: center.z, label: placement.label });
       for (const s of rollLoot('kitchen', lootRng)) this.inventory.seed(ref, s.item, s.count);
     });
+
+    // P1d: every CONTAINER furniture piece (furnishHouse → PlacedFurniture with a non-null `container`) becomes a
+    // real lootable world container — same wiring as the cupboard above (synthetic id space + the SAME separate
+    // loot rng, so seeding the world never perturbs the sim rand / id streams, V26). Anchored at the furniture's
+    // world cell; the room-type → LootSource mapping is baked into the piece by furnishRoom (fridge → 'kitchen',
+    // dresser → 'bedroom', medicineCabinet → 'bathroom', …). Each gets a UNIQUE display label (the interactable
+    // label == the namedContainers key == the loot-menu container name) so duplicates across houses don't collide.
+    const labelCounts = new Map<string, number>();
+    for (const piece of this.scene.placedFurniture ?? []) {
+      if (piece.container === null) continue;
+      const base = FURNITURE_CONTAINER_LABEL[piece.kind] ?? piece.kind;
+      const n = (labelCounts.get(base) ?? 0) + 1;
+      labelCounts.set(base, n);
+      const label = n === 1 ? base : `${base} ${n}`;
+      const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + containerSlot++) as EntityId, container: label };
+      this.inventory.addContainer(ref, { type: 'cupboard' });
+      this.namedContainers.set(label, ref);
+      const center = this.scene.cellCenter({ cx: piece.cx, cy: piece.cy });
+      this.worldContainers.push({ x: center.x, z: center.z, label });
+      for (const s of rollLoot(piece.container, lootRng)) this.inventory.seed(ref, s.item, s.count);
+    }
 
     this.registerSystems();
   }

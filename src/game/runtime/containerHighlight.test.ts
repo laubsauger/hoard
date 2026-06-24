@@ -25,9 +25,16 @@ describe('container fixed placement + active highlight (BUG1/T60)', () => {
     expect(Math.hypot(cup!.x - p.x, cup!.z - p.z)).toBeGreaterThan(0.5);
   });
 
-  it('at spawn nothing is in reach → no active highlight (not house-wide)', () => {
+  it('the fixed Kitchen Cupboard is anchored OUT of reach of the sheltered spawn (not house-wide)', () => {
     const rt = makeRuntime();
-    expect(rt.nearestInteractableHighlight()).toBeNull();
+    // P1d: real furniture loot-containers now exist (a fridge/dresser may sit within reach of the spawn), so the
+    // spawn highlight is no longer necessarily null. The original guarantee — the LEGACY cupboard is a fixed,
+    // non-house-wide anchor at the room corner — is asserted directly: it is farther than interaction range.
+    const cup = rt.interactables().find((t) => t.kind === 'container' && t.label === 'Kitchen Cupboard')!;
+    expect(cup).toBeDefined();
+    const p = rt.player();
+    const range = resolveDomain(structuresConfig, TIER).interactionRangeMeters;
+    expect(Math.hypot(cup.x - p.x, cup.z - p.z)).toBeGreaterThan(range);
   });
 
   it('walking up to the cupboard makes it the nearest interactable + emits a sized highlight box', () => {
