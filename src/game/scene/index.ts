@@ -80,9 +80,11 @@ export {
 export {
   DoorSystem,
   doorAxis,
+  doorAxisForDir,
   isDoorCell,
   type DoorAccess,
   type DoorView,
+  type DoorSpec,
 } from './doors';
 export {
   lootableContainerCells,

@@ -1,7 +1,7 @@
 // T46 — door state system: a closed door blocks nav + sight + sound through its cell; opening clears it.
 import { describe, it, expect } from 'vitest';
 import { NavGrid } from '@/game/navigation';
-import { DoorSystem, doorAxis, isDoorCell } from './doors';
+import { DoorSystem, doorAxis, doorAxisForDir, isDoorCell } from './doors';
 import { hasLineOfSight } from './testBlock';
 
 /** A 7-wide wall along cy=3 with a single door gap at cx=3, rooms above (cy<3) and below (cy>3). */
@@ -72,6 +72,67 @@ describe('DoorSystem (T46)', () => {
     const door = { cx: 3, cy: 3 };
     const doors = new DoorSystem(grid, [door]);
     expect(doors.accessOf(grid.index(door.cx, door.cy))).toBe('closed');
+  });
+
+  it('doorAxisForDir derives the leaf axis from the edge direction', () => {
+    expect(doorAxisForDir('n')).toBe('x'); // n/s wall runs along X (leaf faces ±Z)
+    expect(doorAxisForDir('s')).toBe('x');
+    expect(doorAxisForDir('e')).toBe('z'); // e/w wall runs along Z
+    expect(doorAxisForDir('w')).toBe('z');
+  });
+
+  it('an EDGE-door toggles the cell EDGE-wall, not the cell — both cells stay walkable', () => {
+    // two adjacent open cells; the door is the edge between (3,3) and the cell to its south (3,4).
+    const grid = new NavGrid({ width: 7, height: 7 });
+    const inner = { cx: 3, cy: 3 };
+    const outer = { cx: 3, cy: 4 };
+    const doors = new DoorSystem(grid, [{ cx: inner.cx, cy: inner.cy, edgeDir: 's' }]);
+    const navCell = grid.index(inner.cx, inner.cy);
+    const scene = {
+      isWalkableWorld: (x: number, z: number) => {
+        const { cx, cy } = grid.worldToCell(x, z);
+        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+        return !grid.isBlocked(grid.index(cx, cy));
+      },
+      navGrid: grid,
+    };
+    const cs = grid.settings.navCellSize;
+    const a = { x: (inner.cx + 0.5) * cs, z: (inner.cy + 0.5) * cs };
+    const b = { x: (outer.cx + 0.5) * cs, z: (outer.cy + 0.5) * cs };
+
+    // authored clear edge ⇒ open: both cells walkable, edge clear, sight passes.
+    expect(doors.accessOf(navCell)).toBe('open');
+    expect(grid.wallOnEdge(inner.cx, inner.cy, 's')).toBe(false);
+    expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(true);
+
+    // close ⇒ the EDGE is walled (cells still walkable), sight + crossing blocked, cell never blocked.
+    expect(doors.close(navCell)).toBe(true);
+    expect(doors.accessOf(navCell)).toBe('closed');
+    expect(grid.wallOnEdge(inner.cx, inner.cy, 's')).toBe(true);
+    expect(grid.isBlocked(navCell)).toBe(false); // the CELL is untouched — edge-door, not cell-door
+    expect(grid.isBlocked(grid.index(outer.cx, outer.cy))).toBe(false);
+    expect(grid.canStep(inner.cx, inner.cy, 0, 1)).toBe(false); // cannot cross the walled edge
+    expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(false);
+
+    // open again ⇒ edge cleared.
+    expect(doors.open(navCell)).toBe(true);
+    expect(grid.wallOnEdge(inner.cx, inner.cy, 's')).toBe(false);
+    expect(grid.canStep(inner.cx, inner.cy, 0, 1)).toBe(true);
+    expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(true);
+  });
+
+  it('an EDGE-door reads its initial access from the authored edge-wall + reports its dir + edge-midpoint centre', () => {
+    const grid = new NavGrid({ width: 7, height: 7 });
+    grid.setWallBetween(3, 3, 4, 3, true); // pre-walled edge toward 'e' ⇒ starts closed
+    const doors = new DoorSystem(grid, [{ cx: 3, cy: 3, edgeDir: 'e' }]);
+    const navCell = grid.index(3, 3);
+    expect(doors.accessOf(navCell)).toBe('closed');
+    const view = doors.list()[0]!;
+    expect(view.dir).toBe('e');
+    expect(view.axis).toBe('z');
+    const cs = grid.settings.navCellSize;
+    expect(view.x).toBeCloseTo((3 + 1) * cs); // edge midpoint sits on the cell boundary toward 'e'
+    expect(view.z).toBeCloseTo((3 + 0.5) * cs);
   });
 
   it('nearest returns the closest door in reach, none beyond range', () => {
