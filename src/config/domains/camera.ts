@@ -54,8 +54,8 @@ export const cameraConfig = registerDomain('camera', {
   zoomMetersMin: num({
     owner: 'camera',
     unit: 'meters',
-    doc: 'Closest tactical zoom: visible frustum half-height in meters (indoors / detail).',
-    default: 6,
+    doc: 'Closest tactical zoom: visible frustum half-height in meters (indoors / detail). 3 = a tight character-level view (was 6) so you can zoom right in on the avatar / a room.',
+    default: 3,
     min: 1,
     max: 100,
   }),

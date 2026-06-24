@@ -50,6 +50,7 @@ import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import { FLOATS_PER_META, FLOATS_PER_POSE, packCrowdInputs, variationSeed, variationHash01, variationTint } from './packing';
 import type { VisionCull } from './visionCull';
+import { RiggedCrowd } from './rigged';
 import {
   composeLimbMatrix,
   packLimbInputs,
@@ -386,6 +387,11 @@ export class CrowdLimbs {
     }
     return liveCount;
   }
+
+  /** Hide every part (draw 0 instances) — used once the rigged crowd (T128) takes over the near band. */
+  hide(): void {
+    for (const mesh of this.meshes) mesh.count = 0;
+  }
 }
 
 /**
@@ -405,6 +411,13 @@ export class Crowd {
    * them — no blockScene edit. The box `mesh` now draws ONLY the horde (simTier > limbedMaxSimTier).
    */
   readonly limbs: CrowdLimbs;
+  /**
+   * RIGGED, animated near-band crowd (T128): one InstancedMesh per archetype, GPU-skinned from a baked bone
+   * texture, parented UNDER `mesh` like the limbs. Until every archetype GLB has been baked + attached (async),
+   * it draws nothing and the limbed figures own the near band; once ready it REPLACES them (limbs hidden). It
+   * reuses the SAME packing partition + reveal fade + per-instance variation as the limbs it supersedes.
+   */
+  readonly rigged: RiggedCrowd;
 
   private readonly geometry: BoxGeometry;
   private readonly material: MeshStandardNodeMaterial;
@@ -432,6 +445,9 @@ export class Crowd {
     // Block-limbed hero/active figures, parented under the box mesh so the existing scene wiring carries
     // them (V2: shared per-part InstancedMeshes, no per-zombie mesh). The box mesh below draws the horde.
     this.limbs = new CrowdLimbs(settings, registry, this.mesh);
+    // RIGGED archetype crowd (T128): empty until the GLBs bake in via Crowd.rigged.attach; parented under the
+    // box mesh (same wiring as the limbs). Once ready it takes over the near band; the limbs are the fallback.
+    this.rigged = new RiggedCrowd(settings, this.mesh);
 
     // ---- GPU storage buffers (V24-tracked; StorageBufferNode is a disposable three Node) ----
     // Inputs: pose [px,py,pz,heading] and meta [scale,seed,archetype,animState], compacted per frame.
@@ -533,7 +549,16 @@ export class Crowd {
       limbedBudget: this.settings.limbedBudget,
       visibility,
     });
-    this.limbs.update(views, count, dtSeconds, visibility);
+    // Near band: the RIGGED archetype crowd draws it once every GLB has baked in (T128); until then the
+    // procedural limbed figures own it (no visible gap). Both consume the same partition the box reserved, so
+    // exactly one path draws each near member. The unused path is hidden (0 instances).
+    if (this.rigged.isReady) {
+      this.rigged.update(views, count, dtSeconds, visibility);
+      this.limbs.hide();
+    } else {
+      this.limbs.update(views, count, dtSeconds, visibility);
+      this.rigged.hide();
+    }
     this.mesh.count = liveCount;
     // StorageBufferNode.value is the StorageInstancedBufferAttribute backing the buffer; bump it so the
     // backend re-uploads the freshly compacted inputs this frame. The compute reads these next. (meta carries

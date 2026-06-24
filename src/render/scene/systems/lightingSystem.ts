@@ -48,7 +48,7 @@ export interface LightingResult {
   readonly sceneBrightness: number;
   /** Resolved renderer tone-mapping exposure (B6). */
   readonly exposure: number;
-  /** Day fraction 0..1 actually used this frame (the dev override if active, else the sim clock) — for the HUD readout (T125). */
+  /** Day fraction 0..1 actually used this frame (the dev override if active, else the sim clock) — for the HUD readout (T126). */
   readonly timeOfDay: number;
 }
 
@@ -69,7 +69,7 @@ export class LightingSystem {
   }
 
   /**
-   * `timeOfDayOverride` (T125/V90): a render-side DEV override of the day/night phase for lighting tuning.
+   * `timeOfDayOverride` (T126/V91): a render-side DEV override of the day/night phase for lighting tuning.
    * When non-null the lighting uses it INSTEAD of `runtime.timeOfDay()` and the day/night cycle is frozen at
    * that fraction. It is a VIEW override only — the deterministic fixed-tick SIM clock is never touched (V2/V26),
    * so replay stays exact; nothing in the sim reads it.
@@ -117,7 +117,7 @@ export class LightingSystem {
     const sceneBrightness = dayMax > 0 ? Math.min(1, Math.max(0, (sky.keyIntensity + sky.ambientIntensity) / dayMax)) : 0;
     this.exposure = resolveToneExposure({
       baseExposure: this.cfg.baseExposure,
-      // B44/V91: the interior boost FADES in daylight so leaving a building no longer drops exposure into a
+      // B44/V92: the interior boost FADES in daylight so leaving a building no longer drops exposure into a
       // dark exterior (the cutaway interior is sunlit, not a cave) — full lift only at a genuinely dark night.
       interiorStops: interiorExposureCompensation(Math.min(1, Math.max(0, this.interiorTransition)), sceneBrightness, this.cfg.tier),
       sceneBrightness,

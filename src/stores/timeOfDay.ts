@@ -1,4 +1,4 @@
-// T125 / V1 / V11 / V90 — time-of-day VIEW + dev-override store. NOT persisted. Two directions, one store:
+// T126 / V1 / V11 / V91 — time-of-day VIEW + dev-override store. NOT persisted. Two directions, one store:
 //   • the engine PUSHES `current` (the day fraction the LightingSystem used this frame) for the HUD clock;
 //   • the dev sidebar WRITES `overrideEnabled` + `override`, which the RENDER-LANE lighting consults to park
 //     the sun for tuning.

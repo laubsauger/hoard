@@ -54,6 +54,18 @@ export interface ShotResult {
   readonly empty?: boolean;
 }
 
+/**
+ * T131/V99 — the KINETIC IMPACT of the killing blow, surfaced to the death seam so the corpse topples in the
+ * shot's push direction. `dirX`/`dirZ` is the normalized attack (bullet / swing) travel direction — the body
+ * falls ALONG it (front shot → onto its back); `force` is the effective damage of the lethal hit (drives how
+ * hard / fast it tumbles). A non-combat death (lifetime expiry) carries no impact → a default heading collapse.
+ */
+export interface DeathImpact {
+  readonly dirX: number;
+  readonly dirZ: number;
+  readonly force: number;
+}
+
 /** Live ammunition state of the equipped weapon for a HUD/UI (T74). Melee reports unlimited (Infinity). */
 export interface AmmoStatus {
   /** Rounds chambered in the magazine (Infinity for the unlimited melee class). */
@@ -76,8 +88,10 @@ export interface CombatDeps {
   readonly visualEvents: { push(e: VisualEvent): boolean };
   /** Lifecycle seam owned by the runtime: record damage time (recent-damage promotion, V13). */
   readonly onDamaged: (slot: ZombieSlot) => void;
-  /** Lifecycle seam owned by the runtime: free slot + drop collision agent + unmap on death. */
-  readonly onEntityDied: (slot: ZombieSlot) => void;
+  /** Lifecycle seam owned by the runtime: free slot + drop collision agent + unmap on death. The killing hit's
+   *  kinetic IMPACT (T131/V99) rides along so the corpse topples in the shot's push direction; absent for a
+   *  non-combat death (lifetime expiry → a default heading collapse, force 0). */
+  readonly onEntityDied: (slot: ZombieSlot, impact?: DeathImpact) => void;
   /** Optional: promote a struck target to hero fidelity when detailed anatomy is required (V16). */
   readonly promote?: (slot: ZombieSlot) => void;
   /**
@@ -667,7 +681,9 @@ export class CombatSystem {
 
     if (killed) {
       this.deps.worldEvents.push({ kind: 'entityDied', id: this.deps.nextEventId(), entity });
-      this.deps.onEntityDied(slot); // runtime frees slot + drops collision agent + unmaps
+      // T131/V99: carry the killing hit's kinetic vector (bullet/swing direction + effective damage) so the
+      // corpse topples in the push direction — front shot onto its back, behind onto its face, side sideways.
+      this.deps.onEntityDied(slot, { dirX: ndx, dirZ: ndz, force: effective });
     }
 
     return {

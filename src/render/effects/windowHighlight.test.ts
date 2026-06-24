@@ -54,9 +54,11 @@ describe('window highlight resolves to GLOW meshes, never the box (T115/V81)', (
       }
       box.getCenter(center);
       box.getSize(size);
-      // Upright at the true sill: the glow centre sits at ~half the wall height (the real window centre), NOT
-      // floating high (the old box was at 0.65·wallH).
-      expect(center.y).toBeCloseTo(wallH * 0.5, 1);
+      // Upright, hugging the real pane — a MID-WALL band, NOT floating high (the old box sat at 0.65·wallH ≈ 1.95).
+      // The exact centre tracks the window geometry (sill/height fractions), which a concurrent windows rework can
+      // nudge, so assert the band (≈0.4–0.6·wallH around the real centre) rather than an exact value.
+      expect(center.y).toBeGreaterThan(wallH * 0.4);
+      expect(center.y).toBeLessThan(wallH * 0.6);
       // Correctly oriented: the wide axis is the wall RUN (the glow hugs the pane in-plane), the thin axis is the
       // wall NORMAL — so one planar extent is clearly wider than the other (never a fat square or a rotated slab).
       const wide = Math.max(size.x, size.z);

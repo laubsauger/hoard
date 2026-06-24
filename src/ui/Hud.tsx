@@ -16,7 +16,7 @@ function Vital({ label, value }: { label: string; value: number | null }) {
 
 const PHASE_LABEL: Record<DayPhase, string> = { dawn: 'Dawn', day: 'Day', dusk: 'Dusk', night: 'Night' };
 
-/** T125: HH:MM clock + day/night phase, sourced from the SAME day fraction the lighting uses (timeOfDayStore.current).
+/** T126: HH:MM clock + day/night phase, sourced from the SAME day fraction the lighting uses (timeOfDayStore.current).
  *  Subscribes to two primitives only (V11/B24); the engine pushes `current` at minute granularity so this re-renders
  *  at most a couple of times a second, not per frame. A dev-frozen (override) clock is flagged. */
 function TimeReadout() {

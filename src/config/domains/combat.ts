@@ -75,6 +75,16 @@ export const combatConfig = registerDomain('combat', {
     min: 0.1,
     max: 12,
   }),
+  /** Per-zombie move-speed SPREAD (±ratio) so members of the SAME archetype don't move in lockstep — a small,
+   *  STABLE, deterministic per-slot factor (V26) on top of the archetype scale. 0 = uniform; 0.18 = ±18%. */
+  hordeMoveSpeedJitter: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Per-zombie deterministic move-speed spread (±) so a crowd of one archetype is not homogeneous (T128 follow-up).',
+    default: 0.18,
+    min: 0,
+    max: 0.6,
+  }),
   /** Weight of the shared flow direction vs local separation when steering (1 = pure flow). */
   steerFlowWeight: num({
     owner: 'combat',

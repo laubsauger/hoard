@@ -28,6 +28,9 @@ import { inventoryViewStore } from '../../stores/inventoryView';
 import { timeOfDayStore } from '../../stores/timeOfDay';
 
 const DEG2RAD = Math.PI / 180;
+/** Shared empty corpse list (T131/V99) — fed to the blob CorpseField once the rigged corpse layer owns the pool,
+ *  so the fallback draws 0 without a per-frame allocation (V24). */
+const EMPTY_CORPSES: never[] = [];
 
 export interface RenderLoopContext {
   readonly isCancelled: () => boolean;
@@ -59,7 +62,7 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
   // ---- frame loop: real dt -> runtime.update (fixed ticks) -> sync scene -> render (V12) ----
   let last = performance.now();
   let rafHandle = 0;
-  // T125: only re-publish the HUD time-of-day when the displayed MINUTE changes (a full day = dayLengthSeconds,
+  // T126: only re-publish the HUD time-of-day when the displayed MINUTE changes (a full day = dayLengthSeconds,
   // so this fires a couple of times a second at most) — avoids a per-frame store write + React churn (V11).
   let lastTodMinute = -1;
   const moveSpeedKeys = (): { x: number; z: number } => {
@@ -92,6 +95,10 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // sim HALTS — not just the UI) and otherwise scales the real frame dt by the time-scale.
     const sess = sessionStore.getState();
     const stepDt = simStepDt(dt, sess.paused, sess.timeScale);
+    // T127: the player-avatar animation signals — move INTENT magnitude + the sprint key this frame. Gated to
+    // false while paused (stepDt === 0) so a halted player idles, never walks/runs in place. Set in the sim block.
+    let avatarMoving = false;
+    let avatarSprinting = false;
     if (stepDt > 0) {
       const mv = moveSpeedKeys();
       // Sprint lever (Shift by default): the runtime gates it on stamina + drains/regenerates the pool.
@@ -99,6 +106,8 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
       const bindNow = inputStore.getState().bindings;
       const sprint = keys.has(bindNow.sprint);
       const sneak = keys.has(bindNow.sneak);
+      avatarMoving = mv.x !== 0 || mv.z !== 0;
+      avatarSprinting = sprint;
       // V86: publish the CROUCH stance every frame (even when standing still) so the player eye height — which
       // drives both what the player sees over AND whether a crouched player is hidden behind low cover — tracks
       // the held key. Sprint takes precedence (you cannot sprint crouched).
@@ -158,7 +167,10 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // camPos = camera EYE (billboard facing); the player position is the LOD/light-selection focus (the
     // near-ortho eye sits ~100m+ away, so using it for distance would cull every fire).
     fireView.update(dt, fireIgnitions, (cell) => runtime.isRouteBurning(cell), camPos, { x: p.x, y: 0, z: p.z }, access.feedback.reduceFlashes);
-    corpseField.update(runtime.corpses.list, runtime.absoluteTick); // T55/B9 — mirror corpses; T122 death-collapse by tick age
+    // T55/B9 — corpses. T131/V99: once the rigged corpse layer is live (all archetype GLBs baked in, driven by
+    // BlockScene.syncFrame), the blob CorpseField stops drawing (empty list → count 0) so the two never double-draw;
+    // before that it is the no-gap fallback, toppling each body by tick age (T122).
+    corpseField.update(scene.riggedCorpsesActive() ? EMPTY_CORPSES : runtime.corpses.list, runtime.absoluteTick);
     // T60/V29: glow the NEAREST interactable in reach (hidden when none). Pulse is damped to a steady glow
     // when reduce-flashes / reduce-motion is set. The runtime gives the placed + sized box; the view only
     // positions/scales/colours it (V1/V2 — never reads world state back).
@@ -181,11 +193,15 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
         }
       }
     }
-    // T125/V90: a render-side DEV override of the day/night phase (lighting only — the sim clock is untouched,
+    // T126/V91: a render-side DEV override of the day/night phase (lighting only — the sim clock is untouched,
     // so replay stays exact). When enabled, lighting parks the sun at `override`; else it follows the sim clock.
     const tod = timeOfDayStore.getState();
     const todOverride = tod.overrideEnabled ? tod.override : null;
     scene.syncFrame(dt, camera.camera, debugViewStore.getState().flags, todOverride);
+    // T127: advance the rigged player avatar's animation state machine (mixer + crossfades). Real `dt` so the
+    // animation stays smooth; `moving`/`sprinting` are the gated intent signals above; crouch/death/hit are read
+    // from the runtime inside (a fresh damage tick fires the one-shot hit reaction). No-op until the GLB attaches.
+    scene.updatePlayerAvatar(dt, avatarMoving, avatarSprinting);
     // Publish the effective day fraction the lighting used (override or sim clock) for the HUD clock, minute-gated.
     const todMinute = Math.floor(scene.currentTimeOfDay * 1440) % 1440;
     if (todMinute !== lastTodMinute) {

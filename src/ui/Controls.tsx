@@ -10,12 +10,13 @@ import type { EngineHandle } from './GameViewport';
 import { WEATHER_PROFILES, type WeatherProfile } from '../config/domains/weather';
 import { uiStore } from '../stores/ui';
 import { timeOfDayStore } from '../stores/timeOfDay';
-import { useUi, useTimeOfDay } from '../stores/react';
+import { useUi, useTimeOfDay, useInput } from '../stores/react';
+import { formatKeyCode } from '../stores/input';
 import { dayPhaseOf, formatTimeOfDay } from '../render/scene/sky';
 
 const PHASE_LABEL = { dawn: 'Dawn', day: 'Day', dusk: 'Dusk', night: 'Night' } as const;
 
-/** T125 dev group: scrub + freeze the day/night phase for lighting tuning. This is a RENDER-side override
+/** T126 dev group: scrub + freeze the day/night phase for lighting tuning. This is a RENDER-side override
  *  (lighting only) — the deterministic sim clock is untouched (V2/V26). Selectors return primitives (B24). */
 function TimeOfDayControls() {
   const current = useTimeOfDay((s) => s.current); // primitive; minute-stepped by the engine
@@ -53,6 +54,28 @@ function TimeOfDayControls() {
           aria-label="scrub time of day"
         />
       </label>
+    </div>
+  );
+}
+
+/** Live, rebind-aware HOTKEYS legend (T127) — reads the keymap so it always shows the CURRENT keys (e.g. the
+ *  push-up emote, default G). The mouse-driven actions (aim/fire/zoom) + the flashlight (L, dev) have no
+ *  rebindable binding, so they are shown literally. Full remap lives in Accessibility (the rebind panel). */
+function HotkeyLegend() {
+  const b = useInput((s) => s.bindings);
+  const k = (code: string) => formatKeyCode(code);
+  return (
+    <div className="hbn-controls__group hbn-controls__hotkeys" aria-label="hotkeys">
+      <span className="hbn-controls__title">Hotkeys</span>
+      <ul className="hbn-controls__keys">
+        <li><kbd>{k(b.moveUp)}{k(b.moveLeft)}{k(b.moveDown)}{k(b.moveRight)}</kbd> move</li>
+        <li><kbd>Mouse</kbd> aim · <kbd>LMB</kbd> fire</li>
+        <li><kbd>{k(b.sprint)}</kbd> sprint · <kbd>{k(b.sneak)}</kbd> crouch</li>
+        <li><kbd>{k(b.interact)}</kbd> interact · <kbd>{k(b.reload)}</kbd> reload</li>
+        <li><kbd>{k(b.rotateCCW)}</kbd>/<kbd>{k(b.rotateCW)}</kbd> rotate · <kbd>wheel</kbd> zoom</li>
+        <li><kbd>{k(b.emote)}</kbd> emote (push-up) · <kbd>L</kbd> flashlight</li>
+        <li><kbd>{k(b.inventory)}</kbd> inventory · <kbd>{k(b.pause)}</kbd> pause</li>
+      </ul>
     </div>
   );
 }
@@ -149,10 +172,11 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
         </label>
       </div>
       <TimeOfDayControls />
+      <HotkeyLegend />
       <div className="hbn-controls__group">
         <button onClick={() => uiStore.getState().openPanel('settings')}>Accessibility</button>
       </div>
-      <p className="hbn-controls__hint">WASD move · mouse aim · click fire · Q/E rotate · wheel zoom</p>
+      <p className="hbn-controls__hint">Rebind any key in Accessibility</p>
     </div>
   );
 }

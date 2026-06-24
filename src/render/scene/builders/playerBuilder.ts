@@ -1,58 +1,34 @@
-// Player builder: the player avatar (capsule body + facing nose) and the cheap contact-AO grounding disc
-// (T45/V36) that follows the player each frame. Returns PlayerHandles the orchestrator drives per-frame
-// (position/rotation, rim-glow, AO disc). Extracted from BlockScene (docs/REFACTOR-godfiles.md).
+// Player builder (T127): builds the rigged player AVATAR root (a PlayerAvatar — its SkinnedMesh + animation
+// mixer swap in when the GLB resolves async; the root Group exists synchronously so the scene stays sync) and
+// the cheap contact-AO grounding disc (T45/V36) that follows the player each frame. Returns PlayerHandles the
+// orchestrator drives per-frame (position/facing the avatar root, advancing the animation state machine, the
+// AO disc). Replaces the old procedural capsule body + facing nose + rim glow (docs/REFACTOR-godfiles.md).
 
 import {
-  BoxGeometry,
-  CapsuleGeometry,
   CircleGeometry,
   Float32BufferAttribute,
-  Group,
   Mesh,
   MeshBasicMaterial,
 } from 'three';
 import type { BuildContext } from './buildContext';
 import type { PlayerHandles } from './handles';
+import { PlayerAvatar } from '../../player';
 
 export interface PlayerConfig {
   readonly bodyRadiusMeters: number;
+  /** Target standing height (m) — the GLB is measured + scaled to this, feet at y=0. */
   readonly bodyHeightMeters: number;
-  /** Base emissive intensity of the player rim (scaled live by the outline-strength accessibility setting). */
-  readonly baseEmissive: number;
-  /** 0..1 outline strength at build time (V29). */
-  readonly outlineStrength: number;
   /** Contact-AO disc strength + radius (0 disables — no empty mesh). */
   readonly aoStrength: number;
   readonly aoRadiusMeters: number;
 }
 
 export function buildPlayer(ctx: BuildContext, cfg: PlayerConfig): PlayerHandles {
-  const { res } = ctx;
-  const group = new Group();
-  const bodyMat = res.mat('player', {
-    color: 0x9cc4ff,
-    roughness: 0.5,
-    emissive: 0x16324f,
-    // V29: the player's strongest-silhouette rim scales with the outline-strength accessibility setting.
-    emissiveIntensity: cfg.baseEmissive * cfg.outlineStrength,
-  });
-  const body = new Mesh(
-    res.geo('player.geo', new CapsuleGeometry(cfg.bodyRadiusMeters, cfg.bodyHeightMeters - 2 * cfg.bodyRadiusMeters, 6, 12)),
-    bodyMat,
-  );
-  body.castShadow = true;
-  body.position.y = cfg.bodyHeightMeters / 2;
-  group.add(body);
-  // Facing marker so aim direction reads at a glance.
-  const nose = new Mesh(
-    res.geo('playerNose.geo', new BoxGeometry(cfg.bodyRadiusMeters * 1.4, 0.12, cfg.bodyRadiusMeters * 0.5)),
-    res.mat('playerNose', { color: 0xffffff }),
-  );
-  nose.position.set(cfg.bodyRadiusMeters, cfg.bodyHeightMeters * 0.6, 0);
-  group.add(nose);
-  ctx.root.add(group);
-
-  return { mesh: group, rimMat: bodyMat, aoContact: buildContactAo(ctx, cfg) };
+  // The avatar root is added synchronously (positioned/faced each frame). The rigged SkinnedMesh + AnimationMixer
+  // attach later via avatar.attachGltf() once GLTFLoader resolves /meshes/ranger.glb (wired in GameViewport).
+  const avatar = new PlayerAvatar({ heightMeters: cfg.bodyHeightMeters });
+  ctx.root.add(avatar.root);
+  return { avatar, aoContact: buildContactAo(ctx, cfg) };
 }
 
 /**

@@ -90,8 +90,8 @@ export const zombiesConfig = registerDomain('zombies', {
   shamblerSeverScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Shambler sever-threshold scale (anatomical damage variation).', default: 1, min: 0.1, max: 10 }),
 
   // runner (RUNNER) — FAST, fragile: approaches quickly, dies in fewer hits.
-  runnerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Runner (RUNNER) nominal locomotion speed (= baseline × runnerMoveSpeedScale).', default: 2.24, min: 0.1, max: 12 }),
-  runnerMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner (RUNNER) move-speed multiplier vs the STANDARD baseline — FASTER (1.5–1.7×).', default: 1.6, min: 0.1, max: 6 }),
+  runnerMoveSpeed: num({ owner: 'zombies', unit: 'metersPerSecond', doc: 'Runner (RUNNER) nominal locomotion speed (= baseline × runnerMoveSpeedScale) ≈ 3.6 m/s — near the player WALK (3.8), so a runner is a real chase you must SPRINT to escape.', default: 3.64, min: 0.1, max: 12 }),
+  runnerMoveSpeedScale: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner (RUNNER) move-speed multiplier vs the STANDARD baseline. 2.6 (was 1.6, read "almost normal speed"): a runner clearly OUTPACES a shambler and nearly matches the player walk.', default: 2.6, min: 0.1, max: 6 }),
   runnerSpawnWeight: num({ owner: 'zombies', unit: 'ratio', doc: 'Runner (RUNNER) relative spawn weight — SPRINKLED (low; fast threat punctuates the standard mix).', default: 12, min: 0, max: 1000 }),
   runnerHealth: num({ owner: 'zombies', unit: 'count', doc: 'Runner (RUNNER) base health — LOW (0.5–0.7× standard; fewer hits to kill).', default: 60, min: 1, max: 10_000 }),
   runnerArmor: num({ owner: 'zombies', unit: 'count', doc: 'Runner flat armor.', default: 4, min: 0, max: 1000 }),

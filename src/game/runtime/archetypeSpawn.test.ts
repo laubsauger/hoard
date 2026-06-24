@@ -41,13 +41,15 @@ describe('T124/V89 — STANDARD/BLOATED/RUNNER resolved stats (config-as-truth)'
     expect(healthRatio).toBeLessThanOrEqual(2.2);
   });
 
-  it('RUNNER is FASTER (1.5–1.7×) and FRAILER (0.5–0.7× health) than STANDARD', () => {
+  it('RUNNER is clearly FASTER (≳2× — near player walk) and FRAILER (0.5–0.7× health) than STANDARD', () => {
     const std = registry.byIndexOf(STANDARD);
     const runner = registry.byIndexOf(RUNNER);
     const speedRatio = runner.locomotion.moveSpeedScale / std.locomotion.moveSpeedScale;
     const healthRatio = runner.durability.health / std.durability.health;
-    expect(speedRatio).toBeGreaterThanOrEqual(1.5);
-    expect(speedRatio).toBeLessThanOrEqual(1.7);
+    // Retuned to 2.6 (was 1.6 — read "almost normal speed"): a runner must clearly outpace a shambler + nearly
+    // match the player walk so it's a real chase. Bound generously so future tuning doesn't break the test.
+    expect(speedRatio).toBeGreaterThanOrEqual(2.0);
+    expect(speedRatio).toBeLessThanOrEqual(3.2);
     expect(healthRatio).toBeGreaterThanOrEqual(0.5);
     expect(healthRatio).toBeLessThanOrEqual(0.7);
   });

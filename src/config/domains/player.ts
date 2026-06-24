@@ -37,8 +37,8 @@ export const playerConfig = registerDomain('player', {
   moveSpeedMetersPerSecond: num({
     owner: 'player',
     unit: 'metersPerSecond',
-    doc: 'Player ground movement speed applied to normalized WASD intent each frame.',
-    default: 4.5,
+    doc: 'Player ground movement speed applied to normalized WASD intent each frame. 4.5 read a tad too fast for a normal walk; 3.8 is a brisk walk (sprint/crouch multipliers scale off it).',
+    default: 3.8,
     min: 0.1,
     max: 20,
   }),

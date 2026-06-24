@@ -36,9 +36,9 @@
 // `nearestInteractableHighlight()`; this view only resolves/positions/colours the glow (V1/V2 — never reads
 // world state back). The pure colour + pulse + mesh-resolution helpers are GPU-free so they unit-test headless.
 
-import { AdditiveBlending, BoxGeometry, Color, FrontSide, Mesh, type Object3D, type Scene } from 'three';
+import { AdditiveBlending, BackSide, BoxGeometry, Color, Mesh, type Object3D, type Scene } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { cameraPosition, float, normalLocal, normalWorld, positionLocal, positionWorld, uniform } from 'three/tsl';
+import { normalLocal, positionLocal, uniform } from 'three/tsl';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -182,22 +182,25 @@ export class HighlightView {
     this.settings = settings;
     this.uWidth.value = settings.outlineWidthMeters;
 
-    // The shared FRESNEL RIM material (V81). FrontSide so the camera-facing normals drive the fresnel; a tiny
-    // positionNode inflate (normalLocal*uWidth) lifts the rim a smidge proud of the surface; the colorNode is
-    // EDGE-WEIGHTED — bright only where the normal grazes the view (the silhouette edge), dark facing the camera —
-    // so it reads as a thin OUTLINE, not a filled blob, even with depth off. AdditiveBlending + toneMapped:false
-    // so the rim glows; ALWAYS-ON-TOP (V81): depthTest OFF (never occluded) + depthWrite OFF (never corrupts depth).
+    // The shared INVERTED-HULL OUTLINE material (V97 — replaces the V81 fresnel rim, which face-FILLED on the
+    // BOXY interactables: a fresnel `1-|n·v|` lights every side face of a hard-edged box, not a thin edge). This is
+    // the classic toon/selection outline: render the geometry inflated along its normals (`positionNode`) on the
+    // BACK faces (`side:BackSide`) in a SOLID kind-colour, with DEPTH-TEST ON. The real interactable mesh (drawn
+    // normally, writes depth) then occludes the hull's interior — only the rim that pokes BEYOND the silhouette
+    // survives the depth test → a true OUTLINE ring, never a filled blob regardless of mesh shape. depthTest ON
+    // also makes anything CLOSER (a zombie, the player, the door's own frame) correctly OCCLUDE the outline, so it
+    // no longer draws over dynamic bodies (the "always-on-top looked weird" report). depthWrite OFF so it never
+    // corrupts the depth buffer (V56-safe). AdditiveBlending + toneMapped:false → the ring glows.
     this.shellMaterial = registry.track(
-      new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, depthTest: false, side: FrontSide, blending: AdditiveBlending, toneMapped: false }),
+      new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, depthTest: true, side: BackSide, blending: AdditiveBlending, toneMapped: false }),
       'material',
       'highlight.outline.shell.mat',
     );
+    // Inflate every vertex OUT along its normal by uWidth → the hull sticks `uWidth` past the real silhouette; the
+    // visible BackSide rim is exactly that band (the interior is depth-occluded by the real front faces).
     this.shellMaterial.positionNode = positionLocal.add(normalLocal.mul(this.uWidth));
-    // Fresnel: pow(1 - |dot(normalWorld, viewDir)|, power) — peaks at the grazing silhouette edge, ~0 facing the
-    // camera; abs() so BOTH faces rim cleanly; pow() tightens the edge (rendering.highlightRimFresnelPower).
-    const viewDir = cameraPosition.sub(positionWorld).normalize();
-    const fresnel = float(1).sub(normalWorld.dot(viewDir).abs()).saturate().pow(settings.rimFresnelPower);
-    this.shellMaterial.colorNode = this.uColor.mul(this.uIntensity).mul(fresnel);
+    // SOLID kind-colour × pulse — NO fresnel (that was the box face-fill). The inflated-hull geometry IS the edge.
+    this.shellMaterial.colorNode = this.uColor.mul(this.uIntensity);
 
     // ONE shared unit box reusing the SAME fresnel material (so the corpse/untagged fallback looks like the same
     // glow technique — no per-kind material branching); scaled to the target bounds in update (no alloc, V24).

@@ -27,6 +27,12 @@ import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { Corpse } from '../../game/zombie';
 import { variationHash01, variationTint } from '../crowd/packing';
+import { collapseProgress, collapseEase } from './corpseTopple';
+
+// T131: re-export the (now pure) collapse helpers from their dedicated `corpseTopple` home so the existing
+// `corpse` barrel + callers keep importing them from here. The rigged corpse path uses the impact-directional
+// `corpseTopple` from that module; this blob field stays only as the pre-GLB-load fallback (V95-style no-gap).
+export { collapseProgress, collapseEase } from './corpseTopple';
 
 // Desaturated, decayed-flesh tone — distinct from the live crowd's greenish tint so a body reads as dead.
 const CORPSE_BASE_COLOR = new Color(0x3a3026);
@@ -43,23 +49,6 @@ const CORPSE_TINT_VALUE_SPREAD = 0.16;
 const CORPSE_SCALE_SALT = 0x3333;
 const CORPSE_HUE_SALT = 0x4444;
 const CORPSE_VAL_SALT = 0x5555;
-
-/**
- * Death-collapse progress 0..1 (T122/V87): how far a fresh corpse has toppled from standing → prone, by tick age.
- * 0 = just died (still upright, matching where the live figure stood); 1 = fully settled flat. Pure/deterministic.
- */
-export function collapseProgress(ageTicks: number, collapseTicks: number): number {
-  if (collapseTicks <= 0) return 1;
-  const t = ageTicks / collapseTicks;
-  return t < 0 ? 0 : t > 1 ? 1 : t;
-}
-
-/** Smoothstep ease for the topple — a soft start + soft landing so the fall reads as a controlled collapse, not a
- *  hard slam or a teleport (T122/V87). Pure. */
-export function collapseEase(p: number): number {
-  const x = p < 0 ? 0 : p > 1 ? 1 : p;
-  return x * x * (3 - 2 * x);
-}
 
 // Render part id -> SoA anatomy region for the sever-hide (V17). Torso is never severable → null (always shown).
 const PART_REGION: Readonly<Record<string, AnatomyRegion | null>> = {

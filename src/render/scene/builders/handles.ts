@@ -4,8 +4,9 @@
 // `exactOptionalPropertyTypes` stays satisfied. Mutable fields (opacity, current) are annotated where systems
 // write them.
 
-import type { Object3D, Mesh, Material, MeshStandardMaterial } from 'three';
+import type { Object3D, Mesh, Material } from 'three';
 import type { VecXZ } from '../../world/visibility';
+import type { PlayerAvatar } from '../../player';
 
 /**
  * A roof / upper-wall surface that fades for the cutaway (V20/V58). Tagged with the `buildingIndex` that owns
@@ -71,10 +72,12 @@ export interface OpeningHandles {
   readonly windowMeshes: WindowMesh[];
 }
 
-/** Player avatar handles. `rimMat` drives the accessibility outline glow; `aoContact` follows the player each
- *  frame (both null when disabled by config). */
+/** Player avatar handles (T127). `avatar` owns the rigged SkinnedMesh + animation state machine (its `root`
+ *  Group is positioned/faced each frame by BlockScene; the GLB swaps in async). `aoContact` is the cheap
+ *  grounding disc that follows the player (null when disabled by config). The old capsule rim glow is dropped
+ *  — a rigged mesh does not need the silhouette rim, so the accessibility outline-strength hook no longer
+ *  scales a player material (it still drives every other outline; see V29). */
 export interface PlayerHandles {
-  readonly mesh: Object3D;
-  readonly rimMat: MeshStandardMaterial | null;
+  readonly avatar: PlayerAvatar;
   readonly aoContact: Mesh | null;
 }

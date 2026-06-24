@@ -13,7 +13,7 @@
 //   • bloodView.sim.setBodyAnchors (Bug A) reads the LIVE runtime binding via getRuntime() so a reload
 //     re-targets automatically.
 
-import { Mesh, type BufferGeometry, type Material, type Object3D } from 'three';
+import { Mesh, type Material, type Object3D } from 'three';
 import type { ResourceRegistry } from '../../render/engine';
 import { BloodView, resolveBloodSettings } from '../../render/effects/bloodView';
 import { RaycastSurfaceProjector } from '../../render/effects/surfaceProjector';
@@ -103,15 +103,17 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
     const exclude = new Set<Object3D>();
     scene.crowd.mesh.traverse((o) => exclude.add(o)); // crowd box + its limbed-figure children (T72) are dynamic, not blood surfaces
     gizmosGroup.traverse((o) => exclude.add(o));
+    // T127: EXCLUDE the rigged player avatar by its stable `userData.isPlayerAvatar` tag (the old code keyed on
+    // CapsuleGeometry, which the rigged mesh no longer has → it would be raycast as structure and blood/decals
+    // would project onto the player). The avatar's SkinnedMesh swaps in ASYNC, AFTER this static list is built,
+    // so it is excluded by absence too; the tag check is the robust signal (`hasPlayerAvatarAncestor` below also
+    // skips any tagged descendant, so a synchronous build would still exclude the whole avatar subtree).
     sceneRoot.traverse((o) => {
-      const m = o as Mesh;
-      if (m.isMesh && (m.geometry as BufferGeometry | undefined)?.type === 'CapsuleGeometry') {
-        (m.parent ?? m).traverse((c) => exclude.add(c));
-      }
+      if (o.userData?.isPlayerAvatar) o.traverse((c) => exclude.add(c));
     });
     sceneRoot.traverse((o) => {
       const m = o as Mesh;
-      if (!m.isMesh || exclude.has(o)) return;
+      if (!m.isMesh || exclude.has(o) || hasPlayerAvatarAncestor(o)) return;
       const matName = (m.material as Material | undefined)?.name ?? '';
       if (matName.startsWith('blood.') || matName.startsWith('gib.') || matName.startsWith('impact.') || matName.startsWith('combat.')) return;
       structures.push(o);
@@ -150,4 +152,13 @@ export function createEffectViews(args: CreateEffectViewsArgs): EffectViews {
   corpseField.attachTo(scene.scene);
 
   return { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField, surfaceProjector, firearmRangeMeters };
+}
+
+/** True if `o` or any ancestor is the tagged player avatar (T127) — so its async-attached SkinnedMesh is never
+ *  treated as a static blood/decal projection surface, regardless of when it joined the graph. */
+function hasPlayerAvatarAncestor(o: Object3D): boolean {
+  for (let n: Object3D | null = o; n; n = n.parent) {
+    if (n.userData?.isPlayerAvatar) return true;
+  }
+  return false;
 }

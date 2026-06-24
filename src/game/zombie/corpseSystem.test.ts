@@ -15,6 +15,9 @@ function spawn(over: Partial<CorpseSpawn> = {}): CorpseSpawn {
     archetype: 0,
     severedFlags: 0,
     bornTick: 0,
+    impactDirX: 0,
+    impactDirZ: 0,
+    impactForce: 0,
     ...over,
   };
 }

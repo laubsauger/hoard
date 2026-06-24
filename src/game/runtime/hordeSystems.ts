@@ -64,6 +64,18 @@ export function withinCone(dx: number, dz: number, heading: number, fovHalf: num
   return Math.abs(Math.atan2(Math.sin(diff), Math.cos(diff))) <= fovHalf;
 }
 
+/**
+ * Deterministic per-slot move-speed JITTER factor (T128 follow-up) so members of the SAME archetype don't move
+ * in lockstep. A STABLE multiplicative hash of the slot → [-1,1), scaled by `amt` → ≈[1-amt, 1+amt]. Pure +
+ * replay-stable (V26 — a function of the slot only, no RNG); `amt<=0` → exactly 1 (uniform). A recycled slot
+ * inherits the same factor, which is fine (still deterministic + varied across the crowd).
+ */
+export function slotSpeedJitter(slot: number, amt: number): number {
+  if (amt <= 0) return 1;
+  const h = ((Math.imul(slot + 1, 2654435761) >>> 0) / 4294967296) * 2 - 1;
+  return 1 + amt * h;
+}
+
 /** Planar (XZ) distance from a zombie slot to the player — shared by the horde steps and snapshots. */
 export function planarDistanceToPlayer(
   zombies: SimulationZombies,
@@ -212,6 +224,7 @@ export class HordeSimulation {
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
     const scaleByArch = this.d.moveSpeedScaleByArchetype; // T124/V89: per-archetype speed multiplier (per slot)
+    const jitterAmt = combatCfg.hordeMoveSpeedJitter; // per-slot ± spread so the crowd isn't homogeneous
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
     const pos: [number, number, number] = [0, 0, 0];
@@ -271,7 +284,7 @@ export class HordeSimulation {
         }
       }
       // T124/V89: scale the shared baseline by THIS body's archetype factor (STANDARD 1.0 / RUNNER >1 / BLOATED <1).
-      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale;
+      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale * slotSpeedJitter(slot, jitterAmt);
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);
@@ -379,6 +392,7 @@ export class HordeSimulation {
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
     const scaleByArch = this.d.moveSpeedScaleByArchetype; // T124/V89: per-archetype speed multiplier (per slot)
+    const jitterAmt = combatCfg.hordeMoveSpeedJitter; // per-slot ± spread so the crowd isn't homogeneous
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
     const pos: [number, number, number] = [0, 0, 0];
@@ -450,7 +464,7 @@ export class HordeSimulation {
         }
       }
       // T124/V89: scale the shared baseline by THIS body's archetype factor (STANDARD 1.0 / RUNNER >1 / BLOATED <1).
-      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale;
+      const effSpeed = speed * scaleByArch[zombies.getArchetype(slot)]! * moveScale * slotSpeedJitter(slot, jitterAmt);
       const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
       const neighbors = ids.map((id) => {
         const a = spatial.get(id);
@@ -770,7 +784,7 @@ export class HordeSimulation {
    * (no field can be built to it). Ties break to the lower cell index (deterministic, V12/V26).
    */
   private loudestHeardSoundCell(x: number, z: number, tick: number): number {
-    const { stimulus, scene, perception } = this.d;
+    const { stimulus, scene, sightScene, perception } = this.d;
     const navGrid = scene.navGrid;
     const threshold = perception.alertIntensityThreshold;
     const hits = stimulus.query(x, z, tick);
@@ -778,7 +792,10 @@ export class HordeSimulation {
     let bestIntensity = -1;
     for (const h of hits) {
       if (h.stimulus.kind !== 'sound') continue;
-      const occluded = !hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, x, z);
+      // V98: SOUND occlusion is WINDOW-AWARE — an OPEN window (or doorway) lets the sound through UNMUFFLED, like
+      // a clear LOS, so firing out an open window alerts the zombies outside exactly as opening the door does. A
+      // solid wall / boarded-shut window muffles it (×soundWallOcclusion). Use the same see-through scene sight uses.
+      const occluded = !hasLineOfSight(sightScene, h.stimulus.x, h.stimulus.z, x, z);
       const intensity = occluded ? h.intensity * perception.soundWallOcclusion : h.intensity;
       if (intensity < threshold) continue;
       const c = navGrid.worldToCell(h.stimulus.x, h.stimulus.z);
@@ -801,7 +818,7 @@ export class HordeSimulation {
    * sounds keep the in-plane wall occlusion (V28). All levels share the cell dims, so the XZ cell index is common.
    */
   private loudestHeardSoundGlobal(x: number, z: number, hearerLevel: number, tick: number): number {
-    const { stimulus, scene, perception } = this.d;
+    const { stimulus, sightScene, perception } = this.d;
     const nav = this.nav;
     const threshold = perception.alertIntensityThreshold;
     const floorAtt = perception.soundThroughFloorAttenuation;
@@ -816,7 +833,8 @@ export class HordeSimulation {
       // path; for a cross-floor sound the floor factor models the stairwell bleed.
       let intensity = h.intensity;
       if (floors === 0) {
-        if (!hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, x, z)) intensity *= perception.soundWallOcclusion;
+        // V98: window-aware (open window/door passes sound unmuffled) — same see-through scene sight uses.
+        if (!hasLineOfSight(sightScene, h.stimulus.x, h.stimulus.z, x, z)) intensity *= perception.soundWallOcclusion;
       } else {
         intensity *= Math.pow(floorAtt, floors);
       }

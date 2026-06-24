@@ -90,7 +90,7 @@ describe('LightingSystem', () => {
     expect(night.currentExposure).toBeGreaterThan(day.currentExposure);
   });
 
-  it('T125: a timeOfDay override drives the lighting instead of the sim clock (render-side phase override)', () => {
+  it('T126: a timeOfDay override drives the lighting instead of the sim clock (render-side phase override)', () => {
     const sys = new LightingSystem(makeHandles(), CFG);
     // Sim clock says noon, but override to midnight — the result must report midnight and read as a darker (higher
     // exposure) night scene, proving the lighting used the override, not runtime.timeOfDay().

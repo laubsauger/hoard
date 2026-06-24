@@ -263,6 +263,36 @@ body,
   opacity: 0.6;
 }
 
+/* T127 — rebind-aware hotkeys legend (includes the push-up emote key). */
+.hbn-controls__keys {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.hbn-controls__keys li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.hbn-controls__keys kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #e8edf2;
+  white-space: nowrap;
+}
+
 /* T124 — dev time-of-day group: a checkbox row + a full-width scrub slider. */
 .hbn-controls__check {
   flex-direction: row;

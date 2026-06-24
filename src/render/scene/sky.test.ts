@@ -39,7 +39,7 @@ describe('computeSkyState (T38 day/night)', () => {
   });
 });
 
-describe('day phase + clock readout (T125)', () => {
+describe('day phase + clock readout (T126)', () => {
   it('labels noon as Day, midnight as Night, and the horizon crossings as Dawn/Dusk', () => {
     expect(dayPhaseOf(0.5)).toBe('day'); // noon
     expect(dayPhaseOf(0.0)).toBe('night'); // midnight

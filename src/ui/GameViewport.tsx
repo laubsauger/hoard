@@ -8,6 +8,7 @@
 // so a missing adapter reports cleanly and never crashes React.
 
 import { useEffect, useRef } from 'react';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import {
   RendererHost,
   detectQualityTier,
@@ -133,6 +134,41 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         registry: host.resources,
         accessibility: access,
       });
+
+      // T127: load the RIGGED player GLB ONCE, in the BACKGROUND. The scene built synchronously with an empty
+      // avatar root, so the first frame never blocks on this ~7 MB asset; the SkinnedMesh + AnimationMixer swap
+      // in when it resolves (cancellation-guarded). Every GLB GPU resource is tracked in the host registry for
+      // disposal (V24). A failed load is reported (not silently swallowed) and leaves the avatar root empty.
+      void new GLTFLoader()
+        .loadAsync('/meshes/ranger.glb')
+        .then((gltf) => {
+          if (cancelled || !scene) return;
+          scene.attachPlayerAvatar(gltf);
+        })
+        .catch((err) => {
+          console.error('[player] failed to load /meshes/ranger.glb — avatar will not render', err);
+        });
+
+      // T128: load the three RIGGED zombie archetype GLBs in the BACKGROUND, in parallel, then bake each into a
+      // bone-matrix animation texture + GPU-skinned InstancedMesh (BlockScene.attachZombieMesh). The crowd's near
+      // band runs as the procedural limbed figures until ALL three attach, then switches to rigged (no gap). Each
+      // load is cancellation-guarded; a failure is logged (the limbed fallback keeps drawing). GPU resources are
+      // tracked for disposal (V24).
+      for (const [key, url] of [
+        ['standard', '/meshes/zombie-standard.glb'],
+        ['runner', '/meshes/zombie-runner.glb'],
+        ['bloated', '/meshes/zombie-bloated.glb'],
+      ] as const) {
+        void new GLTFLoader()
+          .loadAsync(url)
+          .then((gltf) => {
+            if (cancelled || !scene) return;
+            scene.attachZombieMesh(key, gltf);
+          })
+          .catch((err) => {
+            console.error(`[crowd] failed to load ${url} — rigged ${key} zombies will not render`, err);
+          });
+      }
 
       // Procedural WebAudio OUTPUT layer (NEW audio-out lane). Synthesized — no asset files. Created here
       // but SILENT until a user gesture resumes its AudioContext (autoplay policy, wired in onClick/onKeyDown

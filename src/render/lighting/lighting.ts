@@ -150,7 +150,7 @@ export function interiorExposure(t: number, tier: QualityTier): number {
 }
 
 /**
- * Interior exposure compensation in stops, ATTENUATED BY DAYLIGHT (B44/V91). The raw interior boost
+ * Interior exposure compensation in stops, ATTENUATED BY DAYLIGHT (B44/V92). The raw interior boost
  * (`interiorExposure`) assumes a first-person-style dark cave; but the x-ray cutaway view keeps the roof
  * shadowing the interior yet lets the camera see in, so a DAYLIT interior is only marginally dimmer than
  * the sunlit street. A flat boost therefore over-brightened interiors and made stepping OUTSIDE read much

@@ -61,7 +61,7 @@ import { timeConfig } from '@/config/domains/time';
 import { audioConfig } from '@/config/domains/audio';
 import { weatherConfig, weatherSeverity, type WeatherProfile } from '@/config/domains/weather';
 import type { QualityTier } from '@/config/types';
-import { CombatSystem, type ShotResult } from '@/game/combat';
+import { CombatSystem, type ShotResult, type DeathImpact } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
@@ -293,6 +293,9 @@ export class GameRuntime {
   /** V86: true while the player holds the sneak/crouch stance (lowers eye height + move speed). Set each frame
    *  from input by `setCrouch` so the eye height is correct even when standing still (not only while moving). */
   private playerCrouching = false;
+  /** T127: sim tick of the player's most recent damage hit (-1 = never). The render lane compares it
+   *  frame-over-frame to fire the avatar's one-shot hit reaction — written by `damagePlayer`, read-only out (V2). */
+  private lastPlayerHitTick = -1;
   /** V87: the window see-through VERTICAL band (world m) — sight passes through a window only when the eye is
    *  within [sill, sill+opening]. A crouched player whose eye drops BELOW the sill is hidden through the window
    *  (and cannot see out of it). Computed once from the wall height × the structures sill/height fractions. */
@@ -495,7 +498,7 @@ export class GameRuntime {
       worldEvents: this.worldEvents,
       visualEvents: this.visualEvents,
       onDamaged: (slot) => this.lastDamageTick.set(slot, this.clock.tick),
-      onEntityDied: (slot) => this.killZombie(slot),
+      onEntityDied: (slot, impact) => this.killZombie(slot, impact),
       // V53/B20: a shot stops at the first projectile-blocking structure cell — never passes through walls.
       firstProjectileBlockerDistance: (origin, dirX, dirZ, range) =>
         this.firstProjectileBlockerDistance(origin, dirX, dirZ, range),
@@ -789,6 +792,18 @@ export class GameRuntime {
    */
   setCrouch(crouching: boolean): void {
     this.playerCrouching = crouching;
+  }
+
+  /** V86: true while the player holds the crouch/sneak stance (read-only — the render lane reads it to drive the
+   *  avatar's crouch-walk/idle animation; additive to the existing `setCrouch`/`playerEyeHeight`). */
+  isCrouching(): boolean {
+    return this.playerCrouching;
+  }
+
+  /** T127: sim tick of the player's most recent damage hit (-1 if never). The render lane compares it
+   *  frame-over-frame to trigger the avatar's one-shot hit reaction — a pure read, never mutates the sim (V2). */
+  playerLastDamageTick(): number {
+    return this.lastPlayerHitTick;
   }
 
   /** V86: the player's CURRENT eye height (m) — crouched or standing. The dynamic see-over threshold (`sightScene`):
@@ -1345,6 +1360,7 @@ export class GameRuntime {
    */
   private damagePlayer(_slot: ZombieSlot, damageFraction: number): void {
     if (this.isPlayerDead()) return;
+    this.lastPlayerHitTick = this.clock.tick; // T127: a fresh hit signal the render lane edge-detects (avatar flinch)
     this.playerSurvival.damage(damageFraction);
     if (this.isPlayerDead()) this.onPlayerDied();
   }
@@ -1849,7 +1865,7 @@ export class GameRuntime {
    * (the corpse is cheap state, not an active sim entity). The slot data is still live here: combat writes
    * health/anatomyFlags then calls onEntityDied before any free, so every field reads correctly.
    */
-  private killZombie(slot: ZombieSlot): void {
+  private killZombie(slot: ZombieSlot, impact?: DeathImpact): void {
     const entity = this.slotToEntity.get(slot);
     if (entity !== undefined) {
       const pos: [number, number, number] = [0, 0, 0];
@@ -1863,6 +1879,11 @@ export class GameRuntime {
         archetype: this.zombies.getArchetype(slot),
         severedFlags: this.zombies.getAnatomyFlags(slot),
         bornTick: this.absTick(),
+        // T131/V99: the killing shot's vector → the corpse topples in the push direction. A non-combat death
+        // (lifetime expiry) supplies no impact → (0,0,0), i.e. a default heading collapse (the prior behaviour).
+        impactDirX: impact?.dirX ?? 0,
+        impactDirZ: impact?.dirZ ?? 0,
+        impactForce: impact?.force ?? 0,
       });
     }
     this.despawn(slot);

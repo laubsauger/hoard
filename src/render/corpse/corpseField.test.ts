@@ -22,7 +22,7 @@ function settings(capacity: number) {
 }
 
 function corpse(over: Partial<Corpse> = {}): Corpse {
-  return { entity: 1, x: 0, y: 0, z: 0, heading: 0, archetype: 0, severedFlags: 0, bornTick: 0, ...over };
+  return { entity: 1, x: 0, y: 0, z: 0, heading: 0, archetype: 0, severedFlags: 0, bornTick: 0, impactDirX: 0, impactDirZ: 0, impactForce: 0, ...over };
 }
 
 describe('CorpseField (T55) — toppled limbed bodies', () => {

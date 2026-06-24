@@ -12,6 +12,23 @@ export {
   type PackResult,
 } from './packing';
 export { Crowd, CrowdLimbs, resolveCrowdSettings, type CrowdSettings } from './crowd';
+export { RiggedCrowd, type TrackFn } from './rigged';
+export {
+  ARCHETYPE_KEYS,
+  CLIP_MAPS,
+  archetypeKeyForIndex,
+  bakeClipNames,
+  clipForState,
+  buildClipTable,
+  phaseToFrameRow,
+  clipPhaseRateHz,
+  advancePhase,
+  type ArchetypeKey,
+  type ClipStateMap,
+  type ClipTable,
+  type ClipTableEntry,
+  type ClipFrameSpec,
+} from './riggedAnim';
 export { visionCullFade, type VisionCull } from './visionCull';
 export { instantaneousReveal, PerceptionMemory, type RevealParams } from './perceptionMemory';
 export {

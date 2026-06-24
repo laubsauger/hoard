@@ -68,6 +68,9 @@ export function registerInput(args: RegisterInputArgs): () => void {
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
     // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
     if (e.code === 'KeyL') debugViewStore.getState().toggleFlag('flashlight');
+    // T127: the rebindable emote key (default G) fires a one-shot push-up on the player avatar. Ignore the
+    // OS key auto-repeat so holding it never re-triggers the emote every frame.
+    if (e.code === b.emote && !e.repeat) scene.triggerPlayerEmote();
   };
   const onKeyUp = (e: KeyboardEvent): void => {
     keys.delete(e.code);

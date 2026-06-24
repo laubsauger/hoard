@@ -1,9 +1,9 @@
-// T125 — time-of-day VIEW + dev-override store. Primitive fields, range-validated, no per-frame coupling.
+// T126 — time-of-day VIEW + dev-override store. Primitive fields, range-validated, no per-frame coupling.
 
 import { describe, it, expect } from 'vitest';
 import { createTimeOfDayStore } from './timeOfDay';
 
-describe('timeOfDayStore (T125)', () => {
+describe('timeOfDayStore (T126)', () => {
   it('starts not-overridden and accepts engine-pushed current time', () => {
     const s = createTimeOfDayStore();
     expect(s.getState().overrideEnabled).toBe(false);

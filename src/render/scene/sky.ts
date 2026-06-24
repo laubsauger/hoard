@@ -70,7 +70,7 @@ export function computeSkyState(
   return { direction, keyIntensity, ambientIntensity, isDay, elevation01 };
 }
 
-/** Coarse day/night phase label for the HUD readout + dev controls (T125). */
+/** Coarse day/night phase label for the HUD readout + dev controls (T126). */
 export type DayPhase = 'dawn' | 'day' | 'dusk' | 'night';
 
 /**
@@ -87,7 +87,7 @@ export function dayPhaseOf(timeOfDay: number): DayPhase {
   return sunSin > 0 ? 'day' : 'night';
 }
 
-/** Format a 0..1 day fraction as a 24-hour HH:MM clock (t=0 → 00:00, t=0.5 → 12:00). Pure, for the HUD (T125). */
+/** Format a 0..1 day fraction as a 24-hour HH:MM clock (t=0 → 00:00, t=0.5 → 12:00). Pure, for the HUD (T126). */
 export function formatTimeOfDay(timeOfDay: number): string {
   if (timeOfDay < 0 || timeOfDay > 1) throw new Error(`timeOfDay must be in [0,1], got ${timeOfDay}`);
   const totalMinutes = Math.floor(timeOfDay * 1440) % 1440; // 1440 minutes per day

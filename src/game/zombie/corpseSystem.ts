@@ -27,6 +27,15 @@ export interface CorpseSpawn {
   readonly severedFlags: number;
   /** Absolute tick the zombie died (drives lifetime expiry; survives reload via the runtime tick offset). */
   readonly bornTick: number;
+  // T131/V99 — KINETIC IMPACT of the killing blow (additive, deterministic V26). The render lane topples the
+  // body in this push direction (front shot → onto its back); a force-less death (melee / expiry) is (0,0,0) →
+  // a default heading collapse. `impactDir{X,Z}` is the normalized attack travel direction; 0-length when none.
+  /** Normalized X of the killing shot's travel direction (0 for a force-less death). */
+  readonly impactDirX: number;
+  /** Normalized Z of the killing shot's travel direction (0 for a force-less death). */
+  readonly impactDirZ: number;
+  /** Effective damage of the lethal hit — scales how hard / fast the body tumbles (0 = no impact). */
+  readonly impactForce: number;
 }
 
 /** A live corpse record. Mutated in place (pooled) — treat as read-only when consumed by the render lane. */
@@ -39,6 +48,10 @@ export interface Corpse {
   archetype: number;
   severedFlags: number;
   bornTick: number;
+  /** T131/V99 — killing-blow impact: normalized push direction (X,Z) + effective force (0 = force-less death). */
+  impactDirX: number;
+  impactDirZ: number;
+  impactForce: number;
 }
 
 export interface CorpseSettings {
@@ -53,7 +66,7 @@ export function resolveCorpseSettings(tier: QualityTier = REFERENCE_TIER): Corps
 }
 
 function blankCorpse(): Corpse {
-  return { entity: -1, x: 0, y: 0, z: 0, heading: 0, archetype: 0, severedFlags: 0, bornTick: 0 };
+  return { entity: -1, x: 0, y: 0, z: 0, heading: 0, archetype: 0, severedFlags: 0, bornTick: 0, impactDirX: 0, impactDirZ: 0, impactForce: 0 };
 }
 
 /**
@@ -113,6 +126,9 @@ export class CorpseSystem {
     rec.archetype = s.archetype;
     rec.severedFlags = s.severedFlags;
     rec.bornTick = s.bornTick;
+    rec.impactDirX = s.impactDirX;
+    rec.impactDirZ = s.impactDirZ;
+    rec.impactForce = s.impactForce;
     this.live.push(rec);
     return rec;
   }
@@ -156,6 +172,11 @@ export class CorpseSystem {
         archetype: r.archetype ?? 0,
         severedFlags: r.severedFlags ?? 0,
         bornTick: r.atTick,
+        // T131/V99: the impact vector is NOT persisted — a restored body is already long-settled (age ≫ collapse),
+        // so it reads fully prone via the default heading collapse (force 0). No invented motion on reload (V4).
+        impactDirX: 0,
+        impactDirZ: 0,
+        impactForce: 0,
       });
     }
   }

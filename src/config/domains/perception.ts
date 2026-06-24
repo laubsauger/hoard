@@ -140,8 +140,8 @@ export const perceptionConfig = registerDomain('perception', {
   soundWallOcclusion: num({
     owner: 'perception',
     unit: 'ratio',
-    doc: 'Intensity multiplier for a sound whose path to the horde is blocked by structure (V28).',
-    default: 0.3,
+    doc: 'Intensity multiplier for a sound whose path to the horde is blocked by structure (V28). 0.45 (was 0.3): a GUNSHOT is loud — it must carry through the walls of a CLOSED house to alert the zombies OUTSIDE (you should not have to step out the door to trigger them); a quiet footstep is far lower intensity (+ crouch cuts its emission), so it still stays muffled. Open/glassed windows pass sound UNMUFFLED via the window-aware sightScene (V98) — this factor is only the SOLID-wall case.',
+    default: 0.45,
     min: 0,
     max: 1,
   }),

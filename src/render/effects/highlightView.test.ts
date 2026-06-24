@@ -2,7 +2,7 @@
 // steady glow when reduce-flashes / reduce-motion is set, and the GENERIC nav-cell mesh resolution the
 // silhouette-GLOW outline uses (no per-kind conditionals). GPU-free (no renderer).
 import { describe, it, expect } from 'vitest';
-import { AdditiveBlending, FrontSide, Group, Mesh, Scene } from 'three';
+import { AdditiveBlending, BackSide, Group, Mesh, Scene } from 'three';
 import {
   resolveHighlightSettings,
   highlightColorFor,
@@ -120,12 +120,12 @@ describe('HighlightView FRESNEL RIM-GLOW + always-on-top depth policy (T115/V81)
     const shells = src.children.filter((c) => (c as Mesh).isMesh) as Mesh[];
     expect(shells).toHaveLength(1);
     const m = shells[0]!.material as unknown as RimMat;
-    expect(m.depthTest).toBe(false); // ALWAYS-ON-TOP (V81) — never occluded by walls/frames
+    expect(m.depthTest).toBe(true); // V97 — DEPTH-TESTED inverted-hull: closer bodies (zombies/player/frame) occlude the ring
     expect(m.depthWrite).toBe(false); // never writes depth over the scene
-    expect(m.side).toBe(FrontSide); // fresnel needs front-facing normals (NOT BackSide inverted-hull)
+    expect(m.side).toBe(BackSide); // inverted-hull outline: the inflated BACK faces form the silhouette ring
     expect(m.blending).toBe(AdditiveBlending);
     expect(m.toneMapped).toBe(false);
-    expect(m.colorNode).toBeTruthy(); // edge-weighted (fresnel) colour → an OUTLINE, not a filled blob
+    expect(m.colorNode).toBeTruthy(); // solid kind-colour × pulse (the inflated hull IS the edge — no fresnel face-fill)
     expect(shells[0]!.renderOrder).toBeGreaterThan(20); // composited last (above gameplay overlays)
     expect(shells[0]!.visible).toBe(true);
 
@@ -154,9 +154,9 @@ describe('HighlightView FRESNEL RIM-GLOW + always-on-top depth policy (T115/V81)
     expect(box.visible).toBe(true);
     expect(box.material).toBe(shellMat); // SAME instance → the box reads as the same fresnel glow
     const m = box.material as unknown as RimMat;
-    expect(m.depthTest).toBe(false);
+    expect(m.depthTest).toBe(true);
     expect(m.depthWrite).toBe(false);
-    expect(m.side).toBe(FrontSide);
+    expect(m.side).toBe(BackSide);
     expect(m.colorNode).toBeTruthy();
   });
 });

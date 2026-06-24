@@ -15,6 +15,7 @@ export {
   type ShotOrigin,
   type ShotResult,
   type AmmoStatus,
+  type DeathImpact,
 } from './hitPath';
 export {
   buildWeaponRegistry,

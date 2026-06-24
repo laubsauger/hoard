@@ -26,6 +26,7 @@ export type InputAction =
   | 'attack'
   | 'reload'
   | 'inventory'
+  | 'emote'
   | 'pause';
 
 export type Bindings = Readonly<Record<InputAction, string>>;
@@ -46,6 +47,7 @@ export const INPUT_ACTIONS: readonly InputAction[] = [
   'interact',
   'reload',
   'inventory',
+  'emote',
   'pause',
 ];
 
@@ -65,6 +67,7 @@ export const INPUT_ACTION_LABELS: Readonly<Record<InputAction, string>> = {
   interact: 'Interact',
   reload: 'Reload',
   inventory: 'Inventory',
+  emote: 'Emote (push-up)',
   pause: 'Pause',
 };
 
@@ -98,6 +101,7 @@ const DEFAULT_BINDINGS: Bindings = {
   attack: 'Mouse0',
   reload: 'KeyR',
   inventory: 'Tab',
+  emote: 'KeyG', // T127: the "emote key" — fires the one-shot push-up; a single emote for now, can grow later
   pause: 'Escape',
 };
 
@@ -130,7 +134,9 @@ export function createInputStore(tier: QualityTier = 'desktop-high') {
         }),
         {
           name: `${PERSIST_PREFIX}:input`,
-          version: 2,
+          // v3 (T127): added the `emote` binding — the migrate below backfills it from DEFAULT_BINDINGS so a
+          // persisted v2 keymap resolves `emote` to its default instead of leaving it undefined.
+          version: 3,
           storage: persistStorage(),
           // V29: backfill any binding missing from older persisted state (e.g. the added `sprint` key) from
           // the defaults so every logical action always resolves to a physical key (no undefined binding).
