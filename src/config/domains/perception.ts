@@ -107,6 +107,35 @@ export const perceptionConfig = registerDomain('perception', {
     min: 0,
     max: 90,
   }),
+  /**
+   * Eye height (m) for SIGHT line-of-sight (V85). A standing observer sees OVER any solid obstacle SHORTER than
+   * this — a waist-high picket fence (≈1 m) does not block vision, while a car / wall / tree (≥ eye height) does.
+   * Governs the see-over sight gap only; movement + projectile occlusion are height-independent (nav-grid solid).
+   * Matches the player aim-origin height (player.aimOriginHeight) so what you can SEE lines up with where you AIM.
+   */
+  eyeHeightMeters: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'STANDING observer eye height (m): SIGHT passes OVER solid obstacles shorter than this (low fences); taller ones occlude (V85).',
+    default: 1.6,
+    min: 0.3,
+    max: 3,
+  }),
+  /**
+   * CROUCHED player eye height (m) — V86. While crouching (the sneak stance) the player's eye drops to this, so
+   * (a) the player sees over LESS (a waist-high fence now blocks their own view) and (b) symmetrically the player
+   * is HIDDEN behind any obstacle taller than this — a zombie cannot see a crouched player over a ~1 m fence or
+   * below a window sill. The SAME dynamic height threshold gates both directions (every sightScene query is
+   * player-referenced). Must be below `eyeHeightMeters`.
+   */
+  crouchEyeHeightMeters: num({
+    owner: 'perception',
+    unit: 'meters',
+    doc: 'Crouched player eye height (m) — lower than standing so the player sees over less AND is hidden behind low cover (V86).',
+    default: 0.9,
+    min: 0.2,
+    max: 2,
+  }),
   /** Sound reaching the horde through a wall is multiplied by this (V28 occlusion). 1 = no muffle. */
   soundWallOcclusion: num({
     owner: 'perception',

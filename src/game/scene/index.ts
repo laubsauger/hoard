@@ -45,6 +45,14 @@ export {
   furnitureBlockedCells,
   setFurnitureSolid,
 } from './furnitureSolidity';
+export {
+  PROP_SOLIDITY,
+  propBlockedCells,
+  setPropSolid,
+  propOccludesSight,
+  propSeeOverCells,
+  type PropSolidity,
+} from './propSolidity';
 export { buildCityBlock, CITY_BLOCK_WORLD_VERSION, REGION_STREET } from './cityBlock';
 export { buildCityDistrict, CITY_DISTRICT_WORLD_VERSION, type CityDistrict } from './cityDistrict';
 export {

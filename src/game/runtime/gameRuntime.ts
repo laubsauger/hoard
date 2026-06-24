@@ -70,6 +70,8 @@ import {
   gridWalkableRadius,
   lootableContainerCells,
   rayDistanceToWall,
+  PROP_SOLIDITY,
+  propBlockedCells,
   DoorSystem,
   WindowSystem,
   windowPlacements,
@@ -273,6 +275,9 @@ export class GameRuntime {
    * (which must shatter the pane first). Built once (no per-call alloc).
    */
   readonly sightScene: LosScene;
+  /** V85: nav cells occupied ONLY by a solid SUB-EYE-HEIGHT prop (a waist-high fence) — SIGHT passes OVER them
+   *  (you see over a low fence) while nav + projectiles still stop there. Consumed by `sightScene` only. */
+  private readonly seeOverCells = new Set<number>();
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
   /** Resolved world config — here only for the authored wall height (glass-shatter burst origin, T108). */
@@ -326,14 +331,47 @@ export class GameRuntime {
       navGrid: this.scene.navGrid,
       isWindowOpening: (cx, cy) => this.isWindowOpening(cx, cy),
     };
-    // V84: the SEE-THROUGH scene — sight + light pass through GLASSED windows (glass is transparent), only a
-    // boarded-shut (2-board) window occludes. Player vision, zombie sight + the flashlight clamp use this; the
-    // `isWindowOpening` field name is the generic LosScene "ray passes" predicate, here the see-through one.
-    this.sightScene = {
-      isWalkableWorld: (x, z) => this.scene.isWalkableWorld(x, z),
-      navGrid: this.scene.navGrid,
-      isWindowOpening: (cx, cy) => this.isWindowSeeThrough(cx, cy),
-    };
+    // V85: SEE-OVER cells — cells a solid but SUB-EYE-HEIGHT prop (a waist-high fence) occupies. Built ONCE from
+    // the scene props + the SAME `fenceMissingChance` the scene-gen used (so the see-over cells match the visible
+    // + nav-blocking pickets), MINUS any cell a TALL prop also occupies (a fence touching a car still blocks
+    // sight). SIGHT passes over these; nav + projectiles (losScene) still stop at them.
+    {
+      const eyeH = this.perception.eyeHeightMeters;
+      const fenceMiss = this.worldCfg.fenceMissingChance;
+      const grid = this.scene.navGrid;
+      const inBounds = (cx: number, cy: number): boolean => cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
+      const tall = new Set<number>();
+      for (const prop of this.scene.props ?? []) {
+        if (!propOccludesSight(prop.kind, eyeH)) continue;
+        for (const c of propBlockedCells(prop, fenceMiss)) if (inBounds(c.cx, c.cy)) tall.add(grid.index(c.cx, c.cy));
+      }
+      for (const prop of this.scene.props ?? []) {
+        for (const c of propSeeOverCells(prop, eyeH, fenceMiss)) {
+          if (!inBounds(c.cx, c.cy)) continue;
+          const idx = grid.index(c.cx, c.cy);
+          if (!tall.has(idx)) this.seeOverCells.add(idx);
+        }
+      }
+    }
+    // V84/V85: the SEE-THROUGH + SEE-OVER scene — sight + light pass through GLASSED windows (glass is transparent;
+    // only a boarded-shut 2-board window occludes) AND OVER sub-eye-height obstacles (a low fence). Player vision,
+    // zombie sight + the flashlight clamp use this. The `isWindowOpening` field is the generic LosScene "ray
+    // passes" predicate (here the see-through one); the see-over low obstacles ride on `isWalkableWorld`.
+    {
+      const grid = this.scene.navGrid;
+      const cs = grid.settings.navCellSize;
+      this.sightScene = {
+        isWalkableWorld: (x, z) => {
+          if (this.scene.isWalkableWorld(x, z)) return true; // genuinely open ground
+          const cx = Math.floor(x / cs);
+          const cy = Math.floor(z / cs);
+          if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+          return this.seeOverCells.has(grid.index(cx, cy)); // blocked only by a low fence → sight passes OVER
+        },
+        navGrid: grid,
+        isWindowOpening: (cx, cy) => this.isWindowSeeThrough(cx, cy),
+      };
+    }
 
     const time = resolveDomain(timeConfig, this.tier);
     this.clock = new FixedClock({
@@ -822,7 +860,14 @@ export class GameRuntime {
    * does NOT block the ray, a 2-board/closed cell DOES. Player-vision + zombie-sight become window-aware by
    * passing `runtime.losScene` (or this predicate on their scene) into those same primitives — no parallel path.
    */
-  isWindowOpening(cx: number, cy: number): boolean {
+  isWindowOpening(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
+    // EDGE query (thin-wall house): a window on the seam between (cx,cy) and (ncx,ncy) is what a crossed edge
+    // consults — resolve it per-edge so a window edge is distinguished from a solid wall edge on the same cell.
+    if (ncx !== undefined && ncy !== undefined) {
+      const e = this.windowSystem.edgeCellOf(cx, cy, ncx, ncy);
+      if (e >= 0) return this.windowSystem.isOpening(e);
+    }
+    // CELL query (legacy cell-window): the window IS the blocked cell (cx,cy).
     const nav = this.windowSystem.cellOf(cx, cy);
     return nav >= 0 && this.windowSystem.isOpening(nav);
   }
@@ -835,7 +880,11 @@ export class GameRuntime {
    * `sightScene.isWindowOpening` is built from — what player vision (cone + fog), zombie sight, and the
    * flashlight clamp consult, so they see/light THROUGH glassed windows but are blocked by a boarded-shut one.
    */
-  isWindowSeeThrough(cx: number, cy: number): boolean {
+  isWindowSeeThrough(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
+    if (ncx !== undefined && ncy !== undefined) {
+      const e = this.windowSystem.edgeCellOf(cx, cy, ncx, ncy);
+      if (e >= 0) return this.windowSystem.isSeeThrough(e);
+    }
     const nav = this.windowSystem.cellOf(cx, cy);
     return nav >= 0 && this.windowSystem.isSeeThrough(nav);
   }
@@ -901,18 +950,35 @@ export class GameRuntime {
     const cs = grid.settings.navCellSize;
     const wcx = near.window.cx;
     const wcy = near.window.cy;
-    const blocked = (cx: number, cy: number): boolean =>
-      cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height ? true : grid.isBlocked(grid.index(cx, cy));
-    // Wall normal: a window whose ±X neighbours are BOTH walls sits in an X-running wall → cross along Z.
-    const alongX = blocked(wcx - 1, wcy) && blocked(wcx + 1, wcy);
     let dcx = wcx;
     let dcy = wcy;
-    if (alongX) {
-      const side = Math.sign(this.playerPos.z - (wcy + 0.5) * cs) || 1; // which side of the wall the player is on
-      dcy = wcy - side; // land on the OPPOSITE side of the window
+    if (near.window.dir) {
+      // EDGE-window (thin-wall house): the window sits on the seam between its INNER room cell (wcx,wcy) and
+      // the OUTER cell one step in `dir`. Land on whichever of the two the player is NOT in (climb out or in).
+      const od = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0] }[near.window.dir] as [number, number];
+      const ocx = wcx + od[0];
+      const ocy = wcy + od[1];
+      const pcx = Math.floor(this.playerPos.x / cs);
+      const pcy = Math.floor(this.playerPos.z / cs);
+      if (pcx === ocx && pcy === ocy) {
+        dcx = wcx;
+        dcy = wcy; // player is outside → climb IN to the room cell
+      } else {
+        dcx = ocx;
+        dcy = ocy; // player is inside (or beside) → climb OUT across the edge
+      }
     } else {
-      const side = Math.sign(this.playerPos.x - (wcx + 0.5) * cs) || 1;
-      dcx = wcx - side;
+      // CELL-window (legacy): the window IS a blocked wall cell; its normal is read from the blocked neighbours.
+      const blocked = (cx: number, cy: number): boolean =>
+        cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height ? true : grid.isBlocked(grid.index(cx, cy));
+      const alongX = blocked(wcx - 1, wcy) && blocked(wcx + 1, wcy);
+      if (alongX) {
+        const side = Math.sign(this.playerPos.z - (wcy + 0.5) * cs) || 1; // which side of the wall the player is on
+        dcy = wcy - side; // land on the OPPOSITE side of the window
+      } else {
+        const side = Math.sign(this.playerPos.x - (wcx + 0.5) * cs) || 1;
+        dcx = wcx - side;
+      }
     }
     const fx = (dcx + 0.5) * cs;
     const fz = (dcy + 0.5) * cs;
@@ -1294,37 +1360,65 @@ export class GameRuntime {
    * panel. A breach or open door clears its nav cell (V5 — openBreachedNav), so it does NOT block. This
    * is the single source of truth shared with line-of-sight (the renderer never decides occlusion).
    */
+  /**
+   * Resolve a shot crossing the window at `navCell`: true ⇒ the round passes (an OPENING, glassless/smashed
+   * <2 boards; or it just SHATTERED an intact unboarded pane on the way through), false ⇒ the round stops
+   * (boarded/closed window, a pane that absorbed the hit but held with HP>1, or `navCell < 0` = not a window,
+   * i.e. a solid wall). Shared by the cell-window (blocked-cell) path and the EDGE-window (thin-wall) path so
+   * both apply the identical glass HP / shatter logic.
+   */
+  private shotCrossesWindow(navCell: number, wx: number, wz: number, dirX: number, dirZ: number): boolean {
+    if (navCell < 0) return false; // not a window — the wall stops the round
+    if (this.windowSystem.isOpening(navCell)) return true; // smashed/glassless hole — flies through
+    if (this.windowSystem.glassOf(navCell) === 'intact' && (this.windowSystem.boardsOf(navCell) ?? 0) === 0) {
+      if (this.windowSystem.applyGlassHit(navCell)) {
+        this.emitGlassShatter(navCell, wx + dirX, wz + dirZ); // shards spray along the bullet's travel
+        return true; // shattered → shot continues past the opening
+      }
+      return false; // pane absorbed the hit but did not break (HP > 1) — round stops at the glass
+    }
+    return false; // a boarded / closed window blocks the round
+  }
+
   private firstProjectileBlockerDistance(
     origin: Readonly<Vec3>,
     dirX: number,
     dirZ: number,
     range: number,
   ): number | null {
-    const cellSize = this.scene.navGrid.settings.navCellSize;
+    const grid = this.scene.navGrid;
+    const cellSize = grid.settings.navCellSize;
     const step = cellSize * this.combatCfg.projectileOcclusionStepRatio; // <= cell size, config-driven (V4)
     const steps = Math.max(1, Math.ceil(range / step));
+    const inB = (cx: number, cy: number): boolean => cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
+    let pcx = Math.floor(origin.x / cellSize);
+    let pcy = Math.floor(origin.z / cellSize);
     for (let i = 1; i <= steps; i++) {
       const d = Math.min(i * step, range);
       const wx = origin.x + dirX * d;
       const wz = origin.z + dirZ * d;
-      if (!this.scene.isWalkableWorld(wx, wz)) {
-        // T108: a window cell is always a blocked WALL cell in the nav grid (§G — windows are not walk-through
-        // openings), so the occlusion query resolves window pass-through HERE. An OPENING (glassless/smashed,
-        // unboarded) lets the round pass; an intact pane SHATTERS when the round crosses it (then passes, or
-        // stops at the glass if the pane still has HP); boards + real walls block.
-        const { cx, cy } = this.scene.navGrid.worldToCell(wx, wz);
-        const navCell = this.windowSystem.cellOf(cx, cy);
-        if (navCell >= 0) {
-          if (this.windowSystem.isOpening(navCell)) continue; // smashed/glassless hole — shot flies through
-          if (this.windowSystem.glassOf(navCell) === 'intact' && (this.windowSystem.boardsOf(navCell) ?? 0) === 0) {
-            if (this.windowSystem.applyGlassHit(navCell)) {
-              this.emitGlassShatter(navCell, wx + dirX, wz + dirZ); // shards spray along the bullet's travel
-              continue; // shattered → shot continues past the opening
-            }
-            return d; // pane absorbed the hit but did not break (HP > 1) — round stops at the glass
+      const cx = Math.floor(wx / cellSize);
+      const cy = Math.floor(wz / cellSize);
+      // (A) thin EDGE-wall crossing (exterior + interior partitions, and EDGE-windows): a round stops at any
+      // walled cell edge it crosses — unless an open/just-shattered EDGE-window on that seam lets it through.
+      // Cells stay walkable here, so this is occlusion the blocked-cell test (B) cannot express (thin-wall house).
+      if (cx !== pcx || cy !== pcy) {
+        if (inB(pcx, pcy) && inB(cx, cy)) {
+          const sx = Math.sign(cx - pcx);
+          const sy = Math.sign(cy - pcy);
+          if (!grid.canStep(pcx, pcy, sx, sy)) {
+            const winNav = this.windowSystem.edgeCellOf(pcx, pcy, cx, cy);
+            if (!this.shotCrossesWindow(winNav, wx, wz, dirX, dirZ)) return d;
           }
-          // a boarded window blocks the round (falls through to the wall return below)
         }
+        pcx = cx;
+        pcy = cy;
+      }
+      // (B) blocked CELL (sealed exterior shell, solid props/furniture, legacy CELL-windows, §G — windows are
+      // not walk-through openings, V68): the occlusion query resolves cell-window pass-through HERE.
+      if (!this.scene.isWalkableWorld(wx, wz)) {
+        const navCell = this.windowSystem.cellOf(cx, cy);
+        if (this.shotCrossesWindow(navCell, wx, wz, dirX, dirZ)) continue;
         return d;
       }
       if (d >= range) break;

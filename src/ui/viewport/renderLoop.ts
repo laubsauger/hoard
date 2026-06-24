@@ -167,7 +167,9 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
           .query(qx, qz, runtime.tick)
           .filter((h) => h.stimulus.kind === 'sound')
           .map((h) => ({ x: h.stimulus.x, z: h.stimulus.z, intensity: h.intensity, radius: h.stimulus.radius })),
-      (qx, qz, heading, maxR) => rayDistanceToWall(runtime.scene, qx, qz, heading, maxR),
+      // V83/V84: crop the vision polygons on the SEE-THROUGH scene (windows transparent, see-over obstacles
+      // skipped) so the player + zombie debug rims penetrate windows/openings exactly like the gameplay vision.
+      (qx, qz, heading, maxR) => rayDistanceToWall(runtime.sightScene, qx, qz, heading, maxR),
     );
 
     // HUD noise meter: ambient = total sound loudness reaching the player; self = player's own output,

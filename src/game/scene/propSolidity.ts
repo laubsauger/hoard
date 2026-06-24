@@ -11,12 +11,18 @@ import { hash01 } from './houseStyle';
 import type { PropInstance, PropKind } from './testBlock';
 
 export interface PropSolidity {
-  /** Whether this prop kind is a solid obstacle (blocks shots + movement + sight via the nav grid). */
+  /** Whether this prop kind is a solid obstacle (blocks shots + movement via the nav grid). */
   readonly solid: boolean;
   /** Half-extent (cells) along the prop's LENGTH — its local +Z, the long axis of the mesh (e.g. a car body). */
   readonly halfLenCells: number;
   /** Half-extent (cells) along the prop's WIDTH — its local +X, the short axis. */
   readonly halfWidCells: number;
+  /**
+   * Approximate occluder HEIGHT (m). SIGHT (eye-height LOS) is blocked only by a prop at/above eye height; a
+   * prop SHORTER than eye height is SEEN OVER (a waist-high picket fence). Movement + projectile occlusion are
+   * unaffected (those use `solid` on the nav grid) — height only governs the see-over sight gap (V85).
+   */
+  readonly heightMeters: number;
 }
 
 /** Per-kind solidity, sized to the MESH footprint (not a fat square): a car body is BoxGeometry(2 wide × 4.2
@@ -24,11 +30,11 @@ export interface PropSolidity {
  *  by the prop's `rot`. Tall dense obstacles are solid; low/soft decor (tire, bush) is shoot-over cover and gappy
  *  fences stay non-blocking so a single span never seals a yard (their look is purely render). */
 export const PROP_SOLIDITY: Readonly<Record<PropKind, PropSolidity>> = {
-  car: { solid: true, halfLenCells: 1, halfWidCells: 0 }, // ~4.2 m long × 2 m wide → 3 cells long, 1 wide
-  tree: { solid: true, halfLenCells: 0, halfWidCells: 0 }, // the trunk — one cell
-  tire: { solid: false, halfLenCells: 0, halfWidCells: 0 }, // low — you shoot/step over it
-  bush: { solid: false, halfLenCells: 0, halfWidCells: 0 }, // soft, low cover
-  fence: { solid: true, halfLenCells: 0, halfWidCells: 0 }, // a picket span blocks — EXCEPT missing spans (gaps), see below
+  car: { solid: true, halfLenCells: 1, halfWidCells: 0, heightMeters: 1.6 }, // ~4.2 m long × 2 m wide → 3 cells long, 1 wide; tall enough to block sight (cover)
+  tree: { solid: true, halfLenCells: 0, halfWidCells: 0, heightMeters: 4 }, // the trunk — one cell; a tall canopy blocks sight
+  tire: { solid: false, halfLenCells: 0, halfWidCells: 0, heightMeters: 0.5 }, // low — you shoot/step/see over it
+  bush: { solid: false, halfLenCells: 0, halfWidCells: 0, heightMeters: 0.8 }, // soft, low cover
+  fence: { solid: true, halfLenCells: 0, halfWidCells: 0, heightMeters: 1.0 }, // a picket span blocks bodies/shots — but is WAIST-HIGH, so sight passes OVER it (V85)
 };
 
 /** A fence span is PRESENT (solid) unless its deterministic decay rolled it MISSING — the EXACT decision the
@@ -90,4 +96,25 @@ export function setPropSolid(
     if (solid) navGrid.block(cell.cx, cell.cy);
     else navGrid.clear(cell.cx, cell.cy);
   }
+}
+
+/** True iff this prop kind, when solid, occludes SIGHT at `eyeHeightMeters` — i.e. it is at/above eye height.
+ *  A solid prop SHORTER than eye height (a waist-high fence) is SEEN OVER, so it is NOT a sight occluder (V85). */
+export function propOccludesSight(kind: PropKind, eyeHeightMeters: number): boolean {
+  const s = PROP_SOLIDITY[kind];
+  return s.solid && s.heightMeters >= eyeHeightMeters;
+}
+
+/** The nav cells a SOLID-but-SUB-EYE-HEIGHT prop occupies — it blocks movement/shots (it is `solid` on the nav
+ *  grid) but SIGHT passes OVER it. Empty for non-solid props and for tall props (>= eyeHeight, which occlude
+ *  sight). Same footprint as `propBlockedCells`. Pure + deterministic — the runtime unions these into the
+ *  SEE-OVER set the sight LOS consults so vision clears a low fence while nav/projectiles still stop at it. */
+export function propSeeOverCells(
+  prop: PropInstance,
+  eyeHeightMeters: number,
+  fenceMissingChance = 0,
+): { cx: number; cy: number }[] {
+  const s = PROP_SOLIDITY[prop.kind];
+  if (!s.solid || s.heightMeters >= eyeHeightMeters) return []; // non-solid (no block) or tall (occludes sight)
+  return propBlockedCells(prop, fenceMissingChance);
 }

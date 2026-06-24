@@ -2,7 +2,7 @@
 // shots/movement/sight stop at them); non-solid decor reports none. Plus an integration check that the live
 // district actually blocks a car's cell.
 import { describe, it, expect } from 'vitest';
-import { PROP_SOLIDITY, propBlockedCells, setPropSolid } from './propSolidity';
+import { PROP_SOLIDITY, propBlockedCells, propOccludesSight, propSeeOverCells, setPropSolid } from './propSolidity';
 import { buildCityDistrict } from './cityDistrict';
 import { NavGrid } from '@/game/navigation';
 import type { PropInstance } from './testBlock';
@@ -31,6 +31,25 @@ describe('prop solidity (V53/V42)', () => {
     expect(carRot.length).toBe(3);
     expect(carRot).toContainEqual({ cx: 9, cy: 10 });
     expect(carRot).toContainEqual({ cx: 11, cy: 10 });
+  });
+
+  it('V85 see-over: a sub-eye-height fence is SEEN OVER (sight gap) while tall car/tree occlude; crouching lowers it', () => {
+    const eye = 1.6;
+    // A waist-high fence (~1 m) is BELOW eye height → does NOT occlude sight; its footprint is a SEE-OVER cell.
+    expect(propOccludesSight('fence', eye)).toBe(false);
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, 0)).toEqual([{ cx: 5, cy: 5 }]);
+    // Car + tree are AT/ABOVE eye height → they occlude sight; no see-over cells (vision stops at them).
+    expect(propOccludesSight('car', eye)).toBe(true);
+    expect(propOccludesSight('tree', eye)).toBe(true);
+    expect(propSeeOverCells({ kind: 'car', cx: 10, cy: 10 }, eye)).toEqual([]);
+    // Non-solid decor blocks nothing AND is no see-over cell (there is nothing to see over).
+    expect(propOccludesSight('tire', eye)).toBe(false);
+    expect(propSeeOverCells({ kind: 'tire', cx: 5, cy: 5 }, eye)).toEqual([]);
+    // A MISSING fence span (chance 1) is a real walkable gap — not a see-over cell either.
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, eye, 1)).toEqual([]);
+    // CROUCHED (eye 0.8 m < the 1 m fence): you can no longer see over it → it occludes, and you are hidden behind it.
+    expect(propOccludesSight('fence', 0.8)).toBe(true);
+    expect(propSeeOverCells({ kind: 'fence', cx: 5, cy: 5 }, 0.8, 0)).toEqual([]);
   });
 
   it('the live district marks a car prop nav-BLOCKED so shots/bodies/sight stop at it', () => {
