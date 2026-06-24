@@ -11,6 +11,7 @@ import type { BuildContext } from './buildContext';
 import type { DoorLeaf, OpeningHandles, WindowMesh } from './handles';
 import type { HouseStyleResolver } from './houseStyle';
 import {
+  WINDOW_GLASS_DEPTH_METERS,
   wallShellThicknessMeters,
   windowOpeningHeightMeters,
   windowOpeningSpanMeters,
@@ -28,7 +29,8 @@ export interface OpeningConfig {
   readonly doorLeafWidthFraction: number;
   readonly doorOpenSwingRadians: number;
   readonly maxBoardsPerWindow: number;
-  /** Wall panel thickness — the pane/void span the FULL wall depth so the window reads from both sides. */
+  /** Wall panel thickness — the depth the window opening is punched through (the thin glass pane sits centred
+   *  inside it; the frame trim laps proud of both wall faces). */
   readonly wallPanelThickness: number;
 }
 
@@ -55,26 +57,36 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   });
   // T87 window decay: painted frame trim, a dark void behind smashed glass, and weathered boards.
   const winFrameMat = res.mat('window.frame', { color: 0xcfc7b4, roughness: 0.85 });
+  // House polish #5: distinct depths kill the coincident-face z-fight. The trim also gets polygonOffset so its
+  // proud lapping faces never flicker against the wall jamb / glass even where they grow near-coplanar.
+  winFrameMat.polygonOffset = true;
+  winFrameMat.polygonOffsetFactor = -1;
+  winFrameMat.polygonOffsetUnits = -1;
   const voidMat = res.mat('window.void', { color: 0x0c0d0e, roughness: 1 });
   const boardMat = res.mat('window.board', { color: 0x6b5640, roughness: 0.95 });
   const th = wallShellThicknessMeters(cfg.wallPanelThickness, cs); // wall depth the opening is punched through
   const winH = windowOpeningHeightMeters(cfg.buildingWallHeightMeters); // matches the houseBuilder wall punch
   const winSpan = windowOpeningSpanMeters(cs); // wide picture window — matches the houseBuilder wall punch
-  // Shared window geometries (thickness on local X; the caller rotates for N/S walls). The pane + void now
-  // span the FULL wall depth `th` and are CENTRED in the opening (not a thin slab on the inside face) so the
-  // window is visible AND see-through from BOTH sides. The frame is a HOLLOW trim ring (rails + stiles) lapped
-  // onto the jamb — a solid slab would re-fill the punched hole and kill the see-through.
-  const frameBorder = 0.08; // trim bar width
-  const frameDepth = th + 0.04; // proud of both wall faces so the trim reads from inside + outside
-  // Inset the pane/void a hair INSIDE the opening so their rim faces are NOT coplanar with the frame trim's
-  // inner faces (the rails/stiles lap to winH/2 + winSpan/2) — that coincidence was the window↔frame z-fight.
-  // The ~2 cm reveal is invisible at iso distance and the trim laps over it.
+  // House polish #5 — a window is a THIN pane in the opening, not a full-wall-depth slab. Distinct depths per
+  // element so no two coincident faces z-fight: the GLASS is a thin slab CENTRED at the opening mid-plane
+  // (depth 0); the dark VOID (never shown — see windowSystem) sits a hair BEHIND it; the painted FRAME trim is
+  // a hollow ring lapped PROUD of both wall faces; the BOARDS are nailed PROUDER STILL, just outside the frame
+  // plane. The opening itself is still a real hole punched through the full wall depth `th`, so it stays
+  // see-through (thin glass when intact, a clear hole when smashed). Thickness on local X; the caller rotates
+  // for N/S walls.
+  const glassDepth = WINDOW_GLASS_DEPTH_METERS; // thin centred pane
+  const frameBorder = 0.06; // trim bar width (thinner, polish #5)
+  const frameDepth = th + 0.03; // proud of both wall faces so the trim reads from inside + outside
+  const boardDepth = frameDepth + 0.04; // boards nailed PROUD of the frame so they never share its plane
+  const voidBehind = glassDepth + 0.01; // push the (hidden) void clearly behind the glass (no shared plane)
+  // Inset the pane a hair INSIDE the opening so its rim faces are NOT coplanar with the frame trim's inner
+  // faces (the rails/stiles lap to winH/2 + winSpan/2). The ~2 cm reveal is invisible at iso distance.
   const paneInset = 0.04;
-  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(th, winH - paneInset, winSpan - paneInset));
-  const voidGeo = res.geo('window.void.geo', new BoxGeometry(th, winH - paneInset, winSpan - paneInset));
+  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(glassDepth, winH - paneInset, winSpan - paneInset));
+  const voidGeo = res.geo('window.void.geo', new BoxGeometry(glassDepth, winH - paneInset, winSpan - paneInset));
   const frameRailGeo = res.geo('window.frame.rail.geo', new BoxGeometry(frameDepth, frameBorder, winSpan + frameBorder * 2)); // top/bottom
   const frameStileGeo = res.geo('window.frame.stile.geo', new BoxGeometry(frameDepth, winH, frameBorder)); // left/right
-  const boardGeo = res.geo('window.board.geo', new BoxGeometry(frameDepth, winH * 0.26, winSpan + 0.1));
+  const boardGeo = res.geo('window.board.geo', new BoxGeometry(boardDepth, winH * 0.26, winSpan + 0.1));
 
   // ---- DOORS (T46): the wall panel at a door cell is OMITTED (buildHouses) so a real doorway GAP exists.
   // Here we frame it (posts + lintel), fill the wall ABOVE the header back up to the building height (so a tall
@@ -191,8 +203,8 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
     make(frameRailGeo, winFrameMat, 0, -(winH / 2 + frameBorder / 2));
     make(frameStileGeo, winFrameMat, 0, 0, winSpan / 2 + frameBorder / 2);
     make(frameStileGeo, winFrameMat, 0, 0, -(winSpan / 2 + frameBorder / 2));
-    const pane = make(paneGeo, glassMat, 0, 0); // glass centred in the opening, full wall depth, see-through
-    const voidMesh = make(voidGeo, voidMat, 0, 0); // dark opening behind the glass / boards (full wall depth)
+    const pane = make(paneGeo, glassMat, 0, 0); // thin glass centred at the opening mid-plane, see-through
+    const voidMesh = make(voidGeo, voidMat, -voidBehind, 0); // dark backing set behind the glass (never shown)
     // up to maxBoards crossing weathered planks; syncWindows shows them by the live board count.
     const boards: Mesh[] = [];
     for (let bI = 0; bI < maxBoards; bI++) {

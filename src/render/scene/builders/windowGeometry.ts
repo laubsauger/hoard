@@ -20,6 +20,11 @@ export function wallShellThicknessMeters(wallPanelThicknessMeters: number, navCe
   return Math.min(wallPanelThicknessMeters, navCellSize);
 }
 
+/** Glass pane depth (house polish #5): a THIN pane CENTRED in the opening — not a full-wall-depth slab. Thin
+ *  enough that its faces never approach the wall jamb / frame trim (kills the coincident-face z-fight) while the
+ *  opening itself stays a real see-through hole punched through the full wall depth. */
+export const WINDOW_GLASS_DEPTH_METERS = 0.03;
+
 /** Vertical extent of a window opening (sill→header). */
 export function windowOpeningHeightMeters(storeyHeightMeters: number): number {
   return storeyHeightMeters * WINDOW_HEIGHT_FRACTION;
