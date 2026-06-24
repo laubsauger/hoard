@@ -3,7 +3,7 @@
 // world state (V1). The HUD reads narrow snapshot selectors; the world renders into the canvas outside
 // React's render cycle. The engine hands back a command handle the shell uses for save/load/modify.
 
-import { Suspense, useCallback, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { ErrorBoundary } from './ErrorBoundary';
 import { GameViewport, type EngineHandle } from '../ui/GameViewport';
 import { Hud } from '../ui/Hud';
@@ -23,9 +23,26 @@ import '../ui/styles.css';
 export function App() {
   const [handle, setHandle] = useState<EngineHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Dev tools are always on in a DEV build; in PROD they're hidden until summoned with the backtick (`) key, so
+  // the deployed build stays clean but the panel is one keypress away for debugging on the live site.
+  const [devToolsOpen, setDevToolsOpen] = useState(import.meta.env.DEV);
 
   const onReady = useCallback((h: EngineHandle) => setHandle(h), []);
   const onError = useCallback((message: string) => setError(message), []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      // Backtick toggles the dev-tools panel. Ignore it while typing in a field so it never eats text input.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.code === 'Backquote') {
+        e.preventDefault();
+        setDevToolsOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <ErrorBoundary>
@@ -42,7 +59,7 @@ export function App() {
           <CharacterPanel />
           <InteractionPrompt handle={handle} />
           <InteractionWheel handle={handle} />
-          {import.meta.env.DEV && <DevToolsPanel />}
+          {devToolsOpen && <DevToolsPanel />}
           {error && (
             <div className="hbn-error" role="alert">
               <h1>Engine unavailable</h1>

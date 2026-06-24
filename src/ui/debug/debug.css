@@ -87,7 +87,9 @@
 .hbn-dev {
   position: fixed;
   top: 8px;
-  left: 8px;
+  /* Sit to the RIGHT of the Controls panel (top-left, ~208px wide, scales with --hbn-ui-scale) so the two never
+     overlap — they were both pinned top-left and stacked on top of each other. */
+  left: calc(236px * var(--hbn-ui-scale, 1));
   z-index: 1000;
   width: 208px;
   font: 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
