@@ -16,6 +16,7 @@ export {
   combineSteer,
   sampleFlowDirection,
   wallClearanceBias,
+  cornerBiasedWallWeight,
   type SteerInputs,
   type SteerResult,
   type Vec2,

@@ -19,6 +19,7 @@ import {
   steer,
   combineSteer,
   wallClearanceBias,
+  cornerBiasedWallWeight,
   resolveLevelMove,
   LevelNav,
   LevelFlowFieldCache,
@@ -109,6 +110,17 @@ export function slotSpeedJitter(slot: number, amt: number): number {
   if (amt <= 0) return 1;
   const h = ((Math.imul(slot + 1, 2654435761) >>> 0) / 4294967296) * 2 - 1;
   return 1 + amt * h;
+}
+
+/**
+ * Deterministic per-slot CORNER-BIAS in [0, 1) (T136) — how wide THIS zombie swings around wall corners. A
+ * stable hash of the slot (a DIFFERENT multiplier than slotSpeedJitter so the two channels are decorrelated:
+ * a fast zombie isn't always a wide-cornering one). Feeds steer()'s cornerBias so some of the horde rounds a
+ * house corner while others cut close — the organic spread that breaks the single-file diagonal shortcut.
+ * Replay-stable (V26 — slot-only, no RNG).
+ */
+export function slotCornerBias(slot: number): number {
+  return (Math.imul(slot + 1, 0x9e3779b1) >>> 0) / 4294967296;
 }
 
 /** Planar (XZ) distance from a zombie slot to the player — shared by the horde steps and snapshots. */
@@ -342,6 +354,7 @@ export class HordeSimulation {
         flowWeight,
         wallClearanceProbe: wallProbe, // T134/V101: smooth interpolated heading + wall-clearance bias
         wallClearanceWeight: wallWeight,
+        cornerBias: slotCornerBias(slot), // T136: per-zombie wide-vs-tight corner berth (organic, near walls only)
       });
       if (dirX === 0 && dirZ === 0) {
         zombies.setVelocity(slot, 0, 0, 0);
@@ -556,7 +569,7 @@ export class HordeSimulation {
         { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight },
         wb?.x ?? 0,
         wb?.z ?? 0,
-        wb ? wallWeight : 0,
+        wb ? cornerBiasedWallWeight(wallWeight, slotCornerBias(slot)) : 0, // T136: per-zombie wide-vs-tight berth
       );
       if (dirX === 0 && dirZ === 0) {
         zombies.setVelocity(slot, 0, 0, 0);

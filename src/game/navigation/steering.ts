@@ -29,6 +29,15 @@ export interface SteerInputs {
   /** OPTIONAL (T134): weight of the wall-repulsion vector blended into the heading (like separation).
    *  0/undefined ⇒ no wall clearance (back-compat: the bare flow+separation steer). */
   readonly wallClearanceWeight?: number;
+  /**
+   * OPTIONAL (T136): per-agent "give corners a wide berth" factor in [0, 1] — a STABLE per-zombie value. It
+   * scales ONLY the wall-clearance weight up (never below the safe baseline), so a body with a high bias swings
+   * WIDE around a wall corner (it goes AROUND) while a low-bias body takes the tight line (it cuts close) — the
+   * organic spread that stops a whole horde funnelling through the exact same diagonal shortcut past a house
+   * corner. No effect away from walls (the clearance vector is zero there) → open-ground movement is unchanged.
+   * 0/undefined ⇒ the plain T134 clearance.
+   */
+  readonly cornerBias?: number;
 }
 
 export interface SteerResult {
@@ -45,6 +54,19 @@ export interface Vec2 {
 /** Module scratch so the hot path allocates nothing (V24). Single-threaded sim → safe to reuse per call. */
 const FLOW_SCRATCH: Vec2 = { x: 0, z: 0 };
 const CLEARANCE_SCRATCH: Vec2 = { x: 0, z: 0 };
+
+/** T136: how much a max (1.0) per-zombie cornerBias widens the wall-clearance weight — at 1.0 a high-bias body
+ *  gives corners up to ~2× the baseline berth (swings AROUND), a 0-bias body keeps the tight baseline line. */
+const CORNER_CLEARANCE_SPREAD = 1;
+
+/**
+ * Scale a body's wall-clearance weight by its per-zombie cornerBias (T136). Only ever WIDENS the berth (never
+ * below the baseline), so a high-bias body rounds a wall corner while a 0-bias body cuts the tight line. The
+ * single place the spread lives, so the single-floor `steer` and the multi-floor `combineSteer` path agree.
+ */
+export function cornerBiasedWallWeight(wallWeight: number, cornerBias: number): number {
+  return wallWeight * (1 + Math.max(0, cornerBias) * CORNER_CLEARANCE_SPREAD);
+}
 
 /**
  * BILINEARLY interpolate the flow direction at a CONTINUOUS world position from the 4 nearest cell directions
@@ -200,7 +222,9 @@ export function steer(field: FlowField, input: SteerInputs): SteerResult {
   }
   let wallX = 0;
   let wallZ = 0;
-  const wallWeight = input.wallClearanceWeight ?? 0;
+  // T136: a high per-zombie cornerBias widens the wall berth (the body rounds the corner) — never narrows it
+  // below the T134 baseline, so it can't make a body clip a wall. Zero away from walls (wb is zero there).
+  const wallWeight = cornerBiasedWallWeight(input.wallClearanceWeight ?? 0, input.cornerBias ?? 0);
   const probe = input.wallClearanceProbe ?? 0;
   if (wallWeight > 0 && probe > 0) {
     const wb = wallClearanceBias(field.grid, input.x, input.z, probe, CLEARANCE_SCRATCH);
