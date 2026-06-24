@@ -66,6 +66,8 @@ import {
   buildTestBlock,
   isWalkableRadius,
   segmentCrossesWall,
+  levelNavOf,
+  gridWalkableRadius,
   lootableContainerCells,
   DoorSystem,
   WindowSystem,
@@ -259,6 +261,10 @@ export class GameRuntime {
 
   private playerPos: Vec3;
   private playerHeading = 0;
+  /** P3 multi-floor: the nav LEVEL the player occupies (0 = ground, default). Stays 0 for a single-storey /
+   *  all-outdoors world (no stair links), so every existing movement test + the ground hot path are unchanged.
+   *  Climbing a stair (`climbStairs`) transitions it; movement validates against THIS level's nav grid. */
+  private playerLevel = 0;
   /** V62 SNEAK: distance (m) the player has travelled since the last emitted footstep stimulus. A stride-length
    *  accumulator so the player's audible loudness is frame-rate-independent and deterministic across replay. */
   private footstepAccumMeters = 0;
@@ -352,6 +358,10 @@ export class GameRuntime {
       agentRadius: this.collision.defaultAgentRadius,
       playerEntityId: this.playerEntity as number,
       getPlayerPos: () => this.playerPos,
+      // P3 multi-floor: hand the horde the scene's level stack + the live player level so a pursuer climbs after
+      // the player. Both are inert for a single-storey scene (levelNav absent ⇒ one level; playerLevel stays 0).
+      ...(this.scene.levelNav ? { levelNav: this.scene.levelNav } : {}),
+      getPlayerLevel: () => this.playerLevel,
       getTargetSlot: () => this.targetSlot,
       lastDamageTick: this.lastDamageTick,
       lastAttackTick: this.lastAttackTick,
@@ -567,6 +577,37 @@ export class GameRuntime {
     return this.playerHeading;
   }
 
+  /** P3 multi-floor: the nav level the player occupies (0 = ground). Render reads it to lift the camera/body
+   *  +storeyHeight and show the occupied storey's cutaway; the horde reads it so a pursuer climbs after you. */
+  playerLevelValue(): number {
+    return this.playerLevel;
+  }
+
+  /**
+   * P3 CLIMB: transition the player between storeys via the stair at their current cell. A stair is an explicit
+   * action (no auto-transition) so standing on a stair cell never ping-pongs between levels — the simplest model
+   * that works (docs/PROCEDURAL-HOUSES.md). When the player's cell (on its current level) carries a stair link,
+   * the player moves to the linked cell on the other level (same world XZ); returns true. A single-storey world
+   * has no links, so this is always a no-op there (returns false) — keeping the sheltered ground start intact.
+   */
+  climbStairs(): boolean {
+    if (this.isPlayerDead()) return false;
+    const nav = levelNavOf(this.scene);
+    if (nav.levelCount <= 1) return false;
+    const grid = nav.grid(this.playerLevel);
+    const { cx, cy } = grid.worldToCell(this.playerPos.x, this.playerPos.z);
+    if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+    const links = nav.stairLinksFrom(this.playerLevel, grid.index(cx, cy));
+    const link = links[0];
+    if (!link) return false;
+    const toGrid = nav.grid(link.toLevel);
+    const c = toGrid.coordOf(link.toCell);
+    const center = this.scene.cellCenter({ cx: c.cx, cy: c.cy });
+    this.playerLevel = link.toLevel;
+    this.playerPos = { x: center.x, y: this.playerPos.y, z: center.z };
+    return true;
+  }
+
   /**
    * The flow-field target CELL a live zombie chose this perception tick (test/diagnostics): the player cell
    * if it sees the player, the cell of the loudest sound it hears, or -1 when it has no target (idle). There
@@ -578,6 +619,15 @@ export class GameRuntime {
       throw new Error(`cannot read target of entity ${entity}: not alive`);
     }
     return this.zombies.getTarget(slot);
+  }
+
+  /** P3 multi-floor: the nav level a live zombie occupies (test/diagnostics + render stacking). Throws if not alive. */
+  zombieLevel(entity: EntityId): number {
+    const slot = this.entityToSlot.get(entity);
+    if (slot === undefined || !this.zombies.isAlive(slot)) {
+      throw new Error(`cannot read level of entity ${entity}: not alive`);
+    }
+    return this.zombies.getLevel(slot);
   }
 
   /** Active weather profile (drives the renderer's fog/grading; default from weather config). */
@@ -642,16 +692,19 @@ export class GameRuntime {
     // T58/V42: radius-aware so the player body never clips half into a wall. The edge-wall test additionally
     // rejects a step crossing an interior partition between two walkable cells (must use the doorway).
     const r = this.playerCfg.bodyRadiusMeters;
-    const grid = this.scene.navGrid;
+    // P3 multi-floor: validate against the player's CURRENT level grid. Level 0 IS scene.navGrid, so the single
+    // -storey path is byte-identical to the old `isWalkableRadius(scene, …)` (gridWalkableRadius wraps the same
+    // worldToCell + isBlocked) — every existing movement/sprint/sneak test is unaffected (V26 backward-compat).
+    const grid = levelNavOf(this.scene).grid(this.playerLevel);
     let moved = false;
-    if (isWalkableRadius(this.scene, nx, nz, r) && !segmentCrossesWall(grid, ox, oz, nx, nz)) {
+    if (gridWalkableRadius(grid, nx, nz, r) && !segmentCrossesWall(grid, ox, oz, nx, nz)) {
       this.playerPos = { x: nx, y: this.playerPos.y, z: nz };
       moved = true;
-    } else if (isWalkableRadius(this.scene, nx, oz, r) && !segmentCrossesWall(grid, ox, oz, nx, oz)) {
+    } else if (gridWalkableRadius(grid, nx, oz, r) && !segmentCrossesWall(grid, ox, oz, nx, oz)) {
       // Wall slide: keep the component that stays walkable (standard collision response, not a fallback).
       this.playerPos = { x: nx, y: this.playerPos.y, z: oz };
       moved = true;
-    } else if (isWalkableRadius(this.scene, ox, nz, r) && !segmentCrossesWall(grid, ox, oz, ox, nz)) {
+    } else if (gridWalkableRadius(grid, ox, nz, r) && !segmentCrossesWall(grid, ox, oz, ox, nz)) {
       this.playerPos = { x: ox, y: this.playerPos.y, z: nz };
       moved = true;
     }
@@ -846,18 +899,19 @@ export class GameRuntime {
   interactables(): InteractionTargetWorld[] {
     const out: InteractionTargetWorld[] = [];
     for (const d of this.doorSystem.list()) {
-      out.push({ kind: 'door', access: d.access, x: d.x, z: d.z, label: 'Door' });
+      // Door leaf orientation: axis 'x' = the wall runs along X → outline thin on Z (rotationY 0); else π/2.
+      out.push({ kind: 'door', access: d.access, x: d.x, z: d.z, label: 'Door', orientationRad: d.axis === 'x' ? 0 : Math.PI / 2 });
     }
     // T108: every window, carrying its live glass + board state so the wheel/prompt offer the state-driven
     // verbs (boarded → remove boards, intact → smash glass, opening → climb / board up).
     for (const w of this.windowSystem.list()) {
-      out.push({ kind: 'window', glass: w.glass, boards: w.boards, x: w.x, z: w.z, label: 'Window' });
+      out.push({ kind: 'window', glass: w.glass, boards: w.boards, x: w.x, z: w.z, label: 'Window', orientationRad: this.wallRunOrientationRad(w.cx, w.cy) });
     }
     // The destructible §G wall section — anchored at its mid nav cell.
     const wallNav = this.scene.navCellForStructuralCell(this.defaultBreachCell());
     const wallC = this.scene.cellCenter(wallNav);
     const wallCell = this.scene.wall.getCell(this.defaultBreachCell());
-    out.push({ kind: 'structure', breached: wallCell?.breached ?? false, x: wallC.x, z: wallC.z, label: 'Wall section' });
+    out.push({ kind: 'structure', breached: wallCell?.breached ?? false, x: wallC.x, z: wallC.z, label: 'Wall section', orientationRad: this.wallRunOrientationRad(wallNav.cx, wallNav.cy) });
     // The lootable cupboard(s) at their FIXED authored cells — only nearest when the player is actually beside
     // the cabinet (range-gated by nearestInteractable), never house-wide (the old playerCell anchor bug).
     for (const c of this.worldContainers) {
@@ -868,13 +922,26 @@ export class GameRuntime {
 
   /** Physical dims used to SIZE the active-interactable highlight box (typed config + scene cell size, V4). */
   private highlightDims(): HighlightDims {
+    const cell = this.scene.navGrid.settings.navCellSize;
     return {
-      navCellSize: this.scene.navGrid.settings.navCellSize,
-      defaultHeightMeters: this.structuresCfg.interactionHighlightHeightMeters,
+      navCellSize: cell,
+      wallHeightMeters: this.worldCfg.buildingWallHeightMeters,
+      thinMeters: cell * 0.08, // a leaf/pane is thin on the wall normal (≈0.16 m at a 2 m cell)
+      corpseSizeMeters: cell * 0.35, // a low body box (≈0.7 m)
       cupboardWidthMeters: this.structuresCfg.cupboardWidthMeters,
       cupboardDepthMeters: this.structuresCfg.cupboardDepthMeters,
       cupboardHeightMeters: this.structuresCfg.cupboardHeightMeters,
     };
+  }
+
+  /** Wall RUN orientation (rad) at nav cell (cx,cy) for a thin door/window/wall outline: 0 = the wall runs
+   *  along world X (both ±X neighbours blocked), π/2 = along Z. Mirrors `doorAxis`/the glass-shatter normal. */
+  private wallRunOrientationRad(cx: number, cy: number): number {
+    const grid = this.scene.navGrid;
+    const blocked = (bx: number, by: number): boolean =>
+      bx < 0 || by < 0 || bx >= grid.width || by >= grid.height ? true : grid.isBlocked(grid.index(bx, by));
+    const alongX = blocked(cx - 1, cy) && blocked(cx + 1, cy);
+    return alongX ? 0 : Math.PI / 2;
   }
 
   /**
@@ -885,7 +952,15 @@ export class GameRuntime {
    */
   nearestInteractableHighlight(): InteractionHighlightTarget | null {
     const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
-    return near ? highlightBoxFor(near.target, this.highlightDims()) : null;
+    if (!near) return null;
+    // GENERIC nav-cell resolution (T113/V79): the cell the target's world centre falls in — the SAME index the
+    // scene builders tag their interactable meshes with (grid.index(floor(x/cs), floor(z/cs)) == grid.index(cx,cy)
+    // for a cell-centred object). The silhouette-glow outline resolves the render mesh(es) by this cell; no
+    // per-kind switch. An instanced corpse occupies a cell with no tagged mesh → the view falls back to the box.
+    const grid = this.scene.navGrid;
+    const cs = grid.settings.navCellSize;
+    const navCell = grid.index(Math.floor(near.target.x / cs), Math.floor(near.target.z / cs));
+    return { ...highlightBoxFor(near.target, this.highlightDims()), navCell };
   }
 
   /** The "{key} to {action}" prompt for the NEAREST interactable in reach, or null (T60). Pure read of the
