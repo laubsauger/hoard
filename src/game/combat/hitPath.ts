@@ -224,15 +224,23 @@ export class CombatSystem {
    * earlier swap is still in flight is ignored (the equipped weapon is unchanged) so timers never stack.
    * Returns the now-equipped weapon id.
    */
-  cycleWeapon(dir: 1 | -1): WeaponId {
+  cycleWeapon(dir: 1 | -1, allowed?: readonly WeaponId[]): WeaponId {
     this.settle();
     if (dir !== 1 && dir !== -1) {
       throw new Error(`cycleWeapon expects +1 or -1, got ${dir}`);
     }
     if (this.busyKind !== null) return this.equippedId;
-    const n = WEAPON_IDS.length;
-    const idx = WEAPON_IDS.indexOf(this.equippedId);
-    const next = WEAPON_IDS[(idx + dir + n) % n]!;
+    // T138: cycle only among the weapon classes the player CARRIES (the runtime passes its carried set), in the
+    // stable registry order; omitting `allowed` cycles all classes (legacy/test behaviour). A pool with 0 or 1
+    // usable class is a no-op (nothing to swap to).
+    const pool = allowed && allowed.length > 0 ? WEAPON_IDS.filter((id) => allowed.includes(id)) : WEAPON_IDS;
+    if (pool.length <= 1) return this.equippedId;
+    const idx = pool.indexOf(this.equippedId);
+    // If the equipped class isn't in the pool (shouldn't happen once carried+equipped are kept in sync), enter
+    // the pool from its first/last toward `dir`.
+    const nextIdx = idx < 0 ? (dir === 1 ? 0 : pool.length - 1) : (idx + dir + pool.length) % pool.length;
+    const next = pool[nextIdx]!;
+    if (next === this.equippedId) return this.equippedId;
     this.equippedId = next;
     const swapTicks = this.weaponRegistry[next].swapTicks;
     if (swapTicks > 0) {

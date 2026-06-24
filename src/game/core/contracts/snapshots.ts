@@ -20,6 +20,8 @@ export interface PlayerViewSnapshot {
   /** Current weapon ammo for the HUD (T74). magazine = Infinity for melee. */
   readonly ammoMagazine?: number;
   readonly ammoReserve?: number;
+  /** Equipped weapon class id for the HUD (T138) — 'pistol' | 'shotgun' | 'rifle' | 'melee'. */
+  readonly weapon?: string;
 }
 
 /** Detailed inspect of a single promoted (hero) zombie. */

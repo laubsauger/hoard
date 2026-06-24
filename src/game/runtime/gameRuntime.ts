@@ -47,7 +47,7 @@ import {
   type PersistenceAdapter,
 } from '@/game/persistence';
 import { RuntimePersistence } from './runtimePersistence';
-import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot, consumeEffect } from '@/game/inventory';
+import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot, consumeEffect, weaponClassForItem } from '@/game/inventory';
 import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
 import type { ContainerView } from '@/stores/inventoryView';
 import { resolveDomain } from '@/config/registry';
@@ -61,7 +61,7 @@ import { timeConfig } from '@/config/domains/time';
 import { audioConfig } from '@/config/domains/audio';
 import { weatherConfig, weatherSeverity, type WeatherProfile } from '@/config/domains/weather';
 import type { QualityTier } from '@/config/types';
-import { CombatSystem, type ShotResult, type DeathImpact } from '@/game/combat';
+import { CombatSystem, WEAPON_IDS, type WeaponId, type ShotResult, type DeathImpact } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
@@ -588,9 +588,10 @@ export class GameRuntime {
     const playerRef: ContainerRef = { entity: this.playerEntity, container: 'player' };
     this.inventory.addContainer(playerRef, { type: 'backpack' });
     this.namedContainers.set('player', playerRef);
-    // T108: equip the player with a hammer + a stack of planks by default so window board-up works out of the
-    // box (temporary starter loadout — adjust later). The hammer also doubles as a breaching tool (V43 gating).
-    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6]] as const) {
+    // T108/T138: starter loadout — a knife (melee) + a PISTOL (so the equipped pistol is a weapon the player
+    // actually CARRIES, and weapon-swap has two classes to cycle out of the box), a hammer + planks for window
+    // board-up (the hammer doubles as a breaching tool, V43), plus a bandage + water. Adjust later.
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
@@ -1549,9 +1550,22 @@ export class GameRuntime {
     return this.combat.reload();
   }
 
-  /** Cycle the equipped weapon (T74). */
+  /** The weapon CLASSES the player can swap between — the distinct classes of every weapon ITEM in their
+   *  inventory, in stable registry order, with `melee` always available (bare hands / a knife). T138 — swap is
+   *  gated to what they CARRY, so finding a shotgun adds it and you never cycle to a weapon you don't have. */
+  carriedWeaponClasses(): WeaponId[] {
+    const ref: ContainerRef = { entity: this.playerEntity, container: 'player' };
+    const set = new Set<WeaponId>(['melee']); // always have your hands/knife
+    for (const s of this.inventory.contents(ref)) {
+      const cls = weaponClassForItem(s.item);
+      if (cls) set.add(cls);
+    }
+    return WEAPON_IDS.filter((id) => set.has(id));
+  }
+
+  /** Cycle the equipped weapon among the CARRIED classes only (T74/T138). */
   cycleWeapon(dir: 1 | -1): void {
-    this.combat.cycleWeapon(dir);
+    this.combat.cycleWeapon(dir, this.carriedWeaponClasses());
   }
 
   /** Current ammo + weapon for the HUD (T74). */
@@ -1927,6 +1941,7 @@ export class GameRuntime {
       stamina: sv.stamina,
       ammoMagazine: this.combat.currentAmmo().magazine,
       ammoReserve: this.combat.currentAmmo().reserve,
+      weapon: this.combat.currentWeaponId(),
     });
 
     let visibleCount = 0;

@@ -229,8 +229,9 @@ describe('GATE-0: React/Zustand boundary (V1/V11)', () => {
     const snap = playerStore.getState().snapshot;
     expect(snap).not.toBeNull();
     expect(snap!.entity).toBe(rt.playerEntity);
-    // V1: the player snapshot is a small object of PRIMITIVES — no zombie array, no SoA buffer.
-    for (const v of Object.values(snap!)) expect(typeof v).toBe('number');
+    // V1: the player snapshot is a small object of PRIMITIVES — no zombie array, no SoA buffer. (Numbers plus the
+    // equipped-weapon id string, T138 — both primitives; the point is NO objects/arrays leak through.)
+    for (const v of Object.values(snap!)) expect(typeof v === 'number' || typeof v === 'string').toBe(true);
 
     const horde = mapStore.getState().horde;
     expect(horde).not.toBeNull();

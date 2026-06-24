@@ -4,6 +4,7 @@ export { ItemCatalog, type ItemDef, type ItemCategory, type ItemsSettings } from
 export { buildDefaultCatalog, ITEM, ITEM_CONTENT_COUNT } from './catalog';
 export { rollLoot, LOOT_SOURCES, type LootSource, type LootStack, type LootEntry } from './loot';
 export { consumeEffect, isConsumable, type ConsumeEffect } from './consume';
+export { weaponClassForItem, type WeaponClassName } from './weaponItems';
 export {
   InventorySystem,
   type ContainerType,

@@ -191,8 +191,8 @@ export const zombiesConfig = registerDomain('zombies', {
   corpseCollapseTicks: num({
     owner: 'zombies',
     unit: 'ticks',
-    doc: 'Ticks a killed zombie takes to topple from standing to prone (render-only death collapse, drives the CorpseField pitch/sink ease — NOT a teleport-to-floor). ~15 ticks ≈ 0.5 s at the 30 Hz default rate.',
-    default: 15,
+    doc: 'Ticks a killed zombie takes to topple from standing to prone (render-only death collapse, drives the CorpseField pitch/sink ease — NOT a teleport-to-floor). ~40 ticks ≈ 1.3 s at 30 Hz — a heavy, gravity-paced fall that settles, NOT a body knocked flat in a blink.',
+    default: 40,
     min: 1,
     max: 120,
     integer: true,

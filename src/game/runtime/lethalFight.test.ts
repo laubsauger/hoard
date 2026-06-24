@@ -95,7 +95,8 @@ describe('lethal fight: accumulated bites kill the player -> game-over (V1)', ()
     const snap = playerStore.getState().snapshot;
     expect(snap).not.toBeNull();
     expect(snap!.health).toBe(0);
-    for (const v of Object.values(snap!)) expect(typeof v).toBe('number');
+    // primitives only (numbers + the equipped-weapon id string, T138) — never an object/array (V1).
+    for (const v of Object.values(snap!)) expect(typeof v === 'number' || typeof v === 'string').toBe(true);
 
     // control is halted: a dead player cannot move.
     const before = { ...rt.player() };
