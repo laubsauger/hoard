@@ -6,8 +6,6 @@
 
 import type { SpotLight } from 'three';
 import type { GameRuntime } from '../../../game/runtime';
-import { rayDistanceToWall } from '../../../game/scene';
-import { clampConeRangeToWall } from '../../world/visibility';
 
 export interface FlashlightSystemConfig {
   readonly intensity: number;
@@ -40,15 +38,12 @@ export class FlashlightSystem {
     // held/aimed, not emanating from the torso. The wall raycast + cone start here too.
     const ox = p.x + cos * this.cfg.noseOffsetMeters;
     const oz = p.z + sin * this.cfg.noseOffsetMeters;
-    const maxRange = this.cfg.rangeMeters;
-    // V67: RAYCAST-CLAMPED cone — clip the beam reach to the first STRUCTURAL wall along the aim so it never shines
-    // THROUGH/past a wall the player faces (no light spilling outside the building). Reuses the SAME nav-grid wall
-    // raycast the shots + perception LOS use — not a second wall representation. A small margin keeps the struck
-    // wall face itself lit; a clear aim returns maxRange so the cone is never shortened needlessly. V84: clamps on
-    // the SEE-THROUGH `sightScene` so the beam passes THROUGH a glassed window (light goes through glass) and is
-    // stopped only by a solid wall or a boarded-shut window.
-    const wallDist = rayDistanceToWall(runtime.sightScene, ox, oz, aim, maxRange);
-    const range = clampConeRangeToWall(maxRange, wallDist, this.cfg.wallClampMarginMeters);
+    const range = this.cfg.rangeMeters;
+    // V88: the beam reaches its FULL range so the wall the player faces is brightly LIT — the SpotLight's distance
+    // falloff dims anything near the cutoff, so the old raycast-clamp (distance ≈ wallDist + small margin) left the
+    // struck wall at the falloff edge → ~10% brightness → dark. Spill PAST the wall is blocked accurately by the
+    // flashlight's own castShadow (shadow camera.far = full range), which is per-pixel — strictly better than the
+    // single-ray clamp, and a glassed window still passes light (it casts no opaque shadow), matching V84.
     f.distance = range;
     f.position.set(ox, this.cfg.heightMeters, oz); // origin at the nose tip
     // Aim the target forward along the ground from the nose origin (same forward the avatar nose + fire dir use)
