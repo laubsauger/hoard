@@ -269,14 +269,15 @@ const r = (type: RoomType, minCx: number, minCy: number, maxCx: number, maxCy: n
 
 /**
  * 1) RANCH-2BED — small single-storey ranch, 7x5 cells (~14 m x 10 m). Bedroom wing (2 beds + bath) at the
- * west end, a central hall spine, and an open living/kitchen/dining group at the east end buffering the beds.
+ * west end, a central hall spine, and ONE big open-plan living/kitchen/dining great room filling the east end
+ * (house polish #2 — fewer, bigger rooms, no 1-cell dining nook). 5 rooms total.
  *
  *   cx:  0   1   2   3   4   5   6
  *   cy0  bedA bedA bedA H  liv liv liv
  *   cy1  bedA bedA bedA H  liv liv liv
  *   cy2  bath bath bath H  liv liv liv
- *   cy3  bedB bedB bedB H  kit kit din
- *   cy4  bedB bedB bedB H  kit kit din
+ *   cy3  bedB bedB bedB H  liv liv liv
+ *   cy4  bedB bedB bedB H  liv liv liv
  */
 const RANCH_2BED: HouseTemplate = {
   id: 'ranch-2bed',
@@ -291,9 +292,7 @@ const RANCH_2BED: HouseTemplate = {
         r('bathroom', 0, 2, 2, 2), // 1 bathroom
         r('bedroom', 0, 3, 2, 4), // 2 bedroom B
         r('hall', 3, 0, 3, 4), // 3 hall spine
-        r('living', 4, 0, 6, 2), // 4 living
-        r('kitchen', 4, 3, 5, 4), // 5 kitchen
-        r('dining', 6, 3, 6, 4), // 6 dining
+        r('living', 4, 0, 6, 4), // 4 open-plan living / kitchen / dining
       ],
       doors: [
         { fromRoom: 4, toRoom: null, edge: 'n', atCell: { cx: 5, cy: 0 } }, // front door (living)
@@ -301,17 +300,16 @@ const RANCH_2BED: HouseTemplate = {
         { fromRoom: 3, toRoom: 0, edge: 'w', atCell: { cx: 3, cy: 0 } }, // hall -> bedroom A
         { fromRoom: 3, toRoom: 1, edge: 'w', atCell: { cx: 3, cy: 2 } }, // hall -> bathroom
         { fromRoom: 3, toRoom: 2, edge: 'w', atCell: { cx: 3, cy: 4 } }, // hall -> bedroom B
-        { fromRoom: 4, toRoom: 5, edge: 's', atCell: { cx: 4, cy: 2 } }, // living -> kitchen
-        { fromRoom: 5, toRoom: 6, edge: 'e', atCell: { cx: 5, cy: 3 } }, // kitchen -> dining
       ],
       windows: [
         { room: 0, edge: 'w', atCell: { cx: 0, cy: 0 } },
         { room: 0, edge: 'n', atCell: { cx: 1, cy: 0 } },
+        { room: 1, edge: 'w', atCell: { cx: 0, cy: 2 } },
         { room: 2, edge: 'w', atCell: { cx: 0, cy: 4 } },
         { room: 4, edge: 'n', atCell: { cx: 4, cy: 0 } },
         { room: 4, edge: 'e', atCell: { cx: 6, cy: 1 } },
-        { room: 5, edge: 's', atCell: { cx: 4, cy: 4 } },
-        { room: 6, edge: 'e', atCell: { cx: 6, cy: 4 } },
+        { room: 4, edge: 's', atCell: { cx: 4, cy: 4 } },
+        { room: 4, edge: 'e', atCell: { cx: 6, cy: 4 } },
       ],
       stairsCell: null,
     },
@@ -327,13 +325,16 @@ const RANCH_2BED: HouseTemplate = {
  *   cy0  mbed  mbed  mbed  liv  liv  liv  H    bed2 bed2
  *   cy1  mbed  mbed  mbed  liv  liv  liv  H    bed2 bed2
  *   cy2  mbed  mbed  mbed  liv  liv  liv  H    bed2 bed2
- *   cy3  mbed  mbed  mbed  kit  kit  din  H    bed3 bed3
- *   cy4  mbth  mbth  clo   kit  kit  din  H    bed3 bed3
- *   cy5  mbth  mbth  clo   kit  kit  bth2 H    bed3 bed3
+ *   cy3  mbed  mbed  mbed  kit  kit  kit  H    bed3 bed3
+ *   cy4  mbth  mbth  mbth  kit  kit  kit  H    bed3 bed3
+ *   cy5  mbth  mbth  mbth  kit  kit  kit  H    bed3 bed3
+ *
+ * House polish #2 — merged the 1-cell closet into the ensuite bathroom and the 1-cell dining + half-bath into
+ * the kitchen, so the plan reads as 7 believable rooms instead of 10 with slivers.
  */
 const RANCH_3BED: HouseTemplate = {
   id: 'ranch-3bed',
-  name: 'Ranch — 3 bed / 1.5 bath',
+  name: 'Ranch — 3 bed / 1 bath',
   storeys: 1,
   footprint: { w: 9, d: 6 },
   levels: [
@@ -341,38 +342,33 @@ const RANCH_3BED: HouseTemplate = {
       storey: 0,
       rooms: [
         r('bedroom', 0, 0, 2, 3), // 0 master bedroom
-        r('bathroom', 0, 4, 1, 5), // 1 master ensuite
-        r('closet', 2, 4, 2, 5), // 2 master walk-in closet
-        r('living', 3, 0, 5, 2), // 3 living
-        r('kitchen', 3, 3, 4, 5), // 4 kitchen
-        r('dining', 5, 3, 5, 4), // 5 dining
-        r('bathroom', 5, 5, 5, 5), // 6 half-bath (off hall)
-        r('hall', 6, 0, 6, 5), // 7 hall spine
-        r('bedroom', 7, 0, 8, 2), // 8 bedroom 2
-        r('bedroom', 7, 3, 8, 5), // 9 bedroom 3
+        r('bathroom', 0, 4, 2, 5), // 1 master ensuite (incl. former walk-in closet)
+        r('living', 3, 0, 5, 2), // 2 living
+        r('kitchen', 3, 3, 5, 5), // 3 open kitchen / dining
+        r('hall', 6, 0, 6, 5), // 4 hall spine
+        r('bedroom', 7, 0, 8, 2), // 5 bedroom 2
+        r('bedroom', 7, 3, 8, 5), // 6 bedroom 3
       ],
       doors: [
-        { fromRoom: 3, toRoom: null, edge: 'n', atCell: { cx: 4, cy: 0 } }, // front door (living)
-        { fromRoom: 3, toRoom: 0, edge: 'w', atCell: { cx: 3, cy: 1 } }, // living -> master bedroom
-        { fromRoom: 3, toRoom: 7, edge: 'e', atCell: { cx: 5, cy: 0 } }, // living -> hall
-        { fromRoom: 3, toRoom: 4, edge: 's', atCell: { cx: 3, cy: 2 } }, // living -> kitchen
+        { fromRoom: 2, toRoom: null, edge: 'n', atCell: { cx: 4, cy: 0 } }, // front door (living)
+        { fromRoom: 2, toRoom: 0, edge: 'w', atCell: { cx: 3, cy: 1 } }, // living -> master bedroom
+        { fromRoom: 2, toRoom: 4, edge: 'e', atCell: { cx: 5, cy: 0 } }, // living -> hall
+        { fromRoom: 2, toRoom: 3, edge: 's', atCell: { cx: 3, cy: 2 } }, // living -> kitchen
         { fromRoom: 0, toRoom: 1, edge: 's', atCell: { cx: 0, cy: 3 } }, // master -> ensuite
-        { fromRoom: 0, toRoom: 2, edge: 's', atCell: { cx: 2, cy: 3 } }, // master -> closet
-        { fromRoom: 4, toRoom: 5, edge: 'e', atCell: { cx: 4, cy: 3 } }, // kitchen -> dining
-        { fromRoom: 5, toRoom: 7, edge: 'e', atCell: { cx: 5, cy: 3 } }, // dining -> hall
-        { fromRoom: 6, toRoom: 7, edge: 'e', atCell: { cx: 5, cy: 5 } }, // half-bath -> hall
-        { fromRoom: 7, toRoom: 8, edge: 'e', atCell: { cx: 6, cy: 0 } }, // hall -> bedroom 2
-        { fromRoom: 7, toRoom: 9, edge: 'e', atCell: { cx: 6, cy: 4 } }, // hall -> bedroom 3
+        { fromRoom: 3, toRoom: 4, edge: 'e', atCell: { cx: 5, cy: 3 } }, // kitchen -> hall
+        { fromRoom: 4, toRoom: 5, edge: 'e', atCell: { cx: 6, cy: 0 } }, // hall -> bedroom 2
+        { fromRoom: 4, toRoom: 6, edge: 'e', atCell: { cx: 6, cy: 4 } }, // hall -> bedroom 3
       ],
       windows: [
         { room: 0, edge: 'n', atCell: { cx: 1, cy: 0 } },
         { room: 0, edge: 'w', atCell: { cx: 0, cy: 1 } },
-        { room: 3, edge: 'n', atCell: { cx: 3, cy: 0 } },
-        { room: 4, edge: 's', atCell: { cx: 3, cy: 5 } },
-        { room: 8, edge: 'n', atCell: { cx: 7, cy: 0 } },
-        { room: 8, edge: 'e', atCell: { cx: 8, cy: 1 } },
-        { room: 9, edge: 'e', atCell: { cx: 8, cy: 4 } },
-        { room: 9, edge: 's', atCell: { cx: 8, cy: 5 } },
+        { room: 1, edge: 'w', atCell: { cx: 0, cy: 5 } },
+        { room: 2, edge: 'n', atCell: { cx: 3, cy: 0 } },
+        { room: 3, edge: 's', atCell: { cx: 3, cy: 5 } },
+        { room: 5, edge: 'n', atCell: { cx: 7, cy: 0 } },
+        { room: 5, edge: 'e', atCell: { cx: 8, cy: 1 } },
+        { room: 6, edge: 'e', atCell: { cx: 8, cy: 4 } },
+        { room: 6, edge: 's', atCell: { cx: 8, cy: 5 } },
       ],
       stairsCell: null,
     },
@@ -384,12 +380,14 @@ const RANCH_3BED: HouseTemplate = {
  * front (living + open kitchen/dining), private back (2 beds flanking a short hall + bathroom).
  *
  *   cx:  0    1    2    3    4
- *   cy0  liv  liv  liv  kit  kit
- *   cy1  liv  liv  liv  kit  kit
- *   cy2  liv  liv  liv  kit  kit
+ *   cy0  liv  liv  liv  liv  liv
+ *   cy1  liv  liv  liv  liv  liv
+ *   cy2  liv  liv  liv  liv  liv
  *   cy3  bed1 bed1 H    bed2 bed2
  *   cy4  bed1 bed1 H    bed2 bed2
  *   cy5  bed1 bed1 bth  bed2 bed2
+ *
+ * House polish #2 — the living + kitchen merge into ONE open-plan great room across the front; 5 rooms total.
  */
 const BUNGALOW_2BED: HouseTemplate = {
   id: 'bungalow-2bed',
@@ -400,30 +398,28 @@ const BUNGALOW_2BED: HouseTemplate = {
     {
       storey: 0,
       rooms: [
-        r('living', 0, 0, 2, 2), // 0 living
-        r('kitchen', 3, 0, 4, 2), // 1 kitchen (open dining)
-        r('bedroom', 0, 3, 1, 5), // 2 bedroom 1
-        r('bedroom', 3, 3, 4, 5), // 3 bedroom 2
-        r('hall', 2, 3, 2, 4), // 4 hall
-        r('bathroom', 2, 5, 2, 5), // 5 bathroom
+        r('living', 0, 0, 4, 2), // 0 open-plan living / kitchen across the front
+        r('bedroom', 0, 3, 1, 5), // 1 bedroom 1
+        r('bedroom', 3, 3, 4, 5), // 2 bedroom 2
+        r('hall', 2, 3, 2, 4), // 3 hall
+        r('bathroom', 2, 5, 2, 5), // 4 bathroom
       ],
       doors: [
         { fromRoom: 0, toRoom: null, edge: 'n', atCell: { cx: 1, cy: 0 } }, // front door (living)
-        { fromRoom: 0, toRoom: 1, edge: 'e', atCell: { cx: 2, cy: 0 } }, // living -> kitchen
-        { fromRoom: 0, toRoom: 4, edge: 's', atCell: { cx: 2, cy: 2 } }, // living -> hall
-        { fromRoom: 4, toRoom: 2, edge: 'w', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 1
-        { fromRoom: 4, toRoom: 3, edge: 'e', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 2
-        { fromRoom: 4, toRoom: 5, edge: 's', atCell: { cx: 2, cy: 4 } }, // hall -> bathroom
+        { fromRoom: 0, toRoom: 3, edge: 's', atCell: { cx: 2, cy: 2 } }, // living -> hall
+        { fromRoom: 3, toRoom: 1, edge: 'w', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 1
+        { fromRoom: 3, toRoom: 2, edge: 'e', atCell: { cx: 2, cy: 3 } }, // hall -> bedroom 2
+        { fromRoom: 3, toRoom: 4, edge: 's', atCell: { cx: 2, cy: 4 } }, // hall -> bathroom
       ],
       windows: [
         { room: 0, edge: 'n', atCell: { cx: 0, cy: 0 } },
         { room: 0, edge: 'w', atCell: { cx: 0, cy: 1 } },
-        { room: 1, edge: 'n', atCell: { cx: 4, cy: 0 } },
-        { room: 1, edge: 'e', atCell: { cx: 4, cy: 1 } },
-        { room: 2, edge: 'w', atCell: { cx: 0, cy: 4 } },
-        { room: 2, edge: 's', atCell: { cx: 0, cy: 5 } },
-        { room: 3, edge: 'e', atCell: { cx: 4, cy: 4 } },
-        { room: 3, edge: 's', atCell: { cx: 4, cy: 5 } },
+        { room: 0, edge: 'n', atCell: { cx: 4, cy: 0 } },
+        { room: 0, edge: 'e', atCell: { cx: 4, cy: 1 } },
+        { room: 1, edge: 'w', atCell: { cx: 0, cy: 4 } },
+        { room: 1, edge: 's', atCell: { cx: 0, cy: 5 } },
+        { room: 2, edge: 'e', atCell: { cx: 4, cy: 4 } },
+        { room: 2, edge: 's', atCell: { cx: 4, cy: 5 } },
       ],
       stairsCell: null,
     },
@@ -439,8 +435,10 @@ const BUNGALOW_2BED: HouseTemplate = {
  *   cy0  bed1 bed1 bed1 H   liv  liv  gar  gar  gar
  *   cy1  bed1 bed1 bed1 H   liv  liv  gar  gar  gar
  *   cy2  bth  bth  bth  H   liv  liv  gar  gar  gar
- *   cy3  bed2 bed2 bed2 H   kit  kit  din  din  din
- *   cy4  bed2 bed2 bed2 H   kit  kit  din  din  din
+ *   cy3  bed2 bed2 bed2 H   kit  kit  kit  kit  kit
+ *   cy4  bed2 bed2 bed2 H   kit  kit  kit  kit  kit
+ *
+ * House polish #2 — the dining merges into one open kitchen/dining across the back; 7 rooms total.
  */
 const GARAGE_RANCH: HouseTemplate = {
   id: 'garage-ranch',
@@ -456,30 +454,29 @@ const GARAGE_RANCH: HouseTemplate = {
         r('bedroom', 0, 3, 2, 4), // 2 bedroom 2
         r('hall', 3, 0, 3, 4), // 3 hall spine
         r('living', 4, 0, 5, 2), // 4 living
-        r('kitchen', 4, 3, 5, 4), // 5 kitchen
-        r('dining', 6, 3, 8, 4), // 6 dining
-        r('garage', 6, 0, 8, 2), // 7 garage (2-car)
+        r('kitchen', 4, 3, 8, 4), // 5 open kitchen / dining
+        r('garage', 6, 0, 8, 2), // 6 garage (2-car)
       ],
       doors: [
         { fromRoom: 4, toRoom: null, edge: 'n', atCell: { cx: 4, cy: 0 } }, // front door (living)
-        { fromRoom: 7, toRoom: null, edge: 'n', atCell: { cx: 7, cy: 0 } }, // garage door (exterior)
+        { fromRoom: 6, toRoom: null, edge: 'n', atCell: { cx: 7, cy: 0 } }, // garage door (exterior)
         { fromRoom: 4, toRoom: 3, edge: 'w', atCell: { cx: 4, cy: 1 } }, // living -> hall
         { fromRoom: 3, toRoom: 0, edge: 'w', atCell: { cx: 3, cy: 0 } }, // hall -> bedroom 1
         { fromRoom: 3, toRoom: 1, edge: 'w', atCell: { cx: 3, cy: 2 } }, // hall -> bathroom
         { fromRoom: 3, toRoom: 2, edge: 'w', atCell: { cx: 3, cy: 4 } }, // hall -> bedroom 2
         { fromRoom: 4, toRoom: 5, edge: 's', atCell: { cx: 4, cy: 2 } }, // living -> kitchen
-        { fromRoom: 5, toRoom: 6, edge: 'e', atCell: { cx: 5, cy: 3 } }, // kitchen -> dining
-        { fromRoom: 7, toRoom: 6, edge: 's', atCell: { cx: 7, cy: 2 } }, // garage -> dining (interior)
+        { fromRoom: 6, toRoom: 5, edge: 's', atCell: { cx: 7, cy: 2 } }, // garage -> kitchen (interior)
       ],
       windows: [
         { room: 0, edge: 'n', atCell: { cx: 1, cy: 0 } },
         { room: 0, edge: 'w', atCell: { cx: 0, cy: 1 } },
+        { room: 1, edge: 'w', atCell: { cx: 0, cy: 2 } },
         { room: 2, edge: 'w', atCell: { cx: 0, cy: 4 } },
         { room: 2, edge: 's', atCell: { cx: 1, cy: 4 } },
         { room: 4, edge: 'n', atCell: { cx: 5, cy: 0 } },
         { room: 5, edge: 's', atCell: { cx: 4, cy: 4 } },
-        { room: 6, edge: 's', atCell: { cx: 7, cy: 4 } },
-        { room: 6, edge: 'e', atCell: { cx: 8, cy: 4 } },
+        { room: 5, edge: 's', atCell: { cx: 7, cy: 4 } },
+        { room: 5, edge: 'e', atCell: { cx: 8, cy: 4 } },
       ],
       stairsCell: null,
     },
