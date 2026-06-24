@@ -25,6 +25,55 @@ export interface CellCoord {
   readonly cy: number;
 }
 
+/** A cell EDGE direction (the face shared with the neighbour one step that way). */
+export type WallDir = 'n' | 's' | 'e' | 'w';
+
+/** Per-cell wall bitfield slots (N/S/E/W). A bit set ⇒ that cell edge carries a wall. */
+const WALL_N = 1;
+const WALL_S = 2;
+const WALL_E = 4;
+const WALL_W = 8;
+
+function wallBit(dir: WallDir): number {
+  switch (dir) {
+    case 'n':
+      return WALL_N;
+    case 's':
+      return WALL_S;
+    case 'e':
+      return WALL_E;
+    case 'w':
+      return WALL_W;
+  }
+}
+
+/** The opposite edge — the same wall seen from the neighbour cell (so the block is symmetric). */
+function oppositeBit(dir: WallDir): number {
+  switch (dir) {
+    case 'n':
+      return WALL_S;
+    case 's':
+      return WALL_N;
+    case 'e':
+      return WALL_W;
+    case 'w':
+      return WALL_E;
+  }
+}
+
+function dirDelta(dir: WallDir): { dx: number; dy: number } {
+  switch (dir) {
+    case 'n':
+      return { dx: 0, dy: -1 };
+    case 's':
+      return { dx: 0, dy: 1 };
+    case 'e':
+      return { dx: 1, dy: 0 };
+    case 'w':
+      return { dx: -1, dy: 0 };
+  }
+}
+
 export class NavGrid {
   readonly width: number;
   readonly height: number;
@@ -36,6 +85,13 @@ export class NavGrid {
 
   /** Per-cell traversal cost. blockedCost marks an impassable cell. */
   private readonly cost: Uint32Array;
+  /**
+   * Per-cell EDGE-wall bitfield (N/S/E/W). A wall on the edge between two cells sets the matching bit on
+   * BOTH cells (the cell's dir + the neighbour's opposite dir), so crossing is blocked symmetrically while
+   * BOTH cells stay walkable — the Project-Zomboid interior-partition model. Cell-blocking (`cost`) is the
+   * sealed exterior shell; edge-walls are the interior partitions a 2 m cell grid can't otherwise express.
+   */
+  private readonly edges: Uint8Array;
   private _navRevision = 0;
   private readonly dirtyTiles = new Set<number>();
 
@@ -53,6 +109,7 @@ export class NavGrid {
     this.tilesX = Math.ceil(opts.width / ratio);
     this.tilesY = Math.ceil(opts.height / ratio);
     this.cost = new Uint32Array(opts.width * opts.height).fill(this.settings.baseTraversalCost);
+    this.edges = new Uint8Array(opts.width * opts.height);
   }
 
   get navRevision(): number {
@@ -123,6 +180,93 @@ export class NavGrid {
   /** Clear a cell back to base traversal cost. */
   clear(cx: number, cy: number): number {
     return this.setCost(cx, cy, this.settings.baseTraversalCost);
+  }
+
+  // ---- edge-walls (interior partitions; cells stay walkable) -----------------------------------------
+
+  private inBounds(cx: number, cy: number): boolean {
+    return cx >= 0 && cy >= 0 && cx < this.width && cy < this.height;
+  }
+
+  /**
+   * Set (or clear) the wall on a cell's `dir` edge. Sets the matching bit on (cx,cy) AND the opposite bit on
+   * the neighbour one step that way, so the block is symmetric and BOTH cells stay walkable. Marks the owning
+   * tiles dirty + bumps navRevision so a stale flow field is never served after a partition is added (V5).
+   * A no-op write (bit already in the requested state) neither dirties nor bumps. Deterministic, alloc-free.
+   */
+  setEdgeWall(cx: number, cy: number, dir: WallDir, on: boolean): void {
+    const cell = this.index(cx, cy); // throws if (cx,cy) out of bounds
+    const bit = wallBit(dir);
+    const had = (this.edges[cell]! & bit) !== 0;
+    if (had === on) return; // no change → no dirty, no bump
+    if (on) this.edges[cell]! |= bit;
+    else this.edges[cell]! &= ~bit;
+    this.dirtyTiles.add(this.tileOf(cx, cy));
+    const { dx, dy } = dirDelta(dir);
+    const nx = cx + dx;
+    const ny = cy + dy;
+    if (this.inBounds(nx, ny)) {
+      const ncell = ny * this.width + nx;
+      const obit = oppositeBit(dir);
+      if (on) this.edges[ncell]! |= obit;
+      else this.edges[ncell]! &= ~obit;
+      this.dirtyTiles.add(this.tileOf(nx, ny));
+    }
+    this._navRevision += 1;
+  }
+
+  /**
+   * Put (or remove) a wall on the shared edge between two 4-neighbour cells. Convenience wrapper over
+   * `setEdgeWall` — the placer feeds interior partition edges in here. Throws if the cells are not 4-neighbours.
+   */
+  setWallBetween(ax: number, ay: number, bx: number, by: number, on = true): void {
+    const dir = this.dirBetween(ax, ay, bx, by);
+    this.setEdgeWall(ax, ay, dir, on);
+  }
+
+  /** The edge direction from (ax,ay) toward its 4-neighbour (bx,by). Throws if they are not 4-neighbours. */
+  private dirBetween(ax: number, ay: number, bx: number, by: number): WallDir {
+    const dx = bx - ax;
+    const dy = by - ay;
+    if (Math.abs(dx) + Math.abs(dy) !== 1) {
+      throw new Error(`cells (${ax},${ay})-(${bx},${by}) are not 4-neighbours`);
+    }
+    if (dx === 1) return 'e';
+    if (dx === -1) return 'w';
+    if (dy === 1) return 's';
+    return 'n';
+  }
+
+  /** True when the cell's `dir` edge carries a wall. */
+  wallOnEdge(cx: number, cy: number, dir: WallDir): boolean {
+    const cell = this.index(cx, cy);
+    return (this.edges[cell]! & wallBit(dir)) !== 0;
+  }
+
+  /**
+   * Can a body cross from (ax,ay) to its 4-neighbour (bx,by)? False iff a wall sits on the shared edge. Cells
+   * must be 4-neighbours (throws otherwise) and in bounds. O(1) bit test — safe in the flow-field/steering hot
+   * loops. Cell-blocking is orthogonal: a blocked cell is still impassable regardless of edges (callers test
+   * `isBlocked` themselves).
+   */
+  canCross(ax: number, ay: number, bx: number, by: number): boolean {
+    const dir = this.dirBetween(ax, ay, bx, by);
+    const cell = this.index(ax, ay); // throws if out of bounds
+    this.index(bx, by); // bounds-check the neighbour too
+    return (this.edges[cell]! & wallBit(dir)) === 0;
+  }
+
+  /**
+   * Can a body step one cell from (cx,cy) by (dx,dy) (each in -1..1, not both 0) without crossing an edge-wall?
+   * Cardinal: the single shared edge must be clear. Diagonal: BOTH perpendicular shared edges must be clear, so
+   * a diagonal never "cuts the corner" past two perpendicular partitions (block if EITHER is walled). Assumes
+   * the destination is in bounds (callers gate bounds + cell-blocked first). O(1).
+   */
+  canStep(cx: number, cy: number, dx: number, dy: number): boolean {
+    if (dx !== 0 && dy !== 0) {
+      return this.canCross(cx, cy, cx + dx, cy) && this.canCross(cx, cy, cx, cy + dy);
+    }
+    return this.canCross(cx, cy, cx + dx, cy + dy);
   }
 
   /** Snapshot of currently-dirty tiles (the only tiles a rebuild must touch — V5). */

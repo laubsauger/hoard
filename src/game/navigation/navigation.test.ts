@@ -50,6 +50,65 @@ describe('NavGrid dirty-region tracking (V5)', () => {
   });
 });
 
+describe('NavGrid edge-walls (interior partitions — PZ model)', () => {
+  it('set/query a wall on a cell edge — both cells stay walkable', () => {
+    const g = grid(8, 8);
+    expect(g.wallOnEdge(2, 2, 'e')).toBe(false);
+    g.setEdgeWall(2, 2, 'e', true);
+    expect(g.wallOnEdge(2, 2, 'e')).toBe(true);
+    // cells are NOT blocked — only the cross-edge is walled
+    expect(g.isBlocked(g.index(2, 2))).toBe(false);
+    expect(g.isBlocked(g.index(3, 2))).toBe(false);
+  });
+
+  it('a wall is symmetric: it blocks crossing from BOTH sides (neighbour sees the opposite edge)', () => {
+    const g = grid(8, 8);
+    g.setEdgeWall(2, 2, 'e', true);
+    expect(g.wallOnEdge(2, 2, 'e')).toBe(true);
+    expect(g.wallOnEdge(3, 2, 'w')).toBe(true); // opposite edge set on the neighbour
+    expect(g.canCross(2, 2, 3, 2)).toBe(false);
+    expect(g.canCross(3, 2, 2, 2)).toBe(false);
+    // an untouched perpendicular edge is still crossable
+    expect(g.canCross(2, 2, 2, 3)).toBe(true);
+  });
+
+  it('setWallBetween / clear toggles the shared edge and restores crossing', () => {
+    const g = grid(8, 8);
+    g.setWallBetween(4, 4, 4, 5);
+    expect(g.canCross(4, 4, 4, 5)).toBe(false);
+    expect(g.wallOnEdge(4, 4, 's')).toBe(true);
+    g.setWallBetween(4, 4, 4, 5, false);
+    expect(g.canCross(4, 4, 4, 5)).toBe(true);
+    expect(g.wallOnEdge(4, 4, 's')).toBe(false);
+  });
+
+  it('canCross requires 4-neighbours (diagonals/non-adjacent throw)', () => {
+    const g = grid(8, 8);
+    expect(() => g.canCross(2, 2, 3, 3)).toThrow(/4-neighbour/);
+    expect(() => g.canCross(2, 2, 4, 2)).toThrow(/4-neighbour/);
+    expect(() => g.setWallBetween(2, 2, 3, 3)).toThrow(/4-neighbour/);
+  });
+
+  it('a diagonal step does not cut the corner past a single perpendicular edge-wall (canStep)', () => {
+    const g = grid(8, 8);
+    // wall on the E edge of (2,2) — the diagonal toward (3,3) would clip past it
+    g.setEdgeWall(2, 2, 'e', true);
+    expect(g.canStep(2, 2, 1, 1)).toBe(false); // blocked: one of the two shared edges is walled
+    expect(g.canStep(2, 2, 0, 1)).toBe(true); // the clear cardinal still passes
+  });
+
+  it('setEdgeWall bumps navRevision + dirties both cells tiles; a no-op write does neither', () => {
+    const g = grid(24, 24);
+    const rev0 = g.navRevision;
+    g.setEdgeWall(7, 7, 'e', true); // spans tiles owning (7,7) and (8,8)... here (7,7)&(8,7)
+    expect(g.navRevision).toBe(rev0 + 1);
+    expect(g.dirtyTileCount).toBeGreaterThanOrEqual(1);
+    const rev1 = g.navRevision;
+    g.setEdgeWall(7, 7, 'e', true); // already set → no-op
+    expect(g.navRevision).toBe(rev1);
+  });
+});
+
 describe('FlowField shared field (V15)', () => {
   it('every reachable cell, followed by its flow vector, converges on the target', () => {
     const g = grid(16, 16);
