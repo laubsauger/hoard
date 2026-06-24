@@ -239,6 +239,8 @@ export class GameRuntime {
   private readonly windowSystem: WindowSystem;
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
+  /** Resolved world config — here only for the authored wall height (glass-shatter burst origin, T108). */
+  private readonly worldCfg = resolveDomain(worldConfig, REFERENCE_TIER);
 
   private playerPos: Vec3;
   private playerHeading = 0;
@@ -689,6 +691,30 @@ export class GameRuntime {
     return near ? { navCell: near.navCell, window: near.window } : null;
   }
 
+  /**
+   * Shared feedback for EVERY pane smash (verb / projectile / zombie attrition): push a `glassShatter` visual
+   * event (the render's shard burst) + a loud `glass` stimulus the horde hears (V14). Shards spray off the pane
+   * along the wall's facing axis, signed toward `(towardX,towardZ)` — the smasher's side (the player for the
+   * verb; the bullet's exit for a shot) so the burst reads from the camera. Burst origin ≈ window-centre height.
+   */
+  private emitGlassShatter(navCell: number, towardX: number, towardZ: number): void {
+    const grid = this.scene.navGrid;
+    const cs = grid.settings.navCellSize;
+    const { cx, cy } = grid.coordOf(navCell);
+    const wx = (cx + 0.5) * cs;
+    const wz = (cy + 0.5) * cs;
+    const blocked = (bx: number, by: number): boolean =>
+      bx < 0 || by < 0 || bx >= grid.width || by >= grid.height ? true : grid.isBlocked(grid.index(bx, by));
+    const alongX = blocked(cx - 1, cy) && blocked(cx + 1, cy); // wall runs along X → pane faces ±Z
+    let nx = 0;
+    let nz = 0;
+    if (alongX) nz = Math.sign(towardZ - wz) || 1;
+    else nx = Math.sign(towardX - wx) || 1;
+    const y = this.worldCfg.buildingWallHeightMeters * 0.55; // ~window-centre height
+    this.visualEvents.push({ kind: 'glassShatter', id: this.ids.next<EventId>('event'), x: wx, y, z: wz, nx, nz });
+    this.audio.hearEvent('glass', wx, wz, this.clock.tick);
+  }
+
   /** True iff the player's pack holds at least one of `item`. */
   private playerHas(item: number): boolean {
     const ref = this.namedContainers.get('player');
@@ -701,7 +727,7 @@ export class GameRuntime {
   smashNearestWindow(): boolean {
     const near = this.nearestWindowInReach();
     if (!near || !this.windowSystem.smashGlass(near.navCell)) return false;
-    this.audio.hearEvent('glass', near.window.x, near.window.z, this.clock.tick);
+    this.emitGlassShatter(near.navCell, this.playerPos.x, this.playerPos.z); // shards spray toward the player
     return true;
   }
 
@@ -1093,7 +1119,10 @@ export class GameRuntime {
         if (navCell >= 0) {
           if (this.windowSystem.isOpening(navCell)) continue; // smashed/glassless hole — shot flies through
           if (this.windowSystem.glassOf(navCell) === 'intact' && (this.windowSystem.boardsOf(navCell) ?? 0) === 0) {
-            if (this.windowSystem.applyGlassHit(navCell)) continue; // shattered → shot continues past the opening
+            if (this.windowSystem.applyGlassHit(navCell)) {
+              this.emitGlassShatter(navCell, wx + dirX, wz + dirZ); // shards spray along the bullet's travel
+              continue; // shattered → shot continues past the opening
+            }
             return d; // pane absorbed the hit but did not break (HP > 1) — round stops at the glass
           }
           // a boarded window blocks the round (falls through to the wall return below)
@@ -1258,7 +1287,16 @@ export class GameRuntime {
         underAttack.push(this.windowSystem.cellOf(w.cx, w.cy));
       }
     }
+    // Snapshot pre-tick glass so we can fire a shard burst for any pane a zombie actually SMASHES this tick
+    // (a board-tear is silent visually — only a glass break throws shards).
+    const wasIntact = underAttack.map((cell) => this.windowSystem.glassOf(cell) === 'intact');
     this.windowSystem.tick(underAttack, ticks);
+    for (let i = 0; i < underAttack.length; i++) {
+      const cell = underAttack[i]!;
+      if (wasIntact[i] && this.windowSystem.glassOf(cell) === 'smashed') {
+        this.emitGlassShatter(cell, this.playerPos.x, this.playerPos.z); // shards toward the camera/player
+      }
+    }
   }
 
   /**

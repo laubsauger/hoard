@@ -28,6 +28,7 @@ export type VisualEvent =
   | { readonly kind: 'hitReaction'; readonly id: EventId; readonly target: EntityId; readonly region: AnatomyRegion; readonly dirX: number; readonly dirZ: number; readonly energy: number }
   | { readonly kind: 'bloodSpray'; readonly id: EventId; readonly x: number; readonly y: number; readonly z: number; readonly dirX: number; readonly dirZ: number }
   | { readonly kind: 'partDetached'; readonly id: EventId; readonly target: EntityId; readonly region: AnatomyRegion }
+  | { readonly kind: 'glassShatter'; readonly id: EventId; readonly x: number; readonly y: number; readonly z: number; readonly nx: number; readonly nz: number }
   | { readonly kind: 'soundEmitted'; readonly id: EventId; readonly stimulus: StimulusId; readonly x: number; readonly z: number; readonly intensity: number };
 
 export type WorldEventKind = WorldEvent['kind'];

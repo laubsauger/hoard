@@ -51,4 +51,27 @@ describe('window climb-through vault (T108 / V68 / V70)', () => {
     // The crux: NO window op ever unblocks the nav cell — the wall stays sealed for AI/pathing (V68).
     expect(grid.isBlocked(cell)).toBe(true);
   });
+
+  it('a successful pane smash enqueues a glassShatter visual event for the render shard burst (T108)', () => {
+    const rt = makeRuntime();
+    // Find an INTACT-glass window and walk the player into reach of it.
+    const intact = rt.windowViews().find((w) => w.glass === 'intact');
+    expect(intact).toBeDefined();
+    for (let i = 0; i < 800; i++) {
+      const p = rt.player();
+      const dx = intact!.x - p.x;
+      const dz = intact!.z - p.z;
+      if (Math.hypot(dx, dz) <= 2.0) break;
+      rt.movePlayer(dx, dz, 0.05);
+    }
+    rt.pollEvents(); // drain any walk/setup events first
+    const smashed = rt.smashNearestWindow();
+    if (smashed) {
+      const ev = rt.pollEvents().visual.filter((e) => e.kind === 'glassShatter');
+      expect(ev.length).toBeGreaterThan(0);
+      // The burst carries a unit-ish pane normal in XZ (one axis set, the other zero).
+      const g = ev[0]!;
+      if (g.kind === 'glassShatter') expect(Math.abs(g.nx) + Math.abs(g.nz)).toBeGreaterThan(0);
+    }
+  });
 });

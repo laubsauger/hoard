@@ -32,7 +32,7 @@ import {
   InstancedBufferAttribute,
   type Scene,
 } from 'three';
-import type { AnatomyRegion } from '../../game/core/contracts/events';
+import type { AnatomyRegion, VisualEvent } from '../../game/core/contracts/events';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -56,6 +56,16 @@ export interface ImpactSettings {
   readonly sparkGravityMps2: number;
   readonly sparkDragPerSecond: number;
   readonly sparkColor: { readonly r: number; readonly g: number; readonly b: number };
+  readonly shardPoolSize: number;
+  readonly shardCount: number;
+  readonly shardSizeMeters: number;
+  readonly shardLifeSeconds: number;
+  readonly shardSpeedMinMps: number;
+  readonly shardSpeedMaxMps: number;
+  readonly shardSpreadRad: number;
+  readonly shardGravityMps2: number;
+  readonly shardSpinMaxRadPerSec: number;
+  readonly shardColor: { readonly r: number; readonly g: number; readonly b: number };
   readonly holePoolSize: number;
   readonly holeSizeMeters: number;
   readonly holeLifeSeconds: number;
@@ -82,6 +92,20 @@ export function resolveImpactSettings(tier: QualityTier): ImpactSettings {
       r: resolve(renderingConfig.impactSparkColorR, tier),
       g: resolve(renderingConfig.impactSparkColorG, tier),
       b: resolve(renderingConfig.impactSparkColorB, tier),
+    },
+    shardPoolSize: resolve(renderingConfig.impactShardPoolSize, tier),
+    shardCount: resolve(renderingConfig.impactShardCount, tier),
+    shardSizeMeters: resolve(renderingConfig.impactShardSizeMeters, tier),
+    shardLifeSeconds: resolve(renderingConfig.impactShardLifeSeconds, tier),
+    shardSpeedMinMps: resolve(renderingConfig.impactShardSpeedMinMps, tier),
+    shardSpeedMaxMps: resolve(renderingConfig.impactShardSpeedMaxMps, tier),
+    shardSpreadRad: resolve(renderingConfig.impactShardSpreadRad, tier),
+    shardGravityMps2: resolve(renderingConfig.impactShardGravityMps2, tier),
+    shardSpinMaxRadPerSec: resolve(renderingConfig.impactShardSpinMaxRadPerSec, tier),
+    shardColor: {
+      r: resolve(renderingConfig.impactShardColorR, tier),
+      g: resolve(renderingConfig.impactShardColorG, tier),
+      b: resolve(renderingConfig.impactShardColorB, tier),
     },
     holePoolSize: resolve(renderingConfig.impactHolePoolSize, tier),
     holeSizeMeters: resolve(renderingConfig.impactHoleSizeMeters, tier),
@@ -135,6 +159,24 @@ export class ImpactSim {
   private readonly sBright: Float32Array; // per-spark spawn brightness (reduce-flashes dims it)
   private sCount = 0;
 
+  // --- glass-shard SoA (compacted: live entries are [0, gCount)) — pale tumbling debris off a smashed pane ---
+  readonly gx: Float32Array;
+  readonly gy: Float32Array;
+  readonly gz: Float32Array;
+  readonly gvx: Float32Array;
+  readonly gvy: Float32Array;
+  readonly gvz: Float32Array;
+  readonly gSize: Float32Array;
+  readonly gFade: Float32Array; // 0..1 visibility (1 fresh -> 0 expired); shards shrink as they fade
+  readonly gax: Float32Array; // tumble axis (unit) x
+  readonly gay: Float32Array; // tumble axis y
+  readonly gaz: Float32Array; // tumble axis z
+  readonly gAng: Float32Array; // current tumble angle (rad), advanced by gAngVel
+  private readonly gAngVel: Float32Array;
+  private readonly gAge: Float32Array;
+  private readonly gLife: Float32Array;
+  private gCount = 0;
+
   // --- bullet-hole SoA (ring buffer) ---
   readonly hx: Float32Array;
   readonly hy: Float32Array;
@@ -179,6 +221,22 @@ export class ImpactSim {
     this.sAge = new Float32Array(S);
     this.sLife = new Float32Array(S);
     this.sBright = new Float32Array(S);
+    const G = Math.max(1, settings.shardPoolSize);
+    this.gx = new Float32Array(G);
+    this.gy = new Float32Array(G);
+    this.gz = new Float32Array(G);
+    this.gvx = new Float32Array(G);
+    this.gvy = new Float32Array(G);
+    this.gvz = new Float32Array(G);
+    this.gSize = new Float32Array(G);
+    this.gFade = new Float32Array(G);
+    this.gax = new Float32Array(G);
+    this.gay = new Float32Array(G);
+    this.gaz = new Float32Array(G);
+    this.gAng = new Float32Array(G);
+    this.gAngVel = new Float32Array(G);
+    this.gAge = new Float32Array(G);
+    this.gLife = new Float32Array(G);
     const H = Math.max(1, settings.holePoolSize);
     this.hx = new Float32Array(H);
     this.hy = new Float32Array(H);
@@ -203,6 +261,9 @@ export class ImpactSim {
 
   get sparkCount(): number {
     return this.sCount;
+  }
+  get shardCount(): number {
+    return this.gCount;
   }
   get holeCount(): number {
     return this.hCount;
@@ -309,6 +370,82 @@ export class ImpactSim {
     }
   }
 
+  /**
+   * GLASS SHATTER (T108): a window pane breaking. Throws a clutch of pale faceted shards OUT of the pane
+   * within a cone around the wall normal (nx,ny,nz — pointing off the pane toward the smasher), each with a
+   * random tumble axis + spin. Shards arc under gravity and shrink away (no additive flash — glass, not spark).
+   * reduceFlashes thins the clutch (V29). Compacted pool, hard-capped (V24). Pure (no GPU / no sim coupling).
+   */
+  glassShatter(x: number, y: number, z: number, nx: number, ny: number, nz: number, ctx: ImpactIngestContext): void {
+    const s = this.settings;
+    const nlen = Math.hypot(nx, ny, nz);
+    if (nlen < 1e-6) return;
+    const ux = nx / nlen;
+    const uy = ny / nlen;
+    const uz = nz / nlen;
+    let n = s.shardCount;
+    if (ctx.reduceFlashes) n = Math.max(1, Math.round(n * 0.6)); // V29 — thin the burst (less visual churn)
+    // Orthonormal basis (t,b) spanning the plane perpendicular to the normal so the cone scatters evenly.
+    this._n.set(ux, uy, uz);
+    if (Math.abs(uy) < 0.99) this._t.set(0, 1, 0);
+    else this._t.set(1, 0, 0);
+    this._t.cross(this._n).normalize();
+    this._b.copy(this._n).cross(this._t).normalize();
+    for (let k = 0; k < n; k++) {
+      if (this.gCount >= this.gx.length) break; // hard cap (V24)
+      const i = this.gCount++;
+      const theta = rnd() * s.shardSpreadRad;
+      const phi = rnd() * Math.PI * 2;
+      const ct = Math.cos(theta);
+      const st = Math.sin(theta);
+      const cp = Math.cos(phi);
+      const sp = Math.sin(phi);
+      const dx = ux * ct + (this._t.x * cp + this._b.x * sp) * st;
+      const dy = uy * ct + (this._t.y * cp + this._b.y * sp) * st;
+      const dz = uz * ct + (this._t.z * cp + this._b.z * sp) * st;
+      const speed = s.shardSpeedMinMps + rnd() * (s.shardSpeedMaxMps - s.shardSpeedMinMps);
+      this.gx[i] = x;
+      this.gy[i] = y;
+      this.gz[i] = z;
+      this.gvx[i] = dx * speed;
+      this.gvy[i] = dy * speed + rnd() * 0.6; // slight upward kick so some shards arc before falling
+      this.gvz[i] = dz * speed;
+      this.gSize[i] = s.shardSizeMeters * (0.5 + rnd() * 1.0);
+      this.gAge[i] = 0;
+      this.gLife[i] = s.shardLifeSeconds * (0.6 + rnd() * 0.8);
+      this.gFade[i] = 1;
+      // random tumble axis (unit) + spin speed
+      let axx = rnd() * 2 - 1;
+      let axy = rnd() * 2 - 1;
+      let axz = rnd() * 2 - 1;
+      const al = Math.hypot(axx, axy, axz) || 1;
+      axx /= al; axy /= al; axz /= al;
+      this.gax[i] = axx;
+      this.gay[i] = axy;
+      this.gaz[i] = axz;
+      this.gAng[i] = rnd() * Math.PI * 2;
+      this.gAngVel[i] = (rnd() * 2 - 1) * s.shardSpinMaxRadPerSec;
+    }
+  }
+
+  private moveShard(from: number, to: number): void {
+    this.gx[to] = this.gx[from]!;
+    this.gy[to] = this.gy[from]!;
+    this.gz[to] = this.gz[from]!;
+    this.gvx[to] = this.gvx[from]!;
+    this.gvy[to] = this.gvy[from]!;
+    this.gvz[to] = this.gvz[from]!;
+    this.gSize[to] = this.gSize[from]!;
+    this.gFade[to] = this.gFade[from]!;
+    this.gax[to] = this.gax[from]!;
+    this.gay[to] = this.gay[from]!;
+    this.gaz[to] = this.gaz[from]!;
+    this.gAng[to] = this.gAng[from]!;
+    this.gAngVel[to] = this.gAngVel[from]!;
+    this.gAge[to] = this.gAge[from]!;
+    this.gLife[to] = this.gLife[from]!;
+  }
+
   update(dt: number): void {
     if (dt < 0) throw new Error(`dt must be non-negative, got ${dt}`);
     const s = this.settings;
@@ -332,6 +469,24 @@ export class ImpactSim {
       const t = this.sAge[i]! / this.sLife[i]!;
       this.sFade[i] = this.sBright[i]! * (1 - t) * (1 - t);
     }
+    // Glass shards: integrate (gravity, no drag — glass keeps momentum), tumble, age, shrink-fade; swap-remove.
+    for (let i = this.gCount - 1; i >= 0; i--) {
+      this.gAge[i]! += dt;
+      if (this.gAge[i]! >= this.gLife[i]!) {
+        const last = --this.gCount;
+        if (i !== last) this.moveShard(last, i);
+        continue;
+      }
+      this.gvy[i]! -= s.shardGravityMps2 * dt;
+      this.gx[i]! += this.gvx[i]! * dt;
+      this.gy[i]! += this.gvy[i]! * dt;
+      this.gz[i]! += this.gvz[i]! * dt;
+      this.gAng[i]! += this.gAngVel[i]! * dt;
+      // Hold full size, then shrink/fade the final third of life (a shard winking out, not popping).
+      const t = this.gAge[i]! / this.gLife[i]!;
+      this.gFade[i] = t < 0.66 ? 1 : Math.max(0, (1 - t) / 0.34);
+    }
+
     // Bullet holes: persist at full size, then a gentle end-of-life shrink/fade before the ring buffer recycles.
     ageDecals(this.hAge, this.hVis, this.hCount, dt, s.holeLifeSeconds, s.holeFadeFraction);
     // Wounds: same persistence + fade profile (their own life/fade tunables).
@@ -382,8 +537,10 @@ const DECAL_SURFACE_OFFSET = 0.02; // m — lift the decal a hair off the surfac
 export class ImpactView {
   readonly sim: ImpactSim;
   private readonly sparkMesh: InstancedMesh;
+  private readonly shardMesh: InstancedMesh;
   private readonly holeMesh: InstancedMesh;
   private readonly woundMesh: InstancedMesh;
+  private readonly shardColor: Color;
   private readonly dummy = new Object3D();
   private readonly tmp = new Color();
   private readonly normalScratch = new Vector3();
@@ -401,6 +558,18 @@ export class ImpactView {
     this.sparkMesh = registry.track(new InstancedMesh(sparkGeo, sparkMat, Math.max(1, settings.sparkPoolSize)), 'buffer', 'impact.sparkMesh');
     primeInstanced(this.sparkMesh);
     this.sparkMesh.renderOrder = 3;
+
+    // ---- glass shards: pale faceted chip, transparent (NOT additive — glass, not a hot flash). Tumbles + falls. ----
+    this.shardColor = new Color(settings.shardColor.r, settings.shardColor.g, settings.shardColor.b);
+    const shardGeo = registry.track(new IcosahedronGeometry(1, 0), 'geometry', 'impact.shardGeo');
+    const shardMat = registry.track(
+      new MeshBasicMaterial({ name: 'impact.shard', transparent: true, opacity: 0.78, depthWrite: false }),
+      'material',
+      'impact.shardMat',
+    );
+    this.shardMesh = registry.track(new InstancedMesh(shardGeo, shardMat, Math.max(1, settings.shardPoolSize)), 'buffer', 'impact.shardMesh');
+    primeInstanced(this.shardMesh);
+    this.shardMesh.renderOrder = 3;
 
     // ---- bullet holes: dark disc projected on the surface. V56 depth policy. ----
     const holeGeo = registry.track(new CircleGeometry(0.5, 16), 'geometry', 'impact.holeGeo');
@@ -443,12 +612,25 @@ export class ImpactView {
 
   /** Add the impact meshes to the scene graph (parent owns graph membership; registry owns disposal). */
   attachTo(scene: Scene | Object3D): void {
-    scene.add(this.sparkMesh, this.holeMesh, this.woundMesh);
+    scene.add(this.sparkMesh, this.shardMesh, this.holeMesh, this.woundMesh);
   }
 
   /** STRUCTURE hit — bullet hole + spark burst (T80). */
   structureImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, ctx: ImpactIngestContext): void {
     this.sim.structureImpact(x, y, z, nx, ny, nz, ctx);
+  }
+
+  /** GLASS SHATTER (T108) — a window pane breaking throws a pale tumbling shard burst off the pane normal. */
+  glassShatter(x: number, y: number, z: number, nx: number, ny: number, nz: number, ctx: ImpactIngestContext): void {
+    this.sim.glassShatter(x, y, z, nx, ny, nz, ctx);
+  }
+
+  /** Drain glassShatter VISUAL events from the sim stream into shard bursts (T108). Mirrors blood/gibView.consume:
+   *  a pure read of the drained stream (V2) — every window smash (verb / shot / zombie attrition) lands here. */
+  consume(visual: readonly VisualEvent[], ctx: ImpactIngestContext): void {
+    for (const e of visual) {
+      if (e.kind === 'glassShatter') this.sim.glassShatter(e.x, e.y, e.z, e.nx, 0, e.nz, ctx);
+    }
   }
 
   /** BODY hit — dark wound mark (T81). */
@@ -476,6 +658,21 @@ export class ImpactView {
     this.sparkMesh.count = ns;
     this.sparkMesh.instanceMatrix.needsUpdate = true;
     if (this.sparkMesh.instanceColor) this.sparkMesh.instanceColor.needsUpdate = true;
+
+    // ---- glass shards: position + tumble (axis-angle) + shrink as it fades ----
+    const ng = sim.shardCount;
+    for (let i = 0; i < ng; i++) {
+      const f = sim.gFade[i]!;
+      this.dummy.position.set(sim.gx[i]!, sim.gy[i]!, sim.gz[i]!);
+      this.dummy.quaternion.setFromAxisAngle(this.normalScratch.set(sim.gax[i]!, sim.gay[i]!, sim.gaz[i]!), sim.gAng[i]!);
+      this.dummy.scale.setScalar(sim.gSize[i]! * Math.max(0.0001, f));
+      this.dummy.updateMatrix();
+      this.shardMesh.setMatrixAt(i, this.dummy.matrix);
+      this.shardMesh.setColorAt(i, this.tmp.setRGB(this.shardColor.r, this.shardColor.g, this.shardColor.b));
+    }
+    this.shardMesh.count = ng;
+    this.shardMesh.instanceMatrix.needsUpdate = true;
+    if (this.shardMesh.instanceColor) this.shardMesh.instanceColor.needsUpdate = true;
 
     // ---- bullet holes ----
     const nh = sim.holeCount;

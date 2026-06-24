@@ -110,6 +110,46 @@ describe('ImpactSim — body wound (T81)', () => {
     for (let k = 0; k < 8; k++) small.wound(k, 0, 0, 'torsoUpper', 0, 1, ctx);
     expect(small.woundCount).toBe(3);
   });
+});
+
+describe('ImpactSim — glass shatter (T108): pane-break shard burst', () => {
+  it('throws shards OUT of the pane along the +normal, from the window point', () => {
+    const s = new ImpactSim(settings);
+    s.glassShatter(5, 1.8, 2, 0, 0, 1, ctx); // pane faces +z; shards spray +z
+    expect(s.shardCount).toBe(settings.shardCount);
+    let sumVz = 0;
+    for (let i = 0; i < s.shardCount; i++) sumVz += s.gvz[i]!;
+    expect(sumVz).toBeGreaterThan(0); // net launch along the +normal
+    for (let i = 0; i < s.shardCount; i++) {
+      expect(s.gx[i]).toBeCloseTo(5, 6);
+      expect(s.gz[i]).toBeCloseTo(2, 6);
+    }
+  });
+
+  it('shards fall under gravity, tumble, then shrink-fade and expire', () => {
+    const s = new ImpactSim(settings);
+    s.glassShatter(0, 2, 0, 1, 0, 0, ctx);
+    const ang0 = s.gAng[0]!;
+    s.update(0.1);
+    expect(s.gAng[0]!).not.toBe(ang0); // tumbling
+    // Past max life every shard is swap-removed.
+    s.update(settings.shardLifeSeconds * 2);
+    expect(s.shardCount).toBe(0);
+  });
+
+  it('shard pool is hard-capped (V24) — extra bursts never grow it past the cap', () => {
+    const small = new ImpactSim({ ...settings, shardPoolSize: 8, shardCount: 6 });
+    for (let k = 0; k < 10; k++) small.glassShatter(k, 1.8, 0, 1, 0, 0, ctx);
+    expect(small.shardCount).toBe(8);
+  });
+
+  it('reduce-flashes thins the shard burst (V29)', () => {
+    const full = new ImpactSim(settings);
+    full.glassShatter(0, 1.8, 0, 1, 0, 0, ctx);
+    const reduced = new ImpactSim(settings);
+    reduced.glassShatter(0, 1.8, 0, 1, 0, 0, { goreIntensity: 1, reduceFlashes: true });
+    expect(reduced.shardCount).toBeLessThan(full.shardCount);
+  });
 
   it('wounds persist then fade out over their lifetime', () => {
     const s = new ImpactSim(settings);
