@@ -121,6 +121,15 @@ describe('DoorSystem (T46)', () => {
     expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(true);
   });
 
+  it('isEdgeDoor distinguishes edge-doors from cell-doors (the door-close trap-guard gates on it)', () => {
+    const grid = new NavGrid({ width: 7, height: 7 });
+    const edge = new DoorSystem(grid, [{ cx: 3, cy: 3, edgeDir: 's' }]);
+    const cell = new DoorSystem(grid, [{ cx: 1, cy: 1 }]);
+    expect(edge.isEdgeDoor(grid.index(3, 3))).toBe(true);
+    expect(cell.isEdgeDoor(grid.index(1, 1))).toBe(false);
+    expect(edge.isEdgeDoor(grid.index(0, 0))).toBe(false); // no door at this cell
+  });
+
   it('an EDGE-door reads its initial access from the authored edge-wall + reports its dir + edge-midpoint centre', () => {
     const grid = new NavGrid({ width: 7, height: 7 });
     grid.setWallBetween(3, 3, 4, 3, true); // pre-walled edge toward 'e' ⇒ starts closed

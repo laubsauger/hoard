@@ -909,10 +909,14 @@ export class GameRuntime {
    *  it; blocking restores it (V5 local edit). Returns the resulting access, or undefined if no door/locked. */
   setDoor(navCell: number, open: boolean): 'open' | 'closed' | 'locked' | undefined {
     if (open) return this.doorSystem.open(navCell) ? 'open' : this.doorSystem.accessOf(navCell);
-    // Closing: refuse if the player's body overlaps the door cell — blocking it would trap them. No-op return
-    // of the current (still-open) access so the UI shows the close simply did not take (V42 trap guard).
+    // Closing a CELL-door onto the player's body would trap them in a solid cell — refuse it and no-op return the
+    // current (still-open) access (V42 trap guard). An EDGE-door only walls the cell EDGE; both cells stay
+    // walkable, so closing it never traps anyone — the guard MUST NOT block it (that was the "can't close doors"
+    // bug: the player stands in the door's own room cell to reach it, so the overlap check always tripped).
     const { cx, cy } = this.scene.navGrid.coordOf(navCell);
-    if (this.playerOverlapsCell(cx, cy)) return this.doorSystem.accessOf(navCell);
+    if (!this.doorSystem.isEdgeDoor(navCell) && this.playerOverlapsCell(cx, cy)) {
+      return this.doorSystem.accessOf(navCell);
+    }
     return this.doorSystem.close(navCell) ? 'closed' : this.doorSystem.accessOf(navCell);
   }
 
@@ -921,9 +925,16 @@ export class GameRuntime {
   toggleNearestDoor(): 'open' | 'closed' | 'locked' | null {
     const near = this.doorSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
     if (!near) return null;
-    // Closing onto the player traps them (V42) — refuse the close half of the toggle when the player's body
-    // overlaps the door cell; opening is always safe. Return the unchanged access so the prompt stays honest.
-    if (near.door.access === 'open' && this.playerOverlapsCell(near.door.cx, near.door.cy)) {
+    // Closing a CELL-door onto the player traps them in a solid cell (V42) — refuse the close half of the toggle
+    // when the body overlaps that cell. An EDGE-door only walls the cell EDGE (both cells stay walkable) so it
+    // can never trap them — closing is always safe (the player stands in the door's room cell to reach it, so
+    // the overlap guard previously made every edge-door close a no-op — the "can't close doors" bug). Opening is
+    // always safe. Return the unchanged access so the prompt stays honest.
+    if (
+      near.door.access === 'open' &&
+      !this.doorSystem.isEdgeDoor(near.navCell) &&
+      this.playerOverlapsCell(near.door.cx, near.door.cy)
+    ) {
       return near.door.access;
     }
     return this.doorSystem.toggle(near.navCell) ?? null;

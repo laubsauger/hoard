@@ -79,8 +79,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
     aim.setFromPointer(e.clientX, e.clientY, canvas.getBoundingClientRect());
   };
   const onClick = (): void => {
-    gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio.
-    gameAudio.gunshot(); // procedural gunshot synthesized directly off the player-fire path.
+    gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio (always, even a dry click).
     const runtime = getRuntime();
     const access = getAccess();
     const hit = aim.worldPoint(camera);
@@ -91,6 +90,12 @@ export function registerInput(args: RegisterInputArgs): () => void {
     // Aim center-mass; the sim SCATTERS the struck region per body (rollHitLocation) so limbs/head get hit
     // → dismemberment. The returned shot.region is the actual region struck (drives the wound mark below).
     const shot = runtime.fire(dx, dz, 'torsoUpper', { rollHitLocation: true });
+    // A DRY CLICK (empty mag, nothing in reserve) fires no round — `firedRounds` is 0. Don't play the gunshot,
+    // muzzle flash, tracer, recoil report, or self-noise for it (matches the runtime's own gunfire-noise gate);
+    // otherwise the player "shoots" with no ammo. `undefined` = a melee/non-counting weapon, which DOES act.
+    const didFire = shot.firedRounds === undefined || shot.firedRounds > 0;
+    if (!didFire) return;
+    gameAudio.gunshot(); // procedural gunshot synthesized directly off the player-fire path.
     bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
     // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
     // never draws through a wall on a miss into structure (V49/V53/B20).

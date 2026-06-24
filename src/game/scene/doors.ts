@@ -149,6 +149,13 @@ export class DoorSystem {
     return this.byCell.get(navCell)?.access;
   }
 
+  /** True when the door at navCell is an EDGE-door (thin-wall house): closing WALLS the cell edge but BOTH cells
+   *  stay walkable — so closing can never trap a body in a solid cell, unlike a legacy cell-door. False for a
+   *  cell-door or no door. The door-close trap-guard (V42) only needs to fire for cell-doors. */
+  isEdgeDoor(navCell: number): boolean {
+    return this.byCell.get(navCell)?.edge != null;
+  }
+
   /** Open a door: an edge-door CLEARS its cell EDGE (both cells stay walkable); a cell-door CLEARS its cell —
    *  either way nav + sight + sound pass through it (V5 local edit). No-op if locked. */
   open(navCell: number): boolean {
