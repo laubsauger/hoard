@@ -101,6 +101,14 @@ describe('city district scene (T80 — large multi-building world)', () => {
     }
   });
 
+  // P2: street variety — the district draws from MULTIPLE single-storey archetypes (not one repeated shell).
+  it('varies house archetypes across the street (P2)', () => {
+    const { block } = buildCityDistrict();
+    const ids = new Set(block.placedHouses!.map((h) => h.template.id));
+    expect(ids.size).toBeGreaterThanOrEqual(2); // a believable street of differing homes
+    for (const h of block.placedHouses!) expect(h.template.storeys).toBe(1); // single-storey until P3
+  });
+
   it('exposes rooms-as-regions (roomAt) over each house interior, null outside', () => {
     const { block } = buildCityDistrict();
     expect(block.roomAt).toBeDefined();
