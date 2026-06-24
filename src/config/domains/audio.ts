@@ -106,7 +106,7 @@ export const audioConfig = registerDomain('audio', {
   outGunshotThumpFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the gunshot low thump.', default: 70, min: 20, max: 400 }),
   outGunshotThumpDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Exponential decay time of the gunshot low thump.', default: 0.18, min: 0.01, max: 2 }),
   // ---- zombie GROUP BED drone (one drone whose level scales with nearby horde count, V28) ----
-  outHordeBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the horde drone bed at full horde size, before master scaling.', default: 0.32, min: 0, max: 1 }),
+  outHordeBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the horde drone bed at full horde size, before master scaling. 0 = OFF (the ever-present low horde drone read as an ugly constant droning SFX — silenced).', default: 0, min: 0, max: 1 }),
   outHordeBedFullCount: num({ owner: 'audio', unit: 'count', doc: 'Nearby horde size at which the group bed reaches full gain (linear ramp below).', default: 40, min: 1, max: 100000, integer: true }),
   outHordeProximityRadiusMeters: num({ owner: 'audio', unit: 'meters', doc: 'Radius around the player within which zombies count toward the horde drone bed + music tension (the bed scales with NEARBY threat, not the global embodied count).', default: 30, min: 1, max: 500 }),
   outHordeBedBaseFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the low horde drone.', default: 55, min: 20, max: 400 }),
@@ -128,7 +128,7 @@ export const audioConfig = registerDomain('audio', {
   // ---- procedural MUSIC bed (low, slow, evolving ambient/tension drone on the dedicated MUSIC bus) ----
   // One ever-present bed (a couple of detuned oscillators + a slow filter LFO); tension rises with the
   // nearby horde count — calmer when alone, denser/edgier when surrounded. Level + cutoff glide (no pops).
-  outMusicBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the music drone bed at full tension, before music+master bus scaling.', default: 0.4, min: 0, max: 1 }),
+  outMusicBedGain: num({ owner: 'audio', unit: 'ratio', doc: 'Gain of the music drone bed at full tension, before music+master bus scaling. 0 = OFF (the ever-present synth drone music was annoying — silenced).', default: 0, min: 0, max: 1 }),
   outMusicMinLevel: num({ owner: 'audio', unit: 'ratio', doc: 'Floor level of the music bed when the player is alone (fraction of the bed gain; tension lerps to 1).', default: 0.25, min: 0, max: 1 }),
   outMusicBaseFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the low music drone.', default: 48, min: 16, max: 400 }),
   outMusicDetuneCents: num({ owner: 'audio', unit: 'ratio', doc: 'Detune (cents) of the second drone oscillator → slow beating, an uneasy bed.', default: 8, min: 0, max: 1200 }),
