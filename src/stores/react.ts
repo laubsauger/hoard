@@ -11,6 +11,7 @@ import { craftingViewStore, type CraftingViewState } from './craftingView';
 import { mapViewStore, type MapViewState } from './mapView';
 import { noiseViewStore, type NoiseViewState } from './noiseView';
 import { inputStore, type InputState } from './input';
+import { interactionSelectStore, type InteractionSelectState } from './interactionSelect';
 import { diagnosticsStore, type DiagnosticsState } from './diagnostics';
 
 export const useSession = <T>(selector: (s: SessionState) => T): T => useStore(sessionStore, selector);
@@ -24,4 +25,6 @@ export const useCraftingView = <T>(selector: (s: CraftingViewState) => T): T =>
 export const useMapView = <T>(selector: (s: MapViewState) => T): T => useStore(mapViewStore, selector);
 export const useNoiseView = <T>(selector: (s: NoiseViewState) => T): T => useStore(noiseViewStore, selector);
 export const useInput = <T>(selector: (s: InputState) => T): T => useStore(inputStore, selector);
+export const useInteractionSelect = <T>(selector: (s: InteractionSelectState) => T): T =>
+  useStore(interactionSelectStore, selector);
 export const useDiagnostics = <T>(selector: (s: DiagnosticsState) => T): T => useStore(diagnosticsStore, selector);

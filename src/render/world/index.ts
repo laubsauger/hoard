@@ -6,6 +6,7 @@ export {
   exteriorWallOccludesPlayer,
   wallBetweenPlayerAndCamera,
   surfaceInXrayField,
+  segmentIntersectsAabbXZ,
   clampConeRangeToWall,
   classifyThreat,
   threatMarkerStyle,

@@ -640,6 +640,14 @@ export const renderingConfig = registerDomain('rendering', {
     min: 1,
     max: 40,
   }),
+  cutawaySightlineMarginMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Grazing margin (m) added to a wall footprint when testing whether the player→camera SIGHTLINE crosses it (V74 x-ray, normal-free segment-vs-AABB). The sightline is really a thin cone around the body, so a thin wall the line just clips still counts as occluding. Small — too large over-fades neighbours.',
+    default: 0.45,
+    min: 0,
+    max: 3,
+  }),
 
   // ---- Pooled BLOOD system (T75 / V51): directional droplets that arc under gravity+drag and LAND as
   // drying directional floor decals; bloody footsteps while the player is freshly blood-soaked. Supersedes
@@ -1736,6 +1744,16 @@ export const renderingConfig = registerDomain('rendering', {
   highlightStructureColorR: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) R.', default: 1, min: 0, max: 1 }),
   highlightStructureColorG: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) G.', default: 0.3, min: 0, max: 1 }),
   highlightStructureColorB: num({ owner: 'rendering', unit: 'ratio', doc: 'Structure/wall highlight colour (linear) B.', default: 0.2, min: 0, max: 1 }),
+  highlightOutlineWidthMeters: num({
+    owner: 'rendering', unit: 'meters',
+    doc: 'Width (m) the L4D-style silhouette rim-GLOW sits proud of the surface, inflated along the mesh normals around the active interactable (T113/T115/V79/V81). A FRESNEL RIM shell cloned from the real render mesh(es) — it HUGS the mesh shape, never a box. A SMIDGE proud so the rim reads clearly. ALWAYS-ON-TOP: depthTest OFF so it is never occluded (V81 — a deliberate exception to V56 for this readability aid; the fresnel keeps it an edge, not a fill, so depth-off is safe).',
+    default: 0.1, min: 0.005, max: 0.5,
+  }),
+  highlightRimFresnelPower: num({
+    owner: 'rendering', unit: 'ratio',
+    doc: 'Fresnel exponent for the active-interactable rim GLOW (T115/V81). The shell `colorNode` is brightness-gated by `pow(1 - |dot(normalWorld, viewDir)|, power)` so it lights ONLY the silhouette EDGE (an outline), not the full face — higher tightens the edge. This is what makes the always-on-top (depthTest:false) glow read as a thin outline rather than a filled additive blob.',
+    default: 3, min: 0.5, max: 12,
+  }),
 
   // ---- Fog of war (T109 / V73) — a ground-plane overlay darkening UNEXPLORED + EXPLORED-but-not-visible
   //      world cells, driven by a coarse per-cell visited+visible grid (render/world/fogOfWar.ts). The dim

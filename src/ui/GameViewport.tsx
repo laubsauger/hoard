@@ -23,6 +23,7 @@ import { registerInput } from './viewport/input';
 import { startRenderLoop } from './viewport/renderLoop';
 import { combatConfig } from '../config/domains/combat';
 import { audioConfig } from '../config/domains/audio';
+import { uiConfig } from '../config/domains/UI';
 import { resolveDomain } from '../config/registry';
 import type { QualityTier } from '../config/types';
 import { BlockScene } from '../render/scene';
@@ -113,6 +114,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
 
       const combat = resolveDomain(combatConfig, tier);
       const audioCfg = resolveDomain(audioConfig, tier);
+      const ui = resolveDomain(uiConfig, tier);
       const adp = makeAdapter();
       adapter = adp;
 
@@ -144,10 +146,12 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       cleanups.push(unsubVolume);
       cleanups.push(() => gameAudio.dispose());
 
-      // Live-apply accessibility changes from the settings panel into the running scene (V29 end-to-end).
+      // Live-apply accessibility + the fog toggle from the settings panel into the running scene (V29 end-to-end).
+      scene?.setFogEnabled(settingsStore.getState().fogEnabled); // initial state (subscribe only fires on change)
       const unsubAccessibility = settingsStore.subscribe((s) => {
         access = accessibilityFromSettings(s);
         scene?.setAccessibility(access);
+        scene?.setFogEnabled(s.fogEnabled);
       });
       cleanups.push(unsubAccessibility);
 
@@ -215,6 +219,12 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           adapter: adp,
           camera,
           scene,
+          canvas,
+          promptLayout: {
+            anchorHeightMeters: ui.interactionPromptAnchorHeightMeters,
+            offsetPx: ui.interactionPromptOffsetPx,
+            marginPx: ui.interactionPromptMarginPx,
+          },
           getRuntime: () => runtime,
           setRuntime: (r) => { runtime = r; },
           publishInventory,

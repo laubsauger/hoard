@@ -69,6 +69,7 @@ import {
   levelNavOf,
   gridWalkableRadius,
   lootableContainerCells,
+  rayDistanceToWall,
   DoorSystem,
   WindowSystem,
   windowPlacements,
@@ -76,6 +77,7 @@ import {
   REGION_ROOM_A,
   REGION_ROOM_B,
   type TestBlock,
+  type LosScene,
   type Vec3,
   type DoorView,
   type WindowView,
@@ -254,6 +256,23 @@ export class GameRuntime {
   /** T108 — authoritative window state (glass/boards). An opening clears its nav cell; boards/intact glass
    *  block it. Seeded from the SAME placements the renderer dresses, so sim + render agree (V26). */
   private readonly windowSystem: WindowSystem;
+  /**
+   * The scene wrapped with the window-OPENING predicate (V82) — the SHARED structural-raycast scene that knows
+   * which window cells are LOS/projectile-transparent RIGHT NOW. Pass THIS (not the bare `scene`) to any of the
+   * shared raycast primitives (`rayDistanceToWall`/`hasLineOfSight`/`castVisibilityFan`/`seesWithinFan`) and a
+   * sight line passes through an OPEN (glassless / 1-board) window but a CLOSED (2-board / intact) one occludes
+   * exactly like a wall — there is NO parallel window-only LOS path. The interaction LOS gate + projectiles
+   * consume it (a body / a bullet does not pass an INTACT pane). Built once (no per-call alloc).
+   */
+  readonly losScene: LosScene;
+  /**
+   * The scene wrapped with the SEE-THROUGH predicate (V84) — the analogue of `losScene` for what LIGHT + VISION
+   * pass through, which is LOOSER: glass is transparent, so an INTACT pane is see-through (only a 2-board
+   * boarded-shut window occludes). Pass THIS to the shared raycast for player vision (cone + fog), zombie sight,
+   * and the flashlight clamp so they see/light through glassed windows; pass `losScene` for projectiles/reach
+   * (which must shatter the pane first). Built once (no per-call alloc).
+   */
+  readonly sightScene: LosScene;
   /** Resolved structures config (door dims live elsewhere; here: the interaction reach, V4). */
   private readonly structuresCfg = resolveDomain(structuresConfig, REFERENCE_TIER);
   /** Resolved world config — here only for the authored wall height (glass-shatter burst origin, T108). */
@@ -299,6 +318,22 @@ export class GameRuntime {
         ticksToSmashGlass: this.structuresCfg.windowZombieTicksToSmashGlass,
       });
     }
+    // V82: the SHARED window-aware LOS scene. Any consumer that passes `losScene` (instead of the bare `scene`)
+    // to the structural raycast sees THROUGH an open window (glassless / 1-board) but NOT a closed (2-board /
+    // intact) one. The interaction LOS gate uses it; perception/vision opt in the same way (their task).
+    this.losScene = {
+      isWalkableWorld: (x, z) => this.scene.isWalkableWorld(x, z),
+      navGrid: this.scene.navGrid,
+      isWindowOpening: (cx, cy) => this.isWindowOpening(cx, cy),
+    };
+    // V84: the SEE-THROUGH scene — sight + light pass through GLASSED windows (glass is transparent), only a
+    // boarded-shut (2-board) window occludes. Player vision, zombie sight + the flashlight clamp use this; the
+    // `isWindowOpening` field name is the generic LosScene "ray passes" predicate, here the see-through one.
+    this.sightScene = {
+      isWalkableWorld: (x, z) => this.scene.isWalkableWorld(x, z),
+      navGrid: this.scene.navGrid,
+      isWindowOpening: (cx, cy) => this.isWindowSeeThrough(cx, cy),
+    };
 
     const time = resolveDomain(timeConfig, this.tier);
     this.clock = new FixedClock({
@@ -349,6 +384,7 @@ export class GameRuntime {
       zombies: this.zombies,
       spatial: this.spatial,
       scene: this.scene,
+      sightScene: this.sightScene, // V83/V84: zombie SIGHT sees THROUGH glassed windows (only a 2-board shut one blocks)
       flowCache: this.flowCache,
       tierManager: this.tierManager,
       stimulus: this.stimulus,
@@ -777,6 +813,33 @@ export class GameRuntime {
     return this.windowSystem.list();
   }
 
+  /**
+   * THE shared "is this window cell LOS/projectile-transparent right now?" query (V82). True iff a window sits
+   * at nav cell (cx,cy) AND it is a SIGHT/PROJECTILE OPENING — glassless with FEWER than 2 boards (0 or 1). A
+   * CLOSED window (2 boards / intact glass) OR a non-window cell returns false (i.e. LOS-OPAQUE — it occludes
+   * like a wall). This is the predicate `losScene.isWindowOpening` is built from and the one the shared raycast
+   * (`rayDistanceToWall`/`hasLineOfSight`/`castVisibilityFan`/`seesWithinFan`) consults: an OPEN/1-board cell
+   * does NOT block the ray, a 2-board/closed cell DOES. Player-vision + zombie-sight become window-aware by
+   * passing `runtime.losScene` (or this predicate on their scene) into those same primitives — no parallel path.
+   */
+  isWindowOpening(cx: number, cy: number): boolean {
+    const nav = this.windowSystem.cellOf(cx, cy);
+    return nav >= 0 && this.windowSystem.isOpening(nav);
+  }
+
+  /**
+   * THE shared "does SIGHT + LIGHT pass through this window cell right now?" query (V84). LOOSER than
+   * `isWindowOpening`: GLASS IS TRANSPARENT, so an INTACT pane is see-through (a sight line / light beam passes;
+   * only a PROJECTILE needs the glass smashed first). True iff a window sits at (cx,cy) with FEWER than 2 boards,
+   * regardless of glass; a CLOSED (2-board) window OR a non-window cell returns false. This is the predicate
+   * `sightScene.isWindowOpening` is built from — what player vision (cone + fog), zombie sight, and the
+   * flashlight clamp consult, so they see/light THROUGH glassed windows but are blocked by a boarded-shut one.
+   */
+  isWindowSeeThrough(cx: number, cy: number): boolean {
+    const nav = this.windowSystem.cellOf(cx, cy);
+    return nav >= 0 && this.windowSystem.isSeeThrough(nav);
+  }
+
   /** The window NEAREST the player within interaction reach, or null. */
   private nearestWindowInReach(): { navCell: number; window: WindowView } | null {
     const near = this.windowSystem.nearest(this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
@@ -827,13 +890,13 @@ export class GameRuntime {
    * Vault the player THROUGH the NEAREST window OPENING in reach (the "climb through" verb). A discrete,
    * player-ONLY traversal to the walkable cell on the FAR side of the window's wall: it never mutates nav
    * passability (V68 — the cell stays a blocked wall for AI/pathing + the §G room-seal holds), only the
-   * player's own position moves across the 1-cell wall. No-op unless the window is an opening (glass gone,
-   * no boards) AND the far cell is walkable. Climbing is noisy → emits an impact stimulus the horde hears
-   * (V14). Returns true on a successful vault.
+   * player's own position moves across the 1-cell wall. No-op unless the window is FULLY OPEN (glass gone AND
+   * ZERO boards — even one board blocks bodily entry, V82) AND the far cell is walkable. Climbing is noisy →
+   * emits an impact stimulus the horde hears (V14). Returns true on a successful vault.
    */
   climbThroughNearestWindow(): boolean {
     const near = this.nearestWindowInReach();
-    if (!near || !this.windowSystem.isOpening(near.navCell)) return false; // glass intact or boarded — can't climb
+    if (!near || !this.windowSystem.isFullyOpen(near.navCell)) return false; // intact / boarded — can't climb
     const grid = this.scene.navGrid;
     const cs = grid.settings.navCellSize;
     const wcx = near.window.cx;
@@ -920,6 +983,27 @@ export class GameRuntime {
     return out;
   }
 
+  /** The interactables the player can reasonably SEE — `interactables()` minus any blocked by a wall on the
+   *  sightline (T60 LOS gate): no looting a cupboard through a wall in the next room. The full `interactables()`
+   *  list is unchanged (it answers "what exists / where"); only the player-facing nearest* resolution is gated. */
+  private visibleInteractables(): InteractionTargetWorld[] {
+    return this.interactables().filter((t) => this.hasLineOfSightTo(t.x, t.z));
+  }
+
+  /** True if no STRUCTURAL wall blocks the straight line from the player to (tx,tz) BEFORE reaching it — the
+   *  same nav-grid wall raycast the shots (V53) + flashlight (V67) use, but window-aware (V82): the ray passes
+   *  through an OPEN window (glassless / 1-board) yet a CLOSED (2-board) window occludes like a wall (no
+   *  seeing/looting through it). A one-cell tolerance lets the target's OWN wall cell (door/window/cupboard
+   *  against a wall) still count as seen. */
+  private hasLineOfSightTo(tx: number, tz: number): boolean {
+    const dx = tx - this.playerPos.x;
+    const dz = tz - this.playerPos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 1e-3) return true;
+    const wallDist = rayDistanceToWall(this.losScene, this.playerPos.x, this.playerPos.z, Math.atan2(dz, dx), dist);
+    return wallDist >= dist - this.scene.navGrid.settings.navCellSize;
+  }
+
   /** Physical dims used to SIZE the active-interactable highlight box (typed config + scene cell size, V4). */
   private highlightDims(): HighlightDims {
     const cell = this.scene.navGrid.settings.navCellSize;
@@ -951,7 +1035,7 @@ export class GameRuntime {
    * live sim state — the frame loop polls it each frame and hides the highlight when this returns null.
    */
   nearestInteractableHighlight(): InteractionHighlightTarget | null {
-    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
     if (!near) return null;
     // GENERIC nav-cell resolution (T113/V79): the cell the target's world centre falls in — the SAME index the
     // scene builders tag their interactable meshes with (grid.index(floor(x/cs), floor(z/cs)) == grid.index(cx,cy)
@@ -966,13 +1050,13 @@ export class GameRuntime {
   /** The "{key} to {action}" prompt for the NEAREST interactable in reach, or null (T60). Pure read of the
    *  live sim state — the HUD polls it each frame and re-renders only when it changes (V1/V11). */
   nearestInteractionPrompt(key: string): InteractionPrompt | null {
-    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
     return near ? interactionPrompt(near.target, key) : null;
   }
 
   /** The NEAREST interactable target in reach (full state), or null — the wheel resolves its gated verbs. */
   nearestInteractableTarget(): InteractionTargetWorld | null {
-    const near = nearestInteractable(this.interactables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
+    const near = nearestInteractable(this.visibleInteractables(), this.playerPos.x, this.playerPos.z, this.structuresCfg.interactionRangeMeters);
     return near ? near.target : null;
   }
 

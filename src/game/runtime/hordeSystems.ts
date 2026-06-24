@@ -44,6 +44,7 @@ import {
   levelNavOf,
   gridWalkableRadius,
   type TestBlock,
+  type LosScene,
   type Vec3,
 } from '@/game/scene';
 
@@ -79,6 +80,14 @@ export interface HordeSimulationDeps {
   readonly zombies: SimulationZombies;
   readonly spatial: SpatialHash;
   readonly scene: TestBlock;
+  /**
+   * V83/V84: the SHARED SEE-THROUGH scene (GameRuntime.sightScene) — `scene` wrapped with the see-through window
+   * predicate. Zombie SIGHT routes through this so a window lets a zombie see the player UNLESS it is boarded
+   * shut (2 boards) — an intact GLASS pane is transparent (you can be seen through a window), matching the
+   * player's own vision + the flashlight. NOT used for sound (a wall/window muffles sound via its own occlusion
+   * term) or movement collision (windows never alter nav, V68).
+   */
+  readonly sightScene: LosScene;
   readonly flowCache: FlowFieldCache;
   readonly tierManager: TierManager;
   readonly stimulus: StimulusField;
@@ -601,7 +610,7 @@ export class HordeSimulation {
       this.stepPerceptionMulti(ctx);
       return;
     }
-    const { zombies, perception, playerEntityId, getPlayerPos, scene, stimulus } = this.d;
+    const { zombies, perception, playerEntityId, getPlayerPos, scene, sightScene, stimulus } = this.d;
     stimulus.update(ctx.tick); // retire fully-decayed stimuli so each hearing query sees only live sources
     const p = getPlayerPos();
     const navGrid = scene.navGrid;
@@ -625,8 +634,10 @@ export class HordeSimulation {
       const dist = Math.hypot(dx, dz);
       let inSight = dist <= sight;
       if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
-      // V47: walls / closed doors block sight — no seeing the player through solid structure.
-      if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
+      // V47: walls / closed doors block sight — no seeing the player through solid structure. V83/V84: routed
+      // through the SEE-THROUGH sightScene so a window lets the zombie see the player THROUGH its glass (an intact
+      // pane is transparent) UNLESS it is boarded shut (2 boards), matching the player's own vision + flashlight.
+      if (inSight) inSight = hasLineOfSight(sightScene, pos[0], pos[2], p.x, p.z);
       const sensesPlayer = inSight && playerCell >= 0;
 
       // V14 per-zombie target: a freshly sensed player or sound (re)arms the investigate window; with

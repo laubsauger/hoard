@@ -5,7 +5,8 @@
 // (docs/REFACTOR-godfiles.md).
 
 import { BoxGeometry, Group, Mesh, type BufferGeometry, type MeshStandardMaterial } from 'three';
-import { buildingsOf, doorAxis, windowPlacements } from '../../../game/scene';
+import { buildingsOf, doorAxis, hash01, windowPlacements } from '../../../game/scene';
+import { tagInteractable } from '../../effects/highlightView';
 import type { BuildContext } from './buildContext';
 import type { DoorLeaf, OpeningHandles, WindowMesh } from './handles';
 import type { HouseStyleResolver } from './houseStyle';
@@ -65,8 +66,12 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   // onto the jamb — a solid slab would re-fill the punched hole and kill the see-through.
   const frameBorder = 0.08; // trim bar width
   const frameDepth = th + 0.04; // proud of both wall faces so the trim reads from inside + outside
-  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(th, winH, winSpan));
-  const voidGeo = res.geo('window.void.geo', new BoxGeometry(th, winH, winSpan));
+  // Inset the pane/void a hair INSIDE the opening so their rim faces are NOT coplanar with the frame trim's
+  // inner faces (the rails/stiles lap to winH/2 + winSpan/2) — that coincidence was the window↔frame z-fight.
+  // The ~2 cm reveal is invisible at iso distance and the trim laps over it.
+  const paneInset = 0.04;
+  const paneGeo = res.geo('window.pane.geo', new BoxGeometry(th, winH - paneInset, winSpan - paneInset));
+  const voidGeo = res.geo('window.void.geo', new BoxGeometry(th, winH - paneInset, winSpan - paneInset));
   const frameRailGeo = res.geo('window.frame.rail.geo', new BoxGeometry(frameDepth, frameBorder, winSpan + frameBorder * 2)); // top/bottom
   const frameStileGeo = res.geo('window.frame.stile.geo', new BoxGeometry(frameDepth, winH, frameBorder)); // left/right
   const boardGeo = res.geo('window.board.geo', new BoxGeometry(frameDepth, winH * 0.26, winSpan + 0.1));
@@ -151,6 +156,9 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
     }
     pivot.add(leaf);
     group.add(pivot);
+    // T113/V79: tag the leaf with its nav cell so the active-interactable silhouette GLOW resolves + hugs the
+    // actual door mesh (the swinging leaf, not a box). One generic convention for every interactable kind.
+    tagInteractable(leaf, navCell);
     doorLeaves.push({ navCell, pivot, openTarget: cfg.doorOpenSwingRadians, current: 0 });
   }
 
@@ -172,6 +180,9 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
       m.rotation.y = rotY;
       m.rotation.z = rz;
       m.castShadow = true;
+      // T113/V79: only the SYNCED (ground-floor) sill is the live interactable — tag its meshes with the nav
+      // cell so the silhouette GLOW hugs the real window unit. Upper-floor sills are cosmetic, left untagged.
+      if (synced) tagInteractable(m, navCell);
       group.add(m);
       return m;
     };
@@ -186,7 +197,14 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
     const boards: Mesh[] = [];
     for (let bI = 0; bI < maxBoards; bI++) {
       const sign = bI % 2 === 0 ? 1 : -1;
-      boards.push(make(boardGeo, boardMat, 0, sign * winH * (0.18 - bI * 0.03), 0, sign * (0.18 - bI * 0.04)));
+      // Weathered, hand-nailed planks: a base alternating cross-tilt PLUS a deterministic random SKEW, with
+      // small vertical + along-span jitter — so no board sits perfectly horizontal or evenly spaced (V26: the
+      // per-(cell,board) hash is replay-stable). `make`'s rz is the in-plane tilt; runOff shifts along the span.
+      const seed = (Math.imul(navCell + 1, 0x9e3779b1) ^ (bI + 1)) | 0;
+      const tilt = sign * 0.09 + (hash01(seed, 1) - 0.5) * 0.34; // base cross + ±~10° random skew
+      const dy = sign * winH * (0.18 - bI * 0.03) + (hash01(seed, 2) - 0.5) * winH * 0.09;
+      const runOff = (hash01(seed, 3) - 0.5) * winSpan * 0.16;
+      boards.push(make(boardGeo, boardMat, 0, dy, runOff, tilt));
     }
     if (synced) {
       windowMeshes.push({ navCell, pane, voidMesh, boards }); // the GROUND-floor window reflects the live 2D sim state

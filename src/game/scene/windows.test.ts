@@ -3,7 +3,8 @@
 // projectile/visual openings, never walk-through holes); `isOpening` is the shot/sight-occlusion predicate.
 import { describe, it, expect } from 'vitest';
 import { NavGrid } from '@/game/navigation';
-import { WindowSystem, type WindowPlacement, type WindowSystemConfig } from './windows';
+import { WindowSystem, BOARDS_TO_CLOSE, type WindowPlacement, type WindowSystemConfig } from './windows';
+import { rayDistanceToWall, hasLineOfSight, type LosScene } from './testBlock';
 
 const CFG: WindowSystemConfig = { maxBoards: 3, glassShotsToSmash: 1, ticksToBreakBoard: 10, ticksToSmashGlass: 5 };
 
@@ -33,6 +34,25 @@ describe('WindowSystem (T108)', () => {
     expect(new WindowSystem(broken.grid, [broken.placement], CFG).isOpening(broken.nav)).toBe(true);
   });
 
+  it('V84 isSeeThrough — GLASS IS TRANSPARENT: an INTACT pane is see-through (where isOpening is NOT), only 2 boards close it', () => {
+    // Intact glass: NOT a projectile/reach opening, but sight + light DO pass (transparent pane).
+    const intact = wallWithWindow('intact');
+    const intactSys = new WindowSystem(intact.grid, [intact.placement], CFG);
+    expect(intactSys.isOpening(intact.nav)).toBe(false); // a bullet must shatter it first
+    expect(intactSys.isSeeThrough(intact.nav)).toBe(true); // ...but you can SEE/LIGHT through the glass
+
+    // A glassless hole is see-through too; a SECOND board (BOARDS_TO_CLOSE) is what closes it, regardless of glass.
+    const broken = wallWithWindow('broken');
+    const sys = new WindowSystem(broken.grid, [broken.placement], CFG);
+    expect(sys.isSeeThrough(broken.nav)).toBe(true); // 0 boards
+    expect(sys.addBoard(broken.nav)).toBe(true);
+    expect(sys.isSeeThrough(broken.nav)).toBe(true); // 1 board still see-through (gaps around the plank)
+    expect(sys.addBoard(broken.nav)).toBe(true);
+    expect(sys.isSeeThrough(broken.nav)).toBe(false); // 2 boards = boarded shut, opaque to sight + light
+    expect(broken.nav).toBeGreaterThanOrEqual(0);
+    expect(BOARDS_TO_CLOSE).toBe(2);
+  });
+
   it('a BOARDED window starts at maxBoards; prying them all off opens it; boarding re-seals it', () => {
     const { grid, nav, placement } = wallWithWindow('boarded');
     const sys = new WindowSystem(grid, [placement], CFG);
@@ -41,8 +61,44 @@ describe('WindowSystem (T108)', () => {
     for (let i = 0; i < CFG.maxBoards; i++) expect(sys.removeBoard(nav)).toBe(true);
     expect(sys.boardsOf(nav)).toBe(0);
     expect(sys.isOpening(nav)).toBe(true); // fully unboarded glassless hole — a shoot/see-through gap
+    expect(sys.addBoard(nav)).toBe(true); // ONE board: still a shoot/see-through gap (only blocks bodily entry)
+    expect(sys.isOpening(nav)).toBe(true); // V82 — a single board does NOT seal it; it takes a SECOND board
+    expect(sys.addBoard(nav)).toBe(true); // SECOND board closes it
+    expect(sys.isOpening(nav)).toBe(false); // V82 — 2 boards = CLOSED (occludes like a wall)
+  });
+
+  it('V82 two-stage boarding: an OPENING needs <2 boards for sight/shots; the 2nd board CLOSES it', () => {
+    const { grid, nav, placement } = wallWithWindow('broken'); // authored glassless opening
+    const sys = new WindowSystem(grid, [placement], CFG);
+    expect(BOARDS_TO_CLOSE).toBe(2);
+    // 0 boards (glassless): sight/projectile opening, AND the player can vault through.
+    expect(sys.isOpening(nav)).toBe(true);
+    expect(sys.isFullyOpen(nav)).toBe(true);
+    // 1 board: STILL a sight/projectile opening (see/shoot through), but NO LONGER vault-able (entry blocked).
     expect(sys.addBoard(nav)).toBe(true);
-    expect(sys.isOpening(nav)).toBe(false); // a single board re-seals it
+    expect(sys.boardsOf(nav)).toBe(1);
+    expect(sys.isOpening(nav)).toBe(true);
+    expect(sys.isFullyOpen(nav)).toBe(false);
+    // 2 boards: CLOSED — no sight/projectile through it, not vault-able.
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.boardsOf(nav)).toBe(2);
+    expect(sys.isOpening(nav)).toBe(false);
+    expect(sys.isFullyOpen(nav)).toBe(false);
+    // a 3rd board (this CFG allows up to maxBoards=3) stays CLOSED — 2 is already the close threshold.
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.isOpening(nav)).toBe(false);
+  });
+
+  it('V82 zombie attrition still tears the LAST board off a 1-board glassless window (it is a sightOpening, not fullyOpen)', () => {
+    const { grid, nav, placement } = wallWithWindow('broken'); // glassless
+    const sys = new WindowSystem(grid, [placement], CFG);
+    sys.addBoard(nav); // 1 board over the hole — a sightOpening, but NOT fullyOpen
+    expect(sys.isOpening(nav)).toBe(true);
+    expect(sys.tick([nav], CFG.ticksToBreakBoard)).toEqual([nav]); // the last board IS still attrited
+    expect(sys.boardsOf(nav)).toBe(0);
+    expect(sys.isFullyOpen(nav)).toBe(true);
+    // now fully open: nothing left to attrite.
+    expect(sys.tick([nav], CFG.ticksToBreakBoard)).toEqual([]);
   });
 
   it('smashing INTACT glass opens the gap; applyGlassHit honours the pane HP', () => {
@@ -87,5 +143,116 @@ describe('WindowSystem (T108)', () => {
     const sys = new WindowSystem(grid, [a, b], CFG);
     expect(sys.nearest(a.x, a.z, 3)?.window.cx).toBe(2);
     expect(sys.nearest(0, 0, 0.5)).toBeNull();
+  });
+});
+
+describe('window-aware structural LOS (V82)', () => {
+  // A solid wall along cy=3 with one window at (3,3). The LOS ray runs N→S at cx=3, crossing ONLY the window
+  // cell of the wall row — so whether the line passes is decided entirely by the window's board state.
+  function losFixture(state: WindowPlacement['state']) {
+    const grid = new NavGrid({ width: 7, height: 7 });
+    for (let cx = 0; cx < 7; cx++) grid.block(cx, 3);
+    const cs = grid.settings.navCellSize;
+    const placement: WindowPlacement = { cx: 3, cy: 3, ns: true, slot: 0, state, storeys: 1, x: (3 + 0.5) * cs, z: (3 + 0.5) * cs };
+    const sys = new WindowSystem(grid, [placement], CFG);
+    const nav = grid.index(3, 3);
+    const scene: LosScene = {
+      isWalkableWorld: (x, z) => {
+        const cx = Math.floor(x / cs);
+        const cy = Math.floor(z / cs);
+        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+        return !grid.isBlocked(grid.index(cx, cy));
+      },
+      navGrid: grid,
+      isWindowOpening: (cx, cy) => {
+        const n = sys.cellOf(cx, cy);
+        return n >= 0 && sys.isOpening(n);
+      },
+    };
+    return { grid, cs, sys, nav, scene };
+  }
+
+  it('an OPEN (glassless, 0-board) window passes the sightline; a CLOSED (2-board) window blocks it', () => {
+    const { cs, sys, nav, scene } = losFixture('broken'); // glassless opening
+    const ox = (3 + 0.5) * cs;
+    const oz = (1 + 0.5) * cs; // observer north of the wall (cy=1)
+    const tx = ox;
+    const tz = (5 + 0.5) * cs; // target south of the wall (cy=5) — the window cell (cy=3) lies between them
+    const maxDist = cs * 6;
+    const south = Math.PI / 2; // +z
+    const wallFace = 3 * cs - oz; // distance from the observer to the wall row's near face (cy=3 starts at z=3cs)
+
+    // 0 boards: the ray flies PAST the wall row (its only blocker, the window, is now open).
+    const dOpen = rayDistanceToWall(scene, ox, oz, south, maxDist);
+    expect(dOpen).toBeGreaterThan(wallFace + cs); // travelled at least a cell beyond the wall face
+    expect(hasLineOfSight(scene, ox, oz, tx, tz)).toBe(true);
+
+    // 2 boards = CLOSED: the ray stops AT the wall face, well short of the open reach; LOS is blocked.
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.isOpening(nav)).toBe(false);
+    const dClosed = rayDistanceToWall(scene, ox, oz, south, maxDist);
+    expect(dClosed).toBeGreaterThan(0);
+    expect(dClosed).toBeLessThan(wallFace + cs); // stopped at/near the wall face, not past it
+    expect(dClosed).toBeLessThan(dOpen);
+    expect(hasLineOfSight(scene, ox, oz, tx, tz)).toBe(false);
+
+    // back to 1 board: STILL a sight opening — the line passes again (see/shoot through the gap).
+    expect(sys.removeBoard(nav)).toBe(true);
+    expect(sys.boardsOf(nav)).toBe(1);
+    expect(hasLineOfSight(scene, ox, oz, tx, tz)).toBe(true);
+  });
+
+  it('an INTACT-glass window blocks the sightline (closed pane); without the predicate every window is opaque', () => {
+    const { cs, grid, scene } = losFixture('intact');
+    const ox = (3 + 0.5) * cs;
+    const oz = (1 + 0.5) * cs;
+    const tx = ox;
+    const tz = (5 + 0.5) * cs;
+    expect(hasLineOfSight(scene, ox, oz, tx, tz)).toBe(false); // intact pane is not an opening
+
+    // the predicate is OPT-IN: a bare scene (no isWindowOpening) keeps every window opaque (fog/flashlight path).
+    const bare: LosScene = { isWalkableWorld: scene.isWalkableWorld, navGrid: grid };
+    const open = losFixture('broken'); // glassless, 0 boards — but queried WITHOUT the predicate
+    expect(hasLineOfSight(bare, ox, oz, tx, tz)).toBe(false);
+    expect(hasLineOfSight({ isWalkableWorld: open.scene.isWalkableWorld, navGrid: open.grid }, ox, oz, tx, tz)).toBe(false);
+  });
+
+  it('V84 SEE-THROUGH predicate: sight + light PASS an INTACT-glass window (where the projectile predicate blocks), 2 boards close it', () => {
+    // Same N→S sightline through the lone window cell, but the scene uses the SEE-THROUGH predicate
+    // (isSeeThrough) — the one player vision / zombie sight / flashlight use — instead of isOpening.
+    const grid = new NavGrid({ width: 7, height: 7 });
+    for (let cx = 0; cx < 7; cx++) grid.block(cx, 3);
+    const cs = grid.settings.navCellSize;
+    const placement: WindowPlacement = { cx: 3, cy: 3, ns: true, slot: 0, state: 'intact', storeys: 1, x: (3 + 0.5) * cs, z: (3 + 0.5) * cs };
+    const sys = new WindowSystem(grid, [placement], CFG);
+    const nav = grid.index(3, 3);
+    const sightScene: LosScene = {
+      isWalkableWorld: (x, z) => {
+        const cx = Math.floor(x / cs);
+        const cy = Math.floor(z / cs);
+        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+        return !grid.isBlocked(grid.index(cx, cy));
+      },
+      navGrid: grid,
+      isWindowOpening: (cx, cy) => {
+        const n = sys.cellOf(cx, cy);
+        return n >= 0 && sys.isSeeThrough(n);
+      },
+    };
+    const ox = (3 + 0.5) * cs;
+    const oz = (1 + 0.5) * cs;
+    const tx = ox;
+    const tz = (5 + 0.5) * cs;
+
+    // INTACT glass: the projectile predicate (isOpening) blocked the same shot above; the SEE-THROUGH predicate
+    // lets the sight line / light beam pass — glass is transparent.
+    expect(sys.isOpening(nav)).toBe(false);
+    expect(hasLineOfSight(sightScene, ox, oz, tx, tz)).toBe(true);
+
+    // Board it shut (2 boards): now even sight + light are occluded.
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(hasLineOfSight(sightScene, ox, oz, tx, tz)).toBe(false);
   });
 });

@@ -132,6 +132,10 @@ class OccludedRimLayer {
   finalize(): void {
     this.mesh.geometry.setDrawRange(0, this.head / 3);
     this.attr.needsUpdate = true;
+    // The position buffer is rewritten every frame from a zero-initialised array, so the bounding volume
+    // computed at construction is a degenerate point — recompute it so the WebGPU render path doesn't drop
+    // the mesh (frustumCulled is off, but a stale/degenerate sphere still suppressed the dynamic draw).
+    this.mesh.geometry.computeBoundingSphere();
   }
 
   dispose(): void {

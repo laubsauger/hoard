@@ -5,6 +5,7 @@
 
 import { BoxGeometry, Group, Mesh } from 'three';
 import { lootableContainerCells } from '../../../game/scene';
+import { tagInteractable } from '../../effects/highlightView';
 import type { BuildContext } from './buildContext';
 
 export interface ContainersConfig {
@@ -36,24 +37,32 @@ export function buildContainers(ctx: BuildContext, cfg: ContainersConfig): void 
   const group = new Group();
   for (const placement of placements) {
     const c = town.cellCenter(placement.cell);
+    // T113/V79: the nav cell this cabinet stands in — the GENERIC key the active-interactable silhouette GLOW
+    // resolves the cabinet meshes by (matches the runtime's floor(centre/cs) → grid.index). Tag every cabinet
+    // mesh so the glow hugs the whole cupboard shape.
+    const navCell = town.navGrid.index(placement.cell.cx, placement.cell.cy);
     const bodyCy = floorY + (h - topThick) / 2;
     const body = new Mesh(bodyGeo, bodyMat);
     body.position.set(c.x, bodyCy, c.z);
     body.castShadow = true;
     body.receiveShadow = true;
+    tagInteractable(body, navCell);
     group.add(body);
     const top = new Mesh(topGeo, topMat);
     top.position.set(c.x, floorY + h - topThick / 2, c.z);
     top.castShadow = true;
+    tagInteractable(top, navCell);
     group.add(top);
     // two front door panels (toward +Z) with a centre reveal + a brass pull on each.
     const faceZ = c.z + d / 2 + 0.015;
     for (const sx of [-1, 1] as const) {
       const door = new Mesh(doorGeo, faceMat);
       door.position.set(c.x + sx * w * 0.24, bodyCy, faceZ);
+      tagInteractable(door, navCell);
       group.add(door);
       const pull = new Mesh(pullGeo, pullMat);
       pull.position.set(c.x + sx * w * 0.04, bodyCy, faceZ + 0.02);
+      tagInteractable(pull, navCell);
       group.add(pull);
     }
   }

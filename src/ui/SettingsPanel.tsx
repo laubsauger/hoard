@@ -168,6 +168,7 @@ export function SettingsPanel() {
 
   // V11 — subscribe to the individual primitives this panel edits (one row re-renders per change).
   const qualityTierOverride = useSettings((s) => s.qualityTierOverride);
+  const fogEnabled = useSettings((s) => s.fogEnabled);
   const masterVolume = useSettings((s) => s.masterVolume);
   const sfxVolume = useSettings((s) => s.sfxVolume);
   const musicVolume = useSettings((s) => s.musicVolume);
@@ -219,6 +220,7 @@ export function SettingsPanel() {
           ))}
         </select>
       </label>
+      <Toggle label="Fog (atmosphere + fog of war)" value={fogEnabled} onChange={set.setFogEnabled} />
 
       <h3 className="hbn-a11y__section">Audio</h3>
       <Slider label="Master" value={masterVolume} min={NORM_MIN} max={NORM_MAX} step={NORM_STEP} onChange={set.setMasterVolume} />

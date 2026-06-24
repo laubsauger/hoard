@@ -29,6 +29,9 @@ function fakeRuntime(walkable: (x: number, z: number) => boolean = () => true) {
     player: () => ({ x: pose.x, y: 0, z: pose.z }),
     playerAim: () => pose.aim,
     scene: { isWalkableWorld: walkable },
+    // V84: the reveal now routes LOS through the SEE-THROUGH sightScene (windows transparent unless boarded shut);
+    // with no windows in this fixture it is just the same walkable predicate, so LOS behaves as before.
+    sightScene: { isWalkableWorld: walkable },
   } as unknown as GameRuntime;
   return { runtime, pose };
 }

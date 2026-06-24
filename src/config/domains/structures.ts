@@ -136,13 +136,15 @@ export const structuresConfig = registerDomain('structures', {
   }),
 
   // ---- T108 destructible/interactive WINDOWS (V4 — no magic counts/timings) ----
-  /** Max boards a single window can hold (a full board-up). */
+  /** Max boards a single window can hold (a full board-up). A window boards UP TO TWICE: 1 board blocks bodily
+   *  entry + adds attrition resistance (still see/shoot through the gap), the 2nd board CLOSES it into a solid
+   *  wall-equivalent (no sight/projectile through — `BOARDS_TO_CLOSE`, V82). Default 2 = the two-stage design. */
   maxBoardsPerWindow: num({
     owner: 'structures',
     unit: 'count',
-    doc: 'Maximum boards a window can hold when fully boarded up (T108).',
-    default: 3,
-    min: 1,
+    doc: 'Maximum boards a window can hold when fully boarded up — 2 = the two-stage board-up (T108/V82).',
+    default: 2,
+    min: 2,
     max: 8,
     integer: true,
   }),

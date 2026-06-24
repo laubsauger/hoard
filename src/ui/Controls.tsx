@@ -1,15 +1,20 @@
-// T38 — the slice's interactive command bar. React owns this shell affordance (V1): every button issues
+// T38 / T18 — the slice's interactive command bar, restyled as a collapsible dev-tools SIDEBAR (left edge)
+// so it no longer eats the top of the screen. React owns this shell affordance (V1): every button issues
 // validated INTENT to the engine through the EngineHandle (save/load full SaveDelta, structural modify,
 // weather), never touching per-frame world state. Pointer-events are enabled here (the HUD stays inert).
+// Collapsed/expanded state lives on uiStore (T18, default collapsed) and is read through a primitive
+// selector so the snapshot stays cached (B24 — no fresh literals from selectors).
 
 import { useState } from 'react';
 import type { EngineHandle } from './GameViewport';
 import { WEATHER_PROFILES, type WeatherProfile } from '../config/domains/weather';
 import { uiStore } from '../stores/ui';
+import { useUi } from '../stores/react';
 
 export function Controls({ handle }: { handle: EngineHandle | null }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [weather, setWeather] = useState<WeatherProfile>('clear');
+  const collapsed = useUi((s) => s.controlsCollapsed); // primitive bool → cached snapshot (B24-safe).
   if (!handle) return null;
 
   const run = (label: string, fn: () => void | Promise<void>) => async () => {
@@ -21,8 +26,39 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
     }
   };
 
+  const toggle = () => uiStore.getState().setControlsCollapsed(!collapsed);
+
+  // Collapsed: only the thin toggle rail is mounted, freeing the rest of the screen edge.
+  if (collapsed) {
+    return (
+      <div className="hbn-controls hbn-controls--collapsed" aria-label="engine controls">
+        <button
+          className="hbn-controls__toggle"
+          onClick={toggle}
+          aria-expanded={false}
+          aria-label="Open controls"
+          title="Open controls"
+        >
+          ☰
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="hbn-controls" aria-label="engine controls">
+      <div className="hbn-controls__head">
+        <span className="hbn-controls__title">Controls</span>
+        <button
+          className="hbn-controls__toggle"
+          onClick={toggle}
+          aria-expanded={true}
+          aria-label="Close controls"
+          title="Close controls"
+        >
+          ✕
+        </button>
+      </div>
       <div className="hbn-controls__group">
         <button onClick={run('breach', () => handle.breach())}>Breach wall</button>
         <button onClick={run('board', () => handle.board())}>Board wall</button>

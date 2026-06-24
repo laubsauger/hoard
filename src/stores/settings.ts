@@ -31,6 +31,7 @@ export interface SettingsState {
   readonly audioCueIndicators: boolean; // visual indicators for alarms/glass/directional threats
   readonly subtitles: boolean;
   readonly pauseForComplexActions: boolean; // optional pause/slowdown for inventory + complex actions
+  readonly fogEnabled: boolean; // atmospheric distance fog + fog-of-war overlay (off = clear, full-bright view)
   setQualityTierOverride(tier: QualityTier | null): void;
   setMasterVolume(v: number): void;
   setSfxVolume(v: number): void;
@@ -47,6 +48,7 @@ export interface SettingsState {
   setAudioCueIndicators(v: boolean): void;
   setSubtitles(v: boolean): void;
   setPauseForComplexActions(v: boolean): void;
+  setFogEnabled(v: boolean): void;
 }
 
 function clamp01(v: number): number {
@@ -78,6 +80,7 @@ export function createSettingsStore() {
           audioCueIndicators: A11Y.audioCueIndicatorsDefault,
           subtitles: A11Y.subtitlesDefault,
           pauseForComplexActions: A11Y.pauseForComplexActionsDefault,
+          fogEnabled: true,
           // V25 — the store only accepts a KNOWN tier or null (auto). The hardware safe-limit guard that
           // forbids requesting a MORE-demanding tier than the device supports lives in render/quality
           // (evaluateTierOverride/applyTierOverride) and is applied when the engine resolves the tier.
@@ -105,6 +108,7 @@ export function createSettingsStore() {
           setAudioCueIndicators: (audioCueIndicators) => set({ audioCueIndicators }),
           setSubtitles: (subtitles) => set({ subtitles }),
           setPauseForComplexActions: (pauseForComplexActions) => set({ pauseForComplexActions }),
+          setFogEnabled: (fogEnabled) => set({ fogEnabled }),
         }),
         {
           name: `${PERSIST_PREFIX}:settings`,

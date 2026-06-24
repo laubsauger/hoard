@@ -13,6 +13,10 @@ export interface InteractionTargetWorld extends InteractionTarget {
   readonly z: number;
   /** Human label for the target itself (e.g. "Door", "Kitchen Cupboard", "Wall section"). */
   readonly label: string;
+  /** Wall orientation (rad) for a door/window/wall outline: 0 = the wall runs along world X, π/2 = along Z.
+   *  Rotates the highlight box so its thin axis aligns with the wall normal (hugs the leaf/pane). Omit for
+   *  axis-aligned objects (cupboard/corpse). */
+  readonly orientationRad?: number;
 }
 
 /**
@@ -28,45 +32,70 @@ export interface InteractionHighlightTarget {
   readonly sizeX: number;
   readonly sizeY: number;
   readonly sizeZ: number;
+  /** Yaw (rad) the outline box is rotated by so a thin door/window/wall hugs its wall (thin axis = wall normal,
+   *  wide axis = wall run). 0 for axis-aligned objects (cupboard/corpse). */
+  readonly rotationY: number;
+  /** Nav cell the target occupies — the GENERIC, data-driven key the silhouette-GLOW outline (T113/V79) resolves
+   *  the target's render mesh(es) by (scene builders tag each interactable mesh with the same nav cell, no
+   *  per-kind switch). The pure `highlightBoxFor` omits it (it has no grid); the runtime attaches it. When no
+   *  tagged mesh exists for the cell (an INSTANCED corpse/zombie) the view falls back to the box. */
+  readonly navCell: number;
 }
 
-/** Physical dims used to size a target's highlight box (typed config + scene cell size — no magic numbers). */
+/** Physical dims used to size a target's highlight box (typed config + scene cell size — no magic numbers). The
+ *  per-kind boxes are TIGHT to the real mesh (a thin leaf/pane on the wall, a window up at its sill, a low body)
+ *  so the outline hugs the object instead of a fat floor-to-ceiling nav-cell cube. */
 export interface HighlightDims {
-  /** Nav cell edge (m) — the planar footprint of a door/window/wall/corpse highlight box. */
+  /** Nav cell edge (m) — the WALL-RUN width of a door/window/wall outline. */
   readonly navCellSize: number;
-  /** Height (m) of a door/window/wall/corpse highlight box (the cupboard uses its own dims below). */
-  readonly defaultHeightMeters: number;
+  /** Authored building wall height (m) — drives door/wall outline height + the window sill. */
+  readonly wallHeightMeters: number;
+  /** Thin depth (m) along the wall NORMAL for door/window/wall outlines (a leaf/pane is thin). */
+  readonly thinMeters: number;
+  /** Edge (m) of the low box around a toppled corpse. */
+  readonly corpseSizeMeters: number;
   readonly cupboardWidthMeters: number;
   readonly cupboardDepthMeters: number;
   readonly cupboardHeightMeters: number;
 }
 
 /**
- * Map a world interactable to its highlight box (pure). A container is sized to the cabinet dims so the
- * outline hugs the cupboard mesh; every other kind gets a one-cell footprint at the configured height. The
- * box rests on the floor (centre at half its height) so it reads as a standing object, not a buried one.
+ * Map a world interactable to a TIGHT highlight box (pure) that hugs the real mesh — not a fat nav-cell cube:
+ *  • door   — a thin leaf, ~0.85 cell wide, ~0.85 wall-height tall, on the floor, rotated to the wall (rotationY).
+ *  • window — a thin pane, ~0.7 cell wide, ~0.4 wall-height tall, lifted to its SILL (≈0.3 wall-height), rotated.
+ *  • structure (wall) — a thin slab, one cell wide, full wall height, rotated to the wall.
+ *  • container — the cabinet dims (already tight).
+ *  • corpse — a low body box on the ground.
+ * `target.orientationRad` (0 = wall runs along world X, π/2 = along Z) rotates the thin/wide axes onto the wall.
  */
-export function highlightBoxFor(target: InteractionTargetWorld, dims: HighlightDims): InteractionHighlightTarget {
-  if (target.kind === 'container') {
-    return {
-      kind: 'container',
-      x: target.x,
-      y: dims.cupboardHeightMeters / 2,
-      z: target.z,
-      sizeX: dims.cupboardWidthMeters,
-      sizeY: dims.cupboardHeightMeters,
-      sizeZ: dims.cupboardDepthMeters,
-    };
+export function highlightBoxFor(target: InteractionTargetWorld, dims: HighlightDims): Omit<InteractionHighlightTarget, 'navCell'> {
+  const rot = target.orientationRad ?? 0;
+  switch (target.kind) {
+    case 'container':
+      return { kind: 'container', x: target.x, y: dims.cupboardHeightMeters / 2, z: target.z, sizeX: dims.cupboardWidthMeters, sizeY: dims.cupboardHeightMeters, sizeZ: dims.cupboardDepthMeters, rotationY: 0 };
+    case 'corpse': {
+      const s = dims.corpseSizeMeters;
+      return { kind: 'corpse', x: target.x, y: s * 0.3, z: target.z, sizeX: s, sizeY: s * 0.6, sizeZ: s, rotationY: 0 };
+    }
+    case 'window': {
+      // Mirror the REAL window opening (render/scene/builders/windowGeometry: WINDOW_HEIGHT_FRACTION 0.4 +
+      // WINDOW_SILL_FRACTION 0.3 + WINDOW_SPAN_FRACTION 0.7) so the fallback box hugs the actual pane — sill at
+      // 0.3 wall-height, opening 0.4 tall → centre 0.5 wall-height (NOT the old 0.65 that floated above the pane).
+      const h = dims.wallHeightMeters * 0.4;
+      const sill = dims.wallHeightMeters * 0.3;
+      // sizeX = wall RUN width, sizeZ = thin (wall normal); rotationY turns it onto the wall.
+      return { kind: 'window', x: target.x, y: sill + h / 2, z: target.z, sizeX: dims.navCellSize * 0.7, sizeY: h, sizeZ: dims.thinMeters, rotationY: rot };
+    }
+    case 'door': {
+      const h = dims.wallHeightMeters * 0.85;
+      return { kind: 'door', x: target.x, y: h / 2, z: target.z, sizeX: dims.navCellSize * 0.85, sizeY: h, sizeZ: dims.thinMeters, rotationY: rot };
+    }
+    default: {
+      // structure (the destructible wall section) — a thin full-height slab one cell wide on the wall.
+      const h = dims.wallHeightMeters;
+      return { kind: target.kind, x: target.x, y: h / 2, z: target.z, sizeX: dims.navCellSize, sizeY: h, sizeZ: dims.thinMeters, rotationY: rot };
+    }
   }
-  return {
-    kind: target.kind,
-    x: target.x,
-    y: dims.defaultHeightMeters / 2,
-    z: target.z,
-    sizeX: dims.navCellSize,
-    sizeY: dims.defaultHeightMeters,
-    sizeZ: dims.navCellSize,
-  };
 }
 
 /** The nearest interactable to a point, with its planar distance. */

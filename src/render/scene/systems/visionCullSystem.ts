@@ -41,8 +41,11 @@ export class VisionCullSystem {
    */
   build(runtime: GameRuntime, dtSeconds: number, passiveRadiusMeters?: number): VisionCull {
     const p = runtime.player();
-    const scene = runtime.scene;
-    const los = (x0: number, z0: number, x1: number, z1: number): boolean => hasLineOfSight(scene, x0, z0, x1, z1);
+    // V83/V84: route LOS through the SEE-THROUGH `sightScene` so the player's vision reveal sees THROUGH a glassed
+    // window (glass is transparent) and is blocked only by a boarded-shut (2-board) one — the same window
+    // semantics as zombie sight + the flashlight, all on the ONE shared raycast.
+    const sightScene = runtime.sightScene;
+    const los = (x0: number, z0: number, x1: number, z1: number): boolean => hasLineOfSight(sightScene, x0, z0, x1, z1);
     // The cone wedge PLUS the near/noise reveal params. The combined per-slot reveal is max(cone, near, memory,
     // noise) — see perceptionMemory.ts. LOS routes through the STRUCTURAL hasLineOfSight (nav grid), never mesh
     // opacity, so a faded cutaway wall can't reveal the zombies behind it (V63). The near radius scales with

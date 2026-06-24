@@ -15,6 +15,18 @@ import { inputStore, formatKeyCode } from '../../stores/input';
 import { inventoryViewStore } from '../../stores/inventoryView';
 import { uiStore } from '../../stores/ui';
 import { createGameRuntime } from './gameRuntime';
+import { worldToScreen as projectWorldToScreen, type ScreenPoint } from './worldToScreen';
+
+/** Layout tunables for the world-anchored interaction prompt (T113) — a STABLE frozen ref so reading it inside
+ *  a React selector never returns a fresh object (B24/V11). Resolved once from `uiConfig` at handle creation. */
+export interface PromptLayout {
+  /** World height (m) above the interactable the prompt is anchored to. */
+  readonly anchorHeightMeters: number;
+  /** Screen-px the prompt is lifted above its projected anchor. */
+  readonly offsetPx: number;
+  /** Min px from the viewport edges when clamping the prompt on-screen. */
+  readonly marginPx: number;
+}
 
 /** The engine handle the React shell uses to issue slice-level intent (save/load/modify/weather). */
 export interface EngineHandle {
@@ -36,6 +48,11 @@ export interface EngineHandle {
   nearestInteractable(): InteractionTargetWorld | null;
   /** T59: open a world container's loot panel (the "Search/Loot" verb for a storage target). */
   loot(): void;
+  /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
+   *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
+  worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
+  /** T113: stable layout tunables for the world-anchored interaction prompt (anchor height / offset / margin). */
+  readonly promptLayout: PromptLayout;
   rotate(dir: 1 | -1): void;
   zoom(delta: number): void;
   setWeather(profile: WeatherProfile): void;
@@ -50,6 +67,10 @@ export interface CreateEngineHandleArgs {
   readonly adapter: PersistenceAdapter;
   readonly camera: CameraRig;
   readonly scene: BlockScene;
+  /** The viewport canvas — its client rect maps NDC → CSS px for the world-anchored prompt (T113). */
+  readonly canvas: HTMLCanvasElement;
+  /** Resolved world-anchored prompt layout tunables (T113, from `uiConfig`). */
+  readonly promptLayout: PromptLayout;
   /** Live runtime accessor (reassigned on reload). */
   readonly getRuntime: () => GameRuntime;
   /** Publish a freshly-loaded runtime back to the viewport binding (load path). */
@@ -59,7 +80,8 @@ export interface CreateEngineHandleArgs {
 }
 
 export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
-  const { tier, adapter, camera, scene, getRuntime, setRuntime, publishInventory } = args;
+  const { tier, adapter, camera, scene, canvas, getRuntime, setRuntime, publishInventory } = args;
+  const promptLayout: PromptLayout = Object.freeze({ ...args.promptLayout });
   let cmdSeq = 1;
   const nextCmd = (): CommandId => cmdSeq++ as unknown as CommandId;
   return {
@@ -99,6 +121,14 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       inventoryViewStore.getState().setOpenContainer(t.label);
       uiStore.getState().openPanel('inventory');
     },
+    worldToScreen: (x, y, z) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const p = projectWorldToScreen(camera.camera, x, y, z, rect.width, rect.height);
+      if (p.behind) return null; // behind the camera — the projection mirrors; don't draw
+      return { x: rect.left + p.x, y: rect.top + p.y, behind: false };
+    },
+    promptLayout,
     rotate: (dir) => camera.rotate(dir),
     zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
     setWeather: (profile) => getRuntime().setWeather(profile),

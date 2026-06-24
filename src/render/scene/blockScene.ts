@@ -268,14 +268,15 @@ export class BlockScene {
     // T98: player flashlight — a SpotLight at the player aimed along playerAim(), its cone matched to the
     // player vision wedge (so the lit area == the fog-of-war-revealed area). Pooled + tracked for disposal
     // (V24); all tunables typed config (V4). Position/target/intensity are driven each frame in syncFlashlight.
-    const fovHalf = (this.perception.playerFieldOfViewDegrees * Math.PI) / 360;
-    const angleMargin = (this.lighting.flashlightAngleMarginDegrees * Math.PI) / 180;
+    // The flashlight cone is its OWN tight beam (decoupled from the wide player vision FOV/range, which made it
+    // far too wide too early). Own half-angle + own range; the beam ORIGIN sits at the nose tip (syncFlashlight).
+    const coneHalf = (this.lighting.flashlightConeHalfAngleDegrees * Math.PI) / 180;
     this.flashlight = this.registry.track(
       new SpotLight(
         this.lighting.flashlightColor,
         this.lighting.flashlightIntensity,
-        this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters,
-        Math.min(Math.PI / 2 - 0.01, fovHalf + angleMargin),
+        this.lighting.flashlightRangeMeters,
+        Math.min(Math.PI / 2 - 0.01, coneHalf),
         this.lighting.flashlightPenumbra,
         this.lighting.flashlightDecay,
       ),
@@ -289,7 +290,7 @@ export class BlockScene {
     this.flashlight.shadow.mapSize.set(this.shadows.shadowMapResolution, this.shadows.shadowMapResolution);
     this.flashlight.shadow.bias = this.shadows.shadowDepthBias;
     this.flashlight.shadow.camera.near = this.shadows.shadowCameraNearMeters;
-    this.flashlight.shadow.camera.far = this.perception.playerVisionRange + this.lighting.flashlightRangeMarginMeters;
+    this.flashlight.shadow.camera.far = this.lighting.flashlightRangeMeters;
     this.scene.add(this.flashlight, this.flashlight.target);
 
     this.lightingSys = new LightingSystem(
@@ -316,11 +317,11 @@ export class BlockScene {
     );
     this.flashlightSys = new FlashlightSystem(this.flashlight, {
       intensity: this.lighting.flashlightIntensity,
-      rangeMarginMeters: this.lighting.flashlightRangeMarginMeters,
+      rangeMeters: this.lighting.flashlightRangeMeters,
       wallClampMarginMeters: this.lighting.flashlightWallClampMarginMeters,
       heightMeters: this.lighting.flashlightHeightMeters,
       dayIntensityScale: this.lighting.flashlightDayIntensityScale,
-      visionRange: this.perception.playerVisionRange,
+      noseOffsetMeters: this.lighting.flashlightNoseOffsetMeters,
     });
 
     this.houseStyle = new HouseStyleResolver(this.runtime.scene, resolveHouseVariation(this.tier));
@@ -420,6 +421,14 @@ export class BlockScene {
   setAccessibility(a: RenderAccessibility): void {
     this.accessibility = a;
     if (this.playerRimMat) this.playerRimMat.emissiveIntensity = this.basePlayerEmissive * a.outlineStrength;
+  }
+
+  /** Settings toggle: turn ALL fog off/on for the camera — the atmospheric distance Fog AND the fog-of-war
+   *  overlay. Off → a clear, full-bright view (no haze, the whole explored/unexplored map visible). The lighting
+   *  system only updates the (now-detached) fog object's params, so detaching `scene.fog` sticks. */
+  setFogEnabled(enabled: boolean): void {
+    this.scene.fog = enabled ? this.fog : null;
+    this.fogOfWarEnabled = enabled;
   }
 
   /** The live accessibility params (test/diagnostics — proves settings propagate into the scene). */

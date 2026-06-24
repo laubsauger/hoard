@@ -10,6 +10,7 @@ import {
   exteriorWallOccludesPlayer,
   wallBetweenPlayerAndCamera,
   surfaceInXrayField,
+  segmentIntersectsAabbXZ,
   clampConeRangeToWall,
   classifyThreat,
   threatMarkerStyle,
@@ -160,15 +161,15 @@ describe('generic player↔camera occlusion — wallBetweenPlayerAndCamera (V66)
   });
 });
 
-describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74)', () => {
+describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74) — normal-free segment-vs-AABB', () => {
   const radius = settings.xrayRadiusMeters;
-  const span = settings.occluderLateralSpanMeters;
+  const margin = settings.sightlineMarginMeters;
 
   it('resolves a sane positive x-ray radius from config', () => {
     expect(radius).toBeGreaterThan(0);
   });
 
-  // A south-facing exterior wall: plane at z=10, outward normal +z, ~8 m wide, thin in z.
+  // A wall at z=10, ~8 m wide on X, thin on Z. The normal is irrelevant to the test now (segment-vs-AABB).
   const SOUTH: VecXZ = { x: 0, z: 1 };
   const wall = (player: VecXZ, camera: VecXZ, radiusMeters = radius): boolean =>
     surfaceInXrayField({
@@ -178,53 +179,58 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74)', () => {
       player,
       camera,
       radiusMeters,
-      lateralSpanMeters: span,
+      sightlineMarginMeters: margin,
     });
 
-  it('fades a wall that is BETWEEN player + camera AND within the radius', () => {
-    // player just south of the wall (z=9 < 10), camera north of it (z=20 > 10) → plane separates them; ~1 m away.
+  it('fades a wall the player→camera SIGHTLINE crosses, within the radius', () => {
+    // player south of the wall (z=9), camera north (z=20): the segment 9→20 passes through the z=10 wall.
     expect(wall({ x: 0, z: 9 }, { x: 0, z: 20 })).toBe(true);
   });
 
   it('keeps that SAME wall opaque when the player is BEYOND the x-ray radius (bubble is selective)', () => {
-    // Still between (player z=10-radius-5 south, camera north), but the wall's nearest point is past the radius.
     const farSouth = 10 - radius - 5;
     expect(wall({ x: 0, z: farSouth }, { x: 0, z: 20 })).toBe(false);
   });
 
-  it('keeps a wall opaque when it is NOT between player + camera, even within the radius (far wall reads enclosure)', () => {
-    // player + camera both NORTH of the wall (z>10) → same signed side → not in the way → opaque.
+  it('keeps a wall BEHIND the player opaque — the segment goes AWAY from it (the reported bug)', () => {
+    // player north of the wall (z=12), camera further north (z=20): the sightline 12→20 never crosses z=10.
+    // This is exactly the "wall behind the character should NOT fade" case.
+    expect(wall({ x: 0, z: 12 }, { x: 0, z: 20 })).toBe(false);
     expect(wall({ x: 0, z: 11 }, { x: 0, z: 20 })).toBe(false);
   });
 
-  it('fades an UN-OCCUPIED building exterior wall behind the player (the bug) — no occupied-building gate', () => {
-    // The decision does not know/consult which building the player occupies: a wall between player + camera within
-    // the bubble fades regardless. This is exactly the neighbour/exterior wall the old gates left the player behind.
+  it('fades an UN-OCCUPIED building wall the sightline crosses (no occupied-building gate)', () => {
     expect(wall({ x: 0, z: 9 }, { x: 0, z: 30 })).toBe(true);
   });
 
-  it('with the facing refinement, a CAMERA-FACING wall stays faded when the player HUGS it (un-fade-when-close bug)', () => {
-    const camera: VecXZ = { x: 0, z: 20 }; // north of the wall (z=10) → the wall's +z normal faces the camera
-    const hug = (player: VecXZ): boolean =>
+  it('stays faded when the player HUGS / stands ON the wall plane (segment starts inside the footprint)', () => {
+    expect(wall({ x: 0, z: 9.9 }, { x: 0, z: 20 })).toBe(true); // just inside
+    expect(wall({ x: 0, z: 10.05 }, { x: 0, z: 20 })).toBe(true); // pressed onto the plane
+  });
+
+  it('is NORMAL-FREE: an interior wall with a wrong/degenerate normal still fades when on the sightline (the fix)', () => {
+    // The old test required a "good" outward normal; the segment model ignores it — so interior partitions whose
+    // guessed normal is off STILL fade correctly when genuinely between the player and the camera.
+    const interior = (n: VecXZ): boolean =>
       surfaceInXrayField({
-        outwardNormal: SOUTH,
+        outwardNormal: n,
         surfaceCenter: { x: 0, z: 10 },
         surfaceHalfExtent: { x: 4, z: 0.1 },
-        player,
-        camera,
+        player: { x: 0, z: 9 },
+        camera: { x: 0, z: 20 },
         radiusMeters: radius,
-        lateralSpanMeters: span,
-        facingDotThreshold: settings.cameraFacingDotThreshold,
-        facingHugBandMeters: settings.exteriorCutawayAdjacencyMeters,
+        sightlineMarginMeters: margin,
       });
-    expect(hug({ x: 0, z: 9.9 })).toBe(true); // just inside → faded (strict between would also catch this)
-    expect(hug({ x: 0, z: 10.05 })).toBe(true); // pressed ONTO the plane → still faded (the bug: between degraded here)
-    // but well PAST the wall on the camera side (beyond the hug band) → it's behind the player → stays opaque.
-    expect(hug({ x: 0, z: 10 + settings.exteriorCutawayAdjacencyMeters + 1 })).toBe(false);
+    expect(interior({ x: 0, z: 0 })).toBe(true); // degenerate normal — still fades (between)
+    expect(interior({ x: 1, z: -1 })).toBe(true); // arbitrary/wrong normal — still fades (between)
+  });
+
+  it('a wall the sightline passes wide of stays opaque (laterally off the line)', () => {
+    // wall centred at x=0; player+camera both far to the +x side so the segment never reaches the wall's X span.
+    expect(wall({ x: 30, z: 9 }, { x: 30, z: 20 })).toBe(false);
   });
 
   it('fades a ROOF from above when the player is under/near its footprint within the radius', () => {
-    // Roof footprint centred at (0,0), 8×8 m; outwardNormal null ⇒ occludes from above (radius only, no between).
     const roof = (player: VecXZ): boolean =>
       surfaceInXrayField({
         outwardNormal: null,
@@ -233,40 +239,34 @@ describe('x-ray bubble cutaway — surfaceInXrayField (T110/V74)', () => {
         player,
         camera: { x: 0, z: 30 },
         radiusMeters: radius,
-        lateralSpanMeters: span,
+        sightlineMarginMeters: margin,
       });
-    expect(roof({ x: 0, z: 0 })).toBe(true); // player dead under the roof → nearest point 0
-    expect(roof({ x: 3, z: 3 })).toBe(true); // inside the footprint → still 0
-    expect(roof({ x: 4 + radius + 5, z: 0 })).toBe(false); // well past the footprint + radius → opaque
+    expect(roof({ x: 0, z: 0 })).toBe(true);
+    expect(roof({ x: 3, z: 3 })).toBe(true);
+    expect(roof({ x: 4 + radius + 5, z: 0 })).toBe(false);
   });
 
-  it('uses the NEAREST point of the footprint: a player anywhere inside a LARGE footprint still reveals its roof (V20)', () => {
-    // A 40×40 m footprint whose centre is far from the player, but the player stands inside it → nearest point 0.
+  it('uses the NEAREST point of the footprint: a player inside a LARGE roof footprint still reveals it (V20)', () => {
     expect(
       surfaceInXrayField({
         outwardNormal: null,
         surfaceCenter: { x: 0, z: 0 },
         surfaceHalfExtent: { x: 20, z: 20 },
-        player: { x: 18, z: 18 }, // ~25 m from the centre, but inside the footprint
+        player: { x: 18, z: 18 },
         camera: { x: 0, z: 60 },
         radiusMeters: radius,
-        lateralSpanMeters: span,
+        sightlineMarginMeters: margin,
       }),
     ).toBe(true);
   });
+});
 
-  it('a degenerate (zero-length) wall normal never occludes (delegates to wallBetweenPlayerAndCamera)', () => {
-    expect(
-      surfaceInXrayField({
-        outwardNormal: { x: 0, z: 0 },
-        surfaceCenter: { x: 0, z: 10 },
-        surfaceHalfExtent: { x: 4, z: 0.1 },
-        player: { x: 0, z: 9 },
-        camera: { x: 0, z: 20 },
-        radiusMeters: radius,
-        lateralSpanMeters: span,
-      }),
-    ).toBe(false);
+describe('segmentIntersectsAabbXZ', () => {
+  it('true when the segment crosses the box, starts inside, or ends inside; false when wide of it', () => {
+    expect(segmentIntersectsAabbXZ(0, 0, 0, 20, -1, 9, 1, 11)).toBe(true); // crosses the z=[9,11] slab
+    expect(segmentIntersectsAabbXZ(0, 10, 0, 20, -1, 9, 1, 11)).toBe(true); // starts INSIDE
+    expect(segmentIntersectsAabbXZ(0, 0, 0, 8, -1, 9, 1, 11)).toBe(false); // stops short (z 0→8, box at 9..11)
+    expect(segmentIntersectsAabbXZ(30, 0, 30, 20, -1, 9, 1, 11)).toBe(false); // wide on X
   });
 });
 

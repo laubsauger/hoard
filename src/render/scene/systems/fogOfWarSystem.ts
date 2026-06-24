@@ -125,7 +125,9 @@ export class FogOfWarSystem {
     const cs = this.cfg.cellSize;
     const cols = this.cfg.cols;
     const rows = this.cfg.rows;
-    const scene = runtime.scene;
+    // V83/V84: the SEE-THROUGH scene — fog reveal sees THROUGH a glassed window (glass is transparent) and is
+    // blocked only by a boarded-shut (2-board) one, the same window semantics as the cone reveal + zombie sight.
+    const sightScene = runtime.sightScene;
     const p = runtime.player();
 
     // The SAME cone+near+LOS reveal the crowd uses; noise terms zeroed (a world cell is never "loud"), the
@@ -141,7 +143,7 @@ export class FogOfWarSystem {
       nearRadiusMeters: passiveRadiusMeters,
       hearingRange: 0,
       soundWallOcclusion: 0,
-      lineOfSight: (x0, z0, x1, z1) => hasLineOfSight(scene, x0, z0, x1, z1),
+      lineOfSight: (x0, z0, x1, z1) => hasLineOfSight(sightScene, x0, z0, x1, z1),
     };
 
     this.grid.beginFrame();

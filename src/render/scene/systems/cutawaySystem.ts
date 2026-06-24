@@ -57,9 +57,7 @@ export class CutawaySystem {
               player: { x: player.x, z: player.z },
               camera: { x: camX, z: camZ },
               radiusMeters: this.cfg.visibility.xrayRadiusMeters,
-              lateralSpanMeters: this.cfg.visibility.occluderLateralSpanMeters,
-              facingDotThreshold: this.cfg.visibility.cameraFacingDotThreshold,
-              facingHugBandMeters: this.cfg.visibility.exteriorCutawayAdjacencyMeters,
+              sightlineMarginMeters: this.cfg.visibility.sightlineMarginMeters,
             });
       const ctx: OcclusionContext = {
         // `playerInside` only drives the 'interior' surface case in resolveSurfaceVisibility; fade surfaces are

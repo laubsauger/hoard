@@ -14,7 +14,9 @@ import type { RenderAccessibility } from '../../render/accessibility';
 import { ImpactView, type ImpactIngestContext } from '../../render/effects/impactView';
 import type { RaycastSurfaceProjector } from '../../render/effects/surfaceProjector';
 import { inputStore } from '../../stores/input';
+import { interactionSelectStore } from '../../stores/interactionSelect';
 import { sessionStore } from '../../stores/session';
+import { uiStore } from '../../stores/ui';
 import { debugViewStore } from '../../diagnostics/store';
 import { AimRaycaster } from './aim';
 
@@ -50,10 +52,14 @@ export function registerInput(args: RegisterInputArgs): () => void {
     if (e.code === b.rotateCCW) camera.rotate(-1);
     if (e.code === b.rotateCW) camera.rotate(1);
     if (e.code === b.pause) {
-      // T49: the pause key toggles an authoritative pause — the sim HALTS in the frame loop (V12-safe)
-      // and the pause menu shows. The session `paused` flag is the single source of truth shared with
-      // the loop (the menu's Resume writes it too). Pausing leaves the lifecycle phase on 'playing'.
-      if (sessionStore.getState().phase === 'playing') sessionStore.getState().togglePause();
+      // Escape PRIORITY: an open panel (inventory/settings/loot/…) closes FIRST — Escape only toggles pause
+      // when nothing is open. (Before, Escape toggled pause even with the inventory up, so it "opened settings"
+      // instead of closing the pane.) T49: pause HALTS the sim in the loop (V12-safe); phase stays 'playing'.
+      if (uiStore.getState().activePanel !== 'none') {
+        uiStore.getState().closePanel();
+      } else if (sessionStore.getState().phase === 'playing') {
+        sessionStore.getState().togglePause();
+      }
     }
     // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
     if (e.code === 'KeyR') getRuntime().reloadWeapon();
@@ -113,6 +119,13 @@ export function registerInput(args: RegisterInputArgs): () => void {
   };
   const onWheel = (e: WheelEvent): void => {
     e.preventDefault();
+    // Plain wheel ZOOMS (the default — hijacking it for selection broke zoom in the common case). SHIFT+wheel
+    // cycles the interaction option when verbs are in reach. Tap-F still uses the selected/headline verb.
+    const sel = interactionSelectStore.getState();
+    if (e.shiftKey && sel.verbCount > 0) {
+      sel.cycle(e.deltaY >= 0 ? 1 : -1);
+      return;
+    }
     camera.setZoom(camera.state.zoom + Math.sign(e.deltaY) * 2);
   };
   window.addEventListener('keydown', onKeyDown);

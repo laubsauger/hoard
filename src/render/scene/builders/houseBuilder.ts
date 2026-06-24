@@ -42,6 +42,7 @@ import {
   type VisibilitySettings,
 } from '../../world/visibility';
 import { makeRoofGeometry } from '../houseGeometry';
+import { tagInteractable } from '../../effects/highlightView';
 import { worldConfig } from '../../../config/domains/world';
 import type { ResolvedDomain } from '../../../config/types';
 import type { BuildContext } from './buildContext';
@@ -272,6 +273,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
               m.position.set(px, cyB, pz);
               m.castShadow = true;
               m.receiveShadow = true;
+              tagInteractable(m, idx); // T113/V79: the destructible §G wall section is an interactable — tag by nav cell so the silhouette GLOW hugs its meshes
               wallsGroup.add(m);
               sectionObjs.push(m);
             } else {
@@ -291,6 +293,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
                 const m = new Mesh(res.geo(`section.upper.${bi}.${cx}.${cy}.${along}.${segIdx}`, mkGeo(h)), sectionMat);
                 m.position.set(px, cyU, pz);
                 m.castShadow = true;
+                tagInteractable(m, idx); // T113/V79: section nav-cell tag for the silhouette GLOW (matches the base-portion tag)
                 wallsGroup.add(m);
                 sectionObjs.push(m);
               } else {

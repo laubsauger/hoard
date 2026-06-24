@@ -255,6 +255,19 @@ export function buildingsOf(
 const LOS_STEP_METERS = 1;
 
 /**
+ * The scene slice the LOS/visibility primitives read. `isWindowOpening(cx,cy)` (OPTIONAL) lets a sight /
+ * projectile ray pass THROUGH a window OPENING cell — a glassless / <2-board window (V82) — even though that
+ * cell is a BLOCKED wall cell in the nav grid (windows never alter nav, V68). A CLOSED window (2 boards /
+ * intact glass / a real wall) still occludes. The predicate is OPT-IN: callers that omit it (the fog/flashlight
+ * clamps, perception, the narrow vision mocks) keep pure cell + edge-wall occlusion, so their behaviour is
+ * unchanged — only the interaction LOS gate (which supplies it) sees through open windows.
+ */
+export type LosScene = Pick<TestBlock, 'isWalkableWorld'> &
+  Partial<Pick<TestBlock, 'navGrid'>> & {
+    readonly isWindowOpening?: (cx: number, cy: number) => boolean;
+  };
+
+/**
  * True when the straight segment (x0,z0)→(x1,z1) crosses an interior EDGE-wall (a walled cell edge). Walks
  * the segment in fine sub-cell steps tracking the cell it is in; when it enters a new cell, the transition
  * is gated on `NavGrid.canStep` — a walled cardinal edge (or a corner-cut past a perpendicular edge-wall on
@@ -268,6 +281,7 @@ export function segmentCrossesWall(
   z0: number,
   x1: number,
   z1: number,
+  isWindowOpening?: (cx: number, cy: number) => boolean,
 ): boolean {
   const cs = navGrid.settings.navCellSize;
   const dx = x1 - x0;
@@ -288,7 +302,11 @@ export function segmentCrossesWall(
     // only test the edge when BOTH cells are in bounds; exterior/boundary occlusion is cell-blocking's job.
     const fromIn = pcx >= 0 && pcy >= 0 && pcx < navGrid.width && pcy < navGrid.height;
     const toIn = cx >= 0 && cy >= 0 && cx < navGrid.width && cy < navGrid.height;
-    if (fromIn && toIn && !navGrid.canStep(pcx, pcy, sx, sy)) return true;
+    if (fromIn && toIn && !navGrid.canStep(pcx, pcy, sx, sy)) {
+      // an edge-wall normally blocks the segment — but a window OPENING on EITHER side of the crossed edge is a
+      // sight gap, so the line passes through it (V82). A 2-board/closed window supplies no opening → still blocks.
+      if (!(isWindowOpening && (isWindowOpening(cx, cy) || isWindowOpening(pcx, pcy)))) return true;
+    }
     pcx = cx;
     pcy = cy;
   }
@@ -301,7 +319,7 @@ export function segmentCrossesWall(
  * target's own cells never block. Walks the segment sampling the scene's `isWalkableWorld`.
  */
 export function hasLineOfSight(
-  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
+  scene: LosScene,
   x0: number,
   z0: number,
   x1: number,
@@ -313,11 +331,20 @@ export function hasLineOfSight(
   // Interior partition (edge-wall) occlusion: a ray crossing a walled cell edge is blocked, so sight + sound
   // don't pass through interior walls (open doorways/windows still pass — those are clear edges/cells). The
   // narrow LOS mocks that expose only isWalkableWorld keep pure cell-occlusion (no navGrid → no edge test).
-  if (scene.navGrid && segmentCrossesWall(scene.navGrid, x0, z0, x1, z1)) return false;
+  const grid = scene.navGrid;
+  const opening = grid ? scene.isWindowOpening : undefined; // window-aware only when a grid maps cells (V82)
+  if (grid && segmentCrossesWall(grid, x0, z0, x1, z1, opening)) return false;
+  const cs = grid ? grid.settings.navCellSize : 0;
   const steps = Math.max(1, Math.ceil(dist / LOS_STEP_METERS));
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
-    if (!scene.isWalkableWorld(x0 + dx * t, z0 + dz * t)) return false;
+    const px = x0 + dx * t;
+    const pz = z0 + dz * t;
+    if (!scene.isWalkableWorld(px, pz)) {
+      // a window OPENING cell is a blocked WALL cell (V68) yet a sight gap — pass through it; a CLOSED window
+      // (2 boards / intact / real wall) supplies no opening here, so it blocks like any wall (V82).
+      if (!(opening && opening(Math.floor(px / cs), Math.floor(pz / cs)))) return false;
+    }
   }
   return true;
 }
@@ -327,7 +354,7 @@ export function hasLineOfSight(
  * debug overlay to crop a vision cone at walls. Returns `maxDist` if the ray stays clear.
  */
 export function rayDistanceToWall(
-  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
+  scene: LosScene,
   x: number,
   z: number,
   heading: number,
@@ -341,6 +368,7 @@ export function rayDistanceToWall(
   // when a navGrid is available (production always carries one; the narrow vision mocks keep cell-occlusion).
   const grid = scene.navGrid;
   const cs = grid ? grid.settings.navCellSize : 0;
+  const opening = grid ? scene.isWindowOpening : undefined; // window-aware only when a grid maps cells (V82)
   // sample finely enough that a cell transition is never skipped when edge-walls are in play (quarter cell).
   const stepM = grid ? Math.min(LOS_STEP_METERS, cs * 0.25) : LOS_STEP_METERS;
   const steps = Math.max(1, Math.ceil(maxDist / stepM));
@@ -350,7 +378,11 @@ export function rayDistanceToWall(
     const d = (i / steps) * maxDist;
     const px = x + dx * d;
     const pz = z + dz * d;
-    if (!scene.isWalkableWorld(px, pz)) return d;
+    if (!scene.isWalkableWorld(px, pz)) {
+      // a window OPENING cell is a blocked WALL cell (V68) yet a sight/projectile gap — the ray passes through
+      // it; a CLOSED window (2 boards / intact / real wall) supplies no opening, so the ray stops here (V82).
+      if (!(opening && opening(Math.floor(px / cs), Math.floor(pz / cs)))) return d;
+    }
     if (grid) {
       const cx = Math.floor(px / cs);
       const cy = Math.floor(pz / cs);
@@ -359,7 +391,10 @@ export function rayDistanceToWall(
         const sy = Math.sign(cy - pcy);
         const fromIn = pcx >= 0 && pcy >= 0 && pcx < grid.width && pcy < grid.height;
         const toIn = cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
-        if (fromIn && toIn && !grid.canStep(pcx, pcy, sx, sy)) return d;
+        if (fromIn && toIn && !grid.canStep(pcx, pcy, sx, sy)) {
+          // a window OPENING on either side of the crossed edge is a sight gap — pass it (V82).
+          if (!(opening && (opening(cx, cy) || opening(pcx, pcy)))) return d;
+        }
         pcx = cx;
         pcy = cy;
       }
@@ -376,7 +411,7 @@ export function rayDistanceToWall(
  * debug overlay (which builds its cone mesh from these distances), so they always agree.
  */
 export function castVisibilityFan(
-  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
+  scene: LosScene,
   x: number,
   z: number,
   heading: number,
@@ -401,7 +436,7 @@ export function castVisibilityFan(
  * construction. (`fovHalf >= π` = omnidirectional, range-only + LOS.)
  */
 export function seesWithinFan(
-  scene: Pick<TestBlock, 'isWalkableWorld'> & Partial<Pick<TestBlock, 'navGrid'>>,
+  scene: LosScene,
   x: number,
   z: number,
   heading: number,

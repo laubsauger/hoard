@@ -190,6 +190,9 @@ describe('placeHouse — determinism + translation', () => {
 });
 
 function stripFns(h: PlacedHouse): unknown {
+  // Destructure-to-omit the function props (`roomAt`/`template`) via rest-spread; the named bindings are
+  // intentionally unused (eslint's no-unused-vars lacks ignoreRestSiblings here).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { roomAt: _omit, template: _t, ...rest } = h;
   return rest;
 }

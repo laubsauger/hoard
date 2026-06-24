@@ -27,6 +27,8 @@ function fakeRuntime(): { runtime: GameRuntime; alive: Uint8Array; position: Flo
     player: () => ({ x: 0, y: 0, z: 0 }),
     playerAim: () => 0,
     scene: { isWalkableWorld: () => true }, // clear structural LOS everywhere
+    // V84: the reveal routes LOS through the SEE-THROUGH sightScene; no windows here, so it is the same clear predicate.
+    sightScene: { isWalkableWorld: () => true },
     zombies: { capacity: CAPACITY, count: 1, views: { position, alive, state } },
   } as unknown as GameRuntime;
   return { runtime, alive, position };

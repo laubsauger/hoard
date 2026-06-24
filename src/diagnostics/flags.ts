@@ -42,15 +42,15 @@ export interface DebugFlags {
 
 export const DEFAULT_DEBUG_FLAGS: DebugFlags = {
   freezeTiers: false,
-  showSpatialGrids: false,
+  showSpatialGrids: true,
   visualizeFlowFields: false,
   inspectDirtyNavTiles: false,
-  showStructuralCells: false,
-  showSightRadius: false,
+  showStructuralCells: true,
+  showSightRadius: true,
   showAttackRadius: false,
   showZombieState: false,
   showSoundField: false,
-  showPlayerVision: false,
+  showPlayerVision: true,
   // Gameplay render features (not overlays) — these default ON; dev can toggle them off for debugging.
   cullToVisionCone: true,
   flashlight: true,

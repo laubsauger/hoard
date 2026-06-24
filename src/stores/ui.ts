@@ -10,6 +10,7 @@ export interface UiState {
   readonly activePanel: PanelId;
   readonly modalStack: readonly string[];
   readonly hudVisible: boolean;
+  readonly controlsCollapsed: boolean; // T18 — dev-tools command sidebar collapsed (default) vs expanded.
   readonly loadingProgress: number; // 0..1
   readonly errorMessage: string | null;
   openPanel(panel: PanelId): void;
@@ -17,6 +18,7 @@ export interface UiState {
   pushModal(id: string): void;
   popModal(): void;
   setHudVisible(visible: boolean): void;
+  setControlsCollapsed(collapsed: boolean): void;
   setLoadingProgress(progress: number): void;
   setError(message: string | null): void;
 }
@@ -27,6 +29,7 @@ export function createUiStore() {
       activePanel: 'none',
       modalStack: [],
       hudVisible: true,
+      controlsCollapsed: true,
       loadingProgress: 0,
       errorMessage: null,
       openPanel: (activePanel) => set({ activePanel }),
@@ -34,6 +37,7 @@ export function createUiStore() {
       pushModal: (id) => set((s) => ({ modalStack: [...s.modalStack, id] })),
       popModal: () => set((s) => ({ modalStack: s.modalStack.slice(0, -1) })),
       setHudVisible: (hudVisible) => set({ hudVisible }),
+      setControlsCollapsed: (controlsCollapsed) => set({ controlsCollapsed }),
       setLoadingProgress: (progress) => {
         if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
           throw new Error(`loadingProgress must be in [0,1], got ${progress}`);

@@ -199,10 +199,35 @@ interface WindowRecord {
   attackTicks: number;
 }
 
-/** An opening lets a projectile / sight line through: glass is gone AND nothing is boarded over it. This is
- *  a PROJECTILE-occlusion predicate only — it does NOT make the cell nav-walkable (§G room-seal stays intact). */
-function isOpening(r: WindowRecord): boolean {
+/** The board count at which a window reads as CLOSED — the SECOND board (V82). A window boards UP TO TWICE,
+ *  two DISTINCT stages: ONE board still leaves a shoot/see-through gap (it only blocks bodily ENTRY + adds
+ *  attrition resistance), the SECOND board seals it into a solid wall-equivalent (no sight/projectile through).
+ *  This is a fixed game rule (two boarding stages), not a tunable — `maxBoardsPerWindow` caps how many boards a
+ *  window can hold (default 2), this names which board CLOSES it. */
+export const BOARDS_TO_CLOSE = 2;
+
+/** A SIGHT/PROJECTILE opening — a round / sight line passes through it: glass is gone AND it carries FEWER than
+ *  `BOARDS_TO_CLOSE` boards (0 or 1). A second board CLOSES it (occludes like a wall — V82). PROJECTILE/LOS
+ *  occlusion predicate ONLY — it does NOT make the cell nav-walkable (§G room-seal stays intact). */
+function sightOpening(r: WindowRecord): boolean {
+  return r.glass !== 'intact' && r.boards < BOARDS_TO_CLOSE;
+}
+
+/** FULLY open — glass gone AND ZERO boards: nothing left to attrite, and the only state the player can vault
+ *  THROUGH (a single board blocks bodily entry, V70). Distinct from `sightOpening`, which a 1-board window
+ *  passes for sight/projectiles but NOT for a body. */
+function fullyOpen(r: WindowRecord): boolean {
   return r.glass !== 'intact' && r.boards === 0;
+}
+
+/** SEE-THROUGH (V84) — what LIGHT + VISION pass through, which is LOOSER than `sightOpening`: GLASS IS
+ *  TRANSPARENT, so an INTACT pane lets sight + light through just like an open/smashed hole does. Only the
+ *  SECOND board (`BOARDS_TO_CLOSE`) seals it visually. So a window is see-through iff it carries fewer than
+ *  two boards, REGARDLESS of glass state. This is distinct from `sightOpening` (which additionally requires the
+ *  glass be GONE) because a PROJECTILE must shatter the pane first while a SIGHT LINE / a LIGHT BEAM does not.
+ *  (A curtain would also block this, but curtains are not modelled yet.) */
+function seeThrough(r: WindowRecord): boolean {
+  return r.boards < BOARDS_TO_CLOSE;
 }
 
 /**
@@ -228,11 +253,29 @@ export class WindowSystem {
     }
   }
 
-  /** True iff the window at `navCell` is an OPENING — a projectile / sight line passes through it (no glass,
-   *  no boards). Used by the combat occlusion query; it never implies the cell is nav-walkable (§G). */
+  /** True iff the window at `navCell` is a SIGHT/PROJECTILE opening — a round / sight line passes through it
+   *  (glass gone AND fewer than `BOARDS_TO_CLOSE` boards, i.e. 0 or 1). A 2-board window is CLOSED (occludes
+   *  like a wall, V82). Used by the combat occlusion query + the interaction LOS gate; it never implies the
+   *  cell is nav-walkable (§G). */
   isOpening(navCell: number): boolean {
     const w = this.byCell.get(navCell);
-    return w ? isOpening(w) : false;
+    return w ? sightOpening(w) : false;
+  }
+
+  /** True iff the window at `navCell` is FULLY open — glass gone AND ZERO boards. The ONLY state the player can
+   *  climb THROUGH (a single board blocks bodily entry, V70); also the attrition-complete state (V82). */
+  isFullyOpen(navCell: number): boolean {
+    const w = this.byCell.get(navCell);
+    return w ? fullyOpen(w) : false;
+  }
+
+  /** True iff SIGHT + LIGHT pass through the window at `navCell` (V84) — fewer than `BOARDS_TO_CLOSE` boards,
+   *  REGARDLESS of glass (an intact pane is transparent). LOOSER than `isOpening`: a projectile needs the glass
+   *  gone, a sight line / light beam does not. Used by player vision (cone + fog), zombie sight, and the
+   *  flashlight clamp — never implies the cell is nav-walkable (§G). */
+  isSeeThrough(navCell: number): boolean {
+    const w = this.byCell.get(navCell);
+    return w ? seeThrough(w) : false;
   }
 
   /** Nav-cell key for a window at (cx,cy), or -1 if no window lives there (incl. out-of-bounds coords —
@@ -300,14 +343,16 @@ export class WindowSystem {
    * Advance zombie attrition for the windows currently under attack (a zombie within reach). Each cell
    * accumulates `ticks` of progress; crossing the per-stage threshold tears one board off (boards remain),
    * else smashes an intact pane — opening a shoot/see-through gap. Deterministic (driven by the under-attack
-   * set). A window that is already a clear opening makes no further progress. Returns the changed cells.
+   * set). A window that is already FULLY open (glassless + unboarded) has nothing left to attrite — note a
+   * 1-board glassless window is still attrited here (its last board is torn), even though it is a `sightOpening`
+   * (V82): `fullyOpen` — NOT `sightOpening` — gates "nothing left to do". Returns the changed cells.
    */
   tick(underAttack: Iterable<number>, ticks: number): number[] {
     if (ticks <= 0) return [];
     const changed: number[] = [];
     for (const navCell of underAttack) {
       const w = this.byCell.get(navCell);
-      if (!w || isOpening(w)) continue;
+      if (!w || fullyOpen(w)) continue;
       w.attackTicks += ticks;
       if (w.boards > 0) {
         if (w.attackTicks >= this.cfg.ticksToBreakBoard) {
