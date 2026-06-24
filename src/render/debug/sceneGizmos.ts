@@ -15,7 +15,6 @@ import {
   BufferGeometry,
   Color,
   DoubleSide,
-  DynamicDrawUsage,
   Float32BufferAttribute,
   Group,
   InstancedMesh,
@@ -65,77 +64,76 @@ function makeRing(radius: number, thickness: number, segs = 48): BufferGeometry 
   return g;
 }
 
+/** A flat unit quad in the XZ plane, centred at the origin: local +X is the LENGTH axis (scaled to the edge
+ *  length), local Z is the WIDTH axis (scaled to the stroke). DoubleSide material → winding irrelevant. */
+function makeUnitQuadXZ(): BufferGeometry {
+  const g = new BufferGeometry();
+  // prettier-ignore
+  const p = [
+    -0.5, 0, -0.5,  0.5, 0, -0.5,  0.5, 0, 0.5,
+    -0.5, 0, -0.5,  0.5, 0,  0.5, -0.5, 0, 0.5,
+  ];
+  g.setAttribute('position', new Float32BufferAttribute(p, 3));
+  return g;
+}
+
 /**
- * §V78 — a single dynamic mesh whose geometry is the OCCLUDED-visibility-polygon OUTLINE: a thin world-space
- * stroke along the boundary apex → clipped rim → apex, rebuilt in place each frame from raycast rim points.
- * Lines don't render under WebGPU, so the stroke is a triangle list of thin quads (one per boundary edge, cf.
- * the old makeConeOutline). ONE mesh holds up to `maxAgents` rims (the agent apexes are world-space, so no
- * per-instance transform is needed); `setDrawRange` bounds what's drawn. The position buffer is preallocated
- * to MAX × (segments+2)×6 verts and only rewritten — never reallocated — each frame (V24).
+ * §V78 — the OCCLUDED-visibility-polygon OUTLINE: a thin world-space stroke along the boundary apex → clipped
+ * rim → apex, rebuilt each frame from raycast rim points. Lines don't render under WebGPU, so the stroke is a
+ * set of thin quads (one per boundary edge). Each edge is ONE INSTANCE of a flat unit quad (positioned at the
+ * edge midpoint, Y-rotated to the edge direction, scaled to length × stroke) — an InstancedMesh + the shared
+ * MeshBasicNodeMaterial, the ONLY primitive confirmed to render under WebGPU (the earlier dynamic single-Mesh +
+ * setDrawRange variant did NOT draw at all, B42). Holds up to `maxAgents × (segments+2)` edges; per-frame work
+ * only rewrites instance matrices (no reallocation, V24). `mesh.count` bounds what's drawn.
  */
 class OccludedRimLayer {
-  readonly mesh: Mesh;
-  private readonly positions: Float32Array;
-  private readonly attr: Float32BufferAttribute;
-  private readonly floatsPerAgent: number;
-  private head = 0; // write cursor in floats
+  readonly mesh: InstancedMesh;
+  private readonly q = new Quaternion();
+  private readonly v = new Vector3();
+  private readonly s = new Vector3();
+  private readonly m = new Matrix4();
+  private edges = 0; // instance write cursor this frame
 
   constructor(color: number, maxAgents: number, segments: number, order: number, opacity = 0.85) {
-    const edges = segments + 2; // apex→rim[0], `segments` rim edges, rim[last]→apex
-    const vertsPerAgent = edges * 6; // each edge = a thin quad = 2 tris = 6 verts
-    this.floatsPerAgent = vertsPerAgent * 3;
-    this.positions = new Float32Array(maxAgents * this.floatsPerAgent);
-    this.attr = new Float32BufferAttribute(this.positions, 3);
-    this.attr.setUsage(DynamicDrawUsage);
-    const g = new BufferGeometry();
-    g.setAttribute('position', this.attr);
-    g.setDrawRange(0, 0);
-    this.mesh = new Mesh(g, gizmoMaterial(color, opacity));
+    const maxEdges = maxAgents * (segments + 2); // apex→rim[0], `segments` rim edges, rim[last]→apex
+    this.mesh = new InstancedMesh(makeUnitQuadXZ(), gizmoMaterial(color, opacity), maxEdges);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = order;
     this.mesh.position.y = GIZMO_Y;
+    this.mesh.count = 0;
   }
 
   begin(): void {
-    this.head = 0;
+    this.edges = 0;
   }
 
   /** Append one agent's occluded-rim stroke. apex in world XZ; `rim` = `pointCount` XZ pairs (the clipped
-   *  endpoints). `stroke` is the world-space line width. Writes exactly `floatsPerAgent` floats. */
+   *  endpoints). `stroke` is the world-space line width. Emits one quad instance per boundary edge. */
   add(apexX: number, apexZ: number, rim: Float32Array, pointCount: number, stroke: number): void {
-    const h = stroke * 0.5;
-    const p = this.positions;
-    let o = this.head;
-    const pushEdge = (ax: number, az: number, bx: number, bz: number): void => {
-      let dx = bx - ax;
-      let dz = bz - az;
-      const len = Math.hypot(dx, dz) || 1;
-      dx /= len;
-      dz /= len;
-      const px = -dz * h; // perpendicular half-width
-      const pz = dx * h;
-      p[o++] = ax + px; p[o++] = 0; p[o++] = az + pz;
-      p[o++] = bx + px; p[o++] = 0; p[o++] = bz + pz;
-      p[o++] = bx - px; p[o++] = 0; p[o++] = bz - pz;
-      p[o++] = ax + px; p[o++] = 0; p[o++] = az + pz;
-      p[o++] = bx - px; p[o++] = 0; p[o++] = bz - pz;
-      p[o++] = ax - px; p[o++] = 0; p[o++] = az - pz;
-    };
-    pushEdge(apexX, apexZ, rim[0]!, rim[1]!); // apex → rim[0]
+    this.edge(apexX, apexZ, rim[0]!, rim[1]!, stroke); // apex → rim[0]
     for (let i = 0; i < pointCount - 1; i++) {
-      pushEdge(rim[i * 2]!, rim[i * 2 + 1]!, rim[(i + 1) * 2]!, rim[(i + 1) * 2 + 1]!); // rim[i] → rim[i+1]
+      this.edge(rim[i * 2]!, rim[i * 2 + 1]!, rim[(i + 1) * 2]!, rim[(i + 1) * 2 + 1]!, stroke); // rim[i] → rim[i+1]
     }
-    pushEdge(rim[(pointCount - 1) * 2]!, rim[(pointCount - 1) * 2 + 1]!, apexX, apexZ); // rim[last] → apex
-    this.head = o;
+    this.edge(rim[(pointCount - 1) * 2]!, rim[(pointCount - 1) * 2 + 1]!, apexX, apexZ, stroke); // rim[last] → apex
+  }
+
+  /** One edge ax,az → bx,bz as a quad instance (midpoint, Y-rotated to the edge dir, scaled len × stroke). */
+  private edge(ax: number, az: number, bx: number, bz: number, stroke: number): void {
+    const dx = bx - ax;
+    const dz = bz - az;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-5) return; // a ray clipped to the apex collapses an edge — skip (no zero-scale instance)
+    // Y-rotation θ that maps local +X to the edge direction (dx,dz): R_y(θ)·+X = (cosθ, 0, −sinθ), so θ = atan2(−dz, dx).
+    this.q.setFromAxisAngle(Y_AXIS, Math.atan2(-dz, dx));
+    this.v.set((ax + bx) * 0.5, 0, (az + bz) * 0.5); // midpoint; mesh.position.y lifts it to GIZMO_Y
+    this.s.set(len, 1, stroke);
+    this.m.compose(this.v, this.q, this.s);
+    this.mesh.setMatrixAt(this.edges++, this.m);
   }
 
   finalize(): void {
-    this.mesh.geometry.setDrawRange(0, this.head / 3);
-    this.attr.needsUpdate = true;
-    // The position buffer is rewritten every frame from a zero-initialised array, so the bounding volume
-    // computed at construction is a degenerate point — recompute it so the WebGPU render path doesn't drop
-    // the mesh (frustumCulled is off, but a stale/degenerate sphere still suppressed the dynamic draw).
-    this.mesh.geometry.computeBoundingSphere();
+    this.mesh.count = this.edges;
+    this.mesh.instanceMatrix.needsUpdate = true;
   }
 
   dispose(): void {

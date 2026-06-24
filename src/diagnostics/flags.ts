@@ -42,20 +42,25 @@ export interface DebugFlags {
 
 export const DEFAULT_DEBUG_FLAGS: DebugFlags = {
   freezeTiers: false,
-  showSpatialGrids: true,
+  showSpatialGrids: false,
   visualizeFlowFields: false,
   inspectDirtyNavTiles: false,
-  showStructuralCells: true,
-  showSightRadius: true,
+  showStructuralCells: false,
+  showSightRadius: false,
   showAttackRadius: false,
   showZombieState: false,
   showSoundField: false,
-  showPlayerVision: true,
+  showPlayerVision: false,
   // Gameplay render features (not overlays) — these default ON; dev can toggle them off for debugging.
   cullToVisionCone: true,
   flashlight: true,
   forceLodLevel: null,
 };
+// Frozen: this is a SHARED const default — never alias it into mutable state. A consumer that mutated the
+// object returned by get() (which used to be this very const) corrupted the defaults for every later instance
+// (an order-dependent test failure). DebugFlagState now COPIES it on init/reset; freezing makes any stray
+// in-place write throw at the culprit instead of silently rotting the default.
+Object.freeze(DEFAULT_DEBUG_FLAGS);
 
 /** Keys of the boolean (toggleable) flags only. forceLodLevel is set, not toggled. */
 export type BooleanDebugFlag = {
@@ -79,7 +84,7 @@ const BOOLEAN_FLAG_KEYS: readonly BooleanDebugFlag[] = [
 
 /** Mutable typed holder for the debug control flags. Node-testable; no DOM/3D dependency. */
 export class DebugFlagState {
-  private flags: DebugFlags = DEFAULT_DEBUG_FLAGS;
+  private flags: DebugFlags = { ...DEFAULT_DEBUG_FLAGS };
 
   get(): DebugFlags {
     return this.flags;
@@ -110,7 +115,7 @@ export class DebugFlagState {
   }
 
   reset(): DebugFlags {
-    this.flags = DEFAULT_DEBUG_FLAGS;
+    this.flags = { ...DEFAULT_DEBUG_FLAGS };
     return this.flags;
   }
 
