@@ -71,8 +71,10 @@ export function DamageVignette() {
     <>
       {/* persistent low-HP tint — eases when HP changes so it doesn't pop */}
       <div aria-hidden style={layer(baseline, 'opacity 500ms ease-out')} />
-      {/* on-hit flare — instant rise, slow organic fade */}
-      <div aria-hidden style={layer(flare, fading ? 'opacity 1150ms cubic-bezier(0.22, 0.61, 0.36, 1)' : 'none')} />
+      {/* on-hit flare — instant rise (transition off), then a long ~3 s fade so a hit LINGERS like an impact
+          instead of a one-frame flash. Ease-in-out HOLDS the red near peak early, eases it down through the
+          middle, and lands softly — not the front-loaded drop that read as a quick flash. */}
+      <div aria-hidden style={layer(flare, fading ? 'opacity 3000ms cubic-bezier(0.45, 0.05, 0.55, 0.95)' : 'none')} />
     </>
   );
 }
