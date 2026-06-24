@@ -2,8 +2,11 @@
 // pieces (big/tall — bed, sofa, counters, fridge, wardrobe, …) mark their footprint cells BLOCKED in the nav
 // grid so they stop bullets, bodies, and sight via the ONE shared nav source (the firearm occlusion query, the
 // radius-aware movement collision V42, and structural LOS all read the same grid — one registration blocks all
-// three). Small/low pieces (nightstand, chair, toilet, sink, tv, coffeeTable, console, medicineCabinet, armchair)
-// stay non-blocking — you step around/over them. To change a kind's solidity, edit the map below; no other code.
+// three). The SOLID set covers everything a person physically cannot walk through: anything that reaches the
+// floor at waist/chest height (so also nightstand, armchair, sink, toilet, console — these are knee-to-chest
+// boxes you'd bump into, not step over). LOW / FLAT pieces (coffeeTable, tv on a low stand, chair) and the
+// WALL-MOUNTED medicineCabinet (hangs above head height — you walk under it) stay non-blocking. To change a
+// kind's solidity, edit the map below; no other code.
 //
 // A furniture footprint is authored in the SAME world-cell space the placer emitted (furnishHouse passes world
 // room bounds), so a piece's `cell`+`footprint` already are world cells — no rotation needed (unlike a car, whose
@@ -31,16 +34,17 @@ export const FURNITURE_SOLIDITY: Readonly<Record<FurnitureKind, boolean>> = {
   workbench: true,
   shelving: true,
   washer: true,
-  // --- non-solid: low / small pieces (step around / over) ---
-  nightstand: false,
-  armchair: false,
+  // waist/chest-height boxes that reach the floor — a body can't pass through them.
+  nightstand: true,
+  armchair: true,
+  sink: true,
+  toilet: true,
+  console: true,
+  // --- non-solid: low / flat / wall-mounted pieces (step around / over / walk under) ---
   coffeeTable: false,
   tv: false,
   chair: false,
-  sink: false,
-  toilet: false,
   medicineCabinet: false,
-  console: false,
 };
 
 /** Whether a furniture kind is a solid nav obstacle. */

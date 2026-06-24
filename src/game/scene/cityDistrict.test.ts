@@ -38,6 +38,16 @@ describe('city district scene (T80 — large multi-building world)', () => {
   it('exterior walls are THIN edge-walls — every perimeter room cell is walkable but cannot cross OUT (no ring)', () => {
     const { block } = buildCityDistrict();
     const grid = block.navGrid;
+    // SOLID furniture cells (world). A perimeter room cell carrying a wall-backed solid piece (bed / dresser /
+    // nightstand / sink / …) is blocked by FURNITURE, not by an exterior wall ring — exclude it so the blockedInner
+    // count measures only a (regressed) blocked WALL ring, not the intended furniture solidity.
+    const furnitureCells = new Set<number>();
+    for (const p of block.placedFurniture ?? []) {
+      if (!p.solid) continue;
+      for (let dy = 0; dy < p.footprint.d; dy++) {
+        for (let dx = 0; dx < p.footprint.w; dx++) furnitureCells.add(grid.index(p.cx + dx, p.cy + dy));
+      }
+    }
     let walledEdges = 0;
     let walkableInner = 0;
     let blockedInner = 0;
@@ -56,9 +66,11 @@ describe('city district scene (T80 — large multi-building world)', () => {
         const oy = e.innerCy + dy;
         // the INNER room cell is walkable FLOOR — there is no sealed wall ring. (A SOLID furniture piece may sit on
         // a perimeter room cell; that's an orthogonal cell-block, not the edge-wall this test probes — skip it.)
-        const innerBlocked = grid.isBlocked(grid.index(e.innerCx, e.innerCy));
+        const innerIdx = grid.index(e.innerCx, e.innerCy);
+        const innerBlocked = grid.isBlocked(innerIdx);
         if (innerBlocked) {
-          blockedInner += 1;
+          // a SOLID furniture piece against the wall — an orthogonal cell-block, not the ring this test probes.
+          if (!furnitureCells.has(innerIdx)) blockedInner += 1;
           continue;
         }
         walkableInner += 1;
