@@ -17,8 +17,9 @@ function unit(navCell: number): WindowMesh & { pane: Vis; voidMesh: Vis; boards:
 }
 function runtimeWith(views: { cx: number; cy: number; glass: WindowGlass; boards: number }[]): GameRuntime {
   return {
-    windowViews: () => views,
-    scene: { navGrid: { index: (x: number, y: number) => y * 1000 + x } },
+    // sync floors the view CENTRE (x,z) to a cell; with navCellSize 1, x=cx/z=cy reproduces the old index(cx,cy).
+    windowViews: () => views.map((v) => ({ ...v, x: v.cx, z: v.cy })),
+    scene: { navGrid: { index: (x: number, y: number) => y * 1000 + x, settings: { navCellSize: 1 } } },
   } as unknown as GameRuntime;
 }
 

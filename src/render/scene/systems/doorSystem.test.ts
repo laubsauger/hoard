@@ -9,8 +9,8 @@ import type { DoorLeaf } from '../builders/handles';
 
 function fakeRuntime(open: boolean): GameRuntime {
   return {
-    doorViews: () => [{ cx: 0, cy: 0, access: open ? 'open' : 'closed' }],
-    scene: { navGrid: { index: (cx: number, _cy: number) => cx } },
+    doorViews: () => [{ cx: 0, cy: 0, x: 0, z: 0, access: open ? 'open' : 'closed' }],
+    scene: { navGrid: { index: (cx: number, _cy: number) => cx, settings: { navCellSize: 1 } } },
   } as unknown as GameRuntime;
 }
 

@@ -36,11 +36,22 @@ describe('runtime windows (T108)', () => {
     expect(typeof windowTargets[0]!.glass).toBe('string');
   });
 
-  it('every window cell stays a BLOCKED nav wall regardless of state (§G — windows never unseal a room)', () => {
+  it('every window EDGE stays a nav wall regardless of state (§G — windows never unseal a room)', () => {
     const rt = makeRuntime();
     const grid = rt.scene.navGrid;
+    const DELTA: Record<'n' | 's' | 'e' | 'w', readonly [number, number]> = {
+      n: [0, -1],
+      s: [0, 1],
+      e: [1, 0],
+      w: [-1, 0],
+    };
     for (const w of rt.windowViews()) {
-      expect(grid.isBlocked(grid.index(w.cx, w.cy))).toBe(true);
+      // Thin-wall house: a window is an EDGE-window — the inner room cell stays walkable floor, and the window's
+      // EXTERIOR EDGE stays a wall (a body can't cross it; sight/projectile occlusion is governed separately by
+      // the WindowSystem, not nav). So a window never opens a walk-through hole that would unseal the room.
+      expect(w.dir).toBeDefined();
+      const [dx, dy] = DELTA[w.dir!];
+      expect(grid.canCross(w.cx, w.cy, w.cx + dx, w.cy + dy)).toBe(false);
     }
   });
 });

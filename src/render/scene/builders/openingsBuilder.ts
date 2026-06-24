@@ -5,7 +5,8 @@
 // (docs/REFACTOR-godfiles.md).
 
 import { BoxGeometry, Group, Mesh, type BufferGeometry, type MeshStandardMaterial } from 'three';
-import { buildingsOf, doorAxis, hash01, windowPlacements } from '../../../game/scene';
+import { buildingsOf, doorAxis, doorAxisForDir, hash01, windowPlacements } from '../../../game/scene';
+import type { WallDir } from '../../../game/navigation';
 import { tagInteractable } from '../../effects/highlightView';
 import type { BuildContext } from './buildContext';
 import type { DoorLeaf, OpeningHandles, WindowMesh } from './handles';
@@ -97,11 +98,23 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   const leafTh = cfg.doorLeafThicknessMeters;
   const leafHeight = wallH * cfg.doorLeafHeightFraction;
   const buildingsForDoors = buildingsOf(ts);
+  const DOOR_DIR_DELTA: Record<WallDir, { dx: number; dy: number }> = {
+    n: { dx: 0, dy: -1 },
+    s: { dx: 0, dy: 1 },
+    e: { dx: 1, dy: 0 },
+    w: { dx: -1, dy: 0 },
+  };
   for (const cell of ts.exitCells) {
-    const wx = (cell.cx + 0.5) * cs;
-    const wz = (cell.cy + 0.5) * cs;
-    const navCell = grid.index(cell.cx, cell.cy);
-    const axis = doorAxis(grid, cell.cx, cell.cy); // 'x' = wall runs along X (leaf faces ±Z)
+    // Thin-wall house: an EDGE-door sits on the shared edge between its inner room cell and the outer street cell
+    // — the leaf/frame are centred on that EDGE (half a cell out toward `edgeDir`), the leaf axis comes from the
+    // dir (not the legacy blocked-neighbour heuristic), and the interactable navCell is the floored edge-midpoint
+    // cell (matching the runtime's highlight + the door state sync). A legacy CELL-door (no edgeDir) is centred on
+    // its own cell exactly as before.
+    const dir = cell.edgeDir;
+    const wx = dir ? (cell.cx + 0.5 + DOOR_DIR_DELTA[dir].dx * 0.5) * cs : (cell.cx + 0.5) * cs;
+    const wz = dir ? (cell.cy + 0.5 + DOOR_DIR_DELTA[dir].dy * 0.5) * cs : (cell.cy + 0.5) * cs;
+    const navCell = dir ? grid.index(Math.floor(wx / cs), Math.floor(wz / cs)) : grid.index(cell.cx, cell.cy);
+    const axis = dir ? doorAxisForDir(dir) : doorAxis(grid, cell.cx, cell.cy); // 'x' = wall runs along X (leaf faces ±Z)
     // the building this door belongs to → full wall height (for the header fill) + wall tint. Every exit cell
     // lies on a building perimeter, so the lookup always resolves; the initial values are overwritten.
     let bWallH = wallH;
@@ -237,7 +250,9 @@ export function buildOpenings(ctx: BuildContext, styleResolver: HouseStyleResolv
   for (const p of placements) {
     const bWallH = wallH * Math.max(1, p.storeys);
     const sills = windowSillHeights(cfg.buildingWallHeightMeters, bWallH); // matches the houseBuilder wall punch
-    const navCell = grid.index(p.cx, p.cy);
+    // The interactable navCell is the floored window CENTRE (the edge midpoint for an edge-window, the cell centre
+    // for a legacy cell-window) — the SAME index the runtime highlight + the render window state-sync resolve by.
+    const navCell = grid.index(Math.floor(p.x / cs), Math.floor(p.z / cs));
     // Only the ground-floor sill (index 0) syncs to the sim window state; upper sills are static decoration.
     sills.forEach((sy, i) => buildWindowUnit(navCell, p.x, sy, p.z, p.ns, i === 0));
   }

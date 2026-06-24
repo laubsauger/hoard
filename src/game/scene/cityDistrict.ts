@@ -28,6 +28,7 @@ import {
   REGION_ROOM_A,
   REGION_ROOM_B,
   type CellXY,
+  type ExitCell,
   type CellRect,
   type BuildingFootprint,
   type GroundRect,
@@ -47,8 +48,10 @@ export const CITY_DISTRICT_WORLD_VERSION = 'm2-citydistrict-2';
 
 // ---- district grid layout (nav cells; navCellSize is 2 m) -------------------------------------------
 // A regular block of COLS×ROWS lots, separated (and bordered) by STREET-wide bands. One lot is an open
-// green (the horde muster). A house's nav footprint is its template W×D ROOMS wrapped in a 1-cell exterior
-// WALL ring, so the building bounds are (W+2)×(D+2) — they fit inside one LOT_W×LOT_H lot.
+// green (the horde muster). A house's nav footprint is EXACTLY its template W×D ROOM cells — there is NO
+// exterior wall ring. The exterior walls are THIN edge-walls on the outer faces of the perimeter room cells
+// (setWallBetween against the open street, the same model as interior partitions), so the building bounds
+// are W×D and the interior floor reaches the outer wall with no gap. They fit inside one LOT_W×LOT_H lot.
 const STREET = 4; // cells (8 m) — street + sidewalk + verge band around every lot
 const LOT_W = 11; // cells — lot footprint (house + yard)
 const LOT_H = 11;
@@ -111,7 +114,7 @@ interface DistrictBuild {
   readonly buildings: BuildingFootprint[];
   readonly groundRects: GroundRect[];
   readonly props: PropInstance[];
-  readonly exitCells: CellXY[];
+  readonly exitCells: ExitCell[];
   readonly houses: PlacedHouse[];
   readonly furniture: PlacedFurniture[];
   readonly windowSeeds: WindowPlacement[];
@@ -139,7 +142,10 @@ function shelteredPlayerCell(originCx: number, originCy: number, w: number, d: n
   }
 }
 
-/** The ring (shell) cell one step OUT from a room cell in `dir` — where the exterior wall/door/window sits. */
+const DIRS: readonly Edge[] = ['n', 's', 'e', 'w'];
+
+/** The open-street cell one step OUT from a room cell in `dir` — the OUTER side of an exterior edge-wall
+ *  (and the neighbour a front-door / window edge is shared with). */
 function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
   switch (dir) {
     case 'n':
@@ -154,29 +160,31 @@ function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
 }
 
 /**
- * Stamp ONE templated house onto a lot. The template's W×D room footprint is centred in the lot wrapped in a
- * 1-cell exterior WALL ring (building bounds (W+2)×(D+2)). The ring is blocked (the sealed shell); the FRONT
- * door is a 1-cell gap in the ring (left closed for the player's house — sheltered start); window cells are
- * ring cells flagged for the window system; the interior W×D cells are walkable, room-tagged floor.
+ * Stamp ONE templated house onto a lot. The footprint is EXACTLY the template's W×D ROOM cells (building bounds
+ * W×D, no exterior ring) centred in the lot. EVERY cell is walkable, room-tagged floor — the interior reaches
+ * the outer wall with no gap.
  *
- * Interior partition walls are REAL nav collision: each interior `wallEdge` is fed into the nav grid as an
- * EDGE-wall (a wall on the shared edge between two walkable room cells — the PZ model), so an agent can't
- * cross a partition while BOTH room cells stay walkable. Door edges are left CLEAR (passable doorways), so the
- * flow field routes a pursuer through the doorway and the steering/LOS stop the clip-through + see-through. The
- * exterior shell stays cell-blocked (the sealed ring, punched for doors/windows below). Mutates `b`.
+ * Both the exterior walls AND the interior partitions are REAL nav collision as EDGE-walls (the PZ model): a
+ * wall on the shared edge between two cells, set via `setWallBetween`, blocks crossing + LOS + sound while BOTH
+ * cells stay walkable. Exterior: every perimeter room-cell OUTER face (neighbour outside the footprint) is
+ * walled against the open street. Interior: each interior `wallEdge` between two rooms is walled, EXCEPT door
+ * openings (left clear so the doorway is passable). The FRONT door is a cleared exterior EDGE (an edge-door):
+ * left WALLED for the player's house (closed → sheltered start), cleared for every other house. Windows are
+ * exterior EDGES flagged for the window system; the edge stays walled (V26 sealed) — windows govern occlusion/
+ * render, not nav. Mutates `b`.
  */
 function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const lot = lotOrigin(i, j);
   const template = templateForLot(i, j);
   const { w, d } = template.footprint;
-  const bw = w + 2; // building bounds include the 1-cell wall ring
-  const bh = d + 2;
-  const bMinCx = lot.minCx + Math.max(0, Math.floor((LOT_W - bw) / 2));
-  const bMinCy = lot.minCy + Math.max(0, Math.floor((LOT_H - bh) / 2));
-  const bMaxCx = bMinCx + bw - 1;
-  const bMaxCy = bMinCy + bh - 1;
-  const originCx = bMinCx + 1; // interior room origin (inside the ring)
-  const originCy = bMinCy + 1;
+  // Footprint = the W×D ROOM cells (no exterior wall ring). Centre it in the lot; the building bounds ARE the
+  // room cells, so the perimeter cells are walkable floor with thin exterior edge-walls on their outer faces.
+  const originCx = lot.minCx + Math.max(0, Math.floor((LOT_W - w) / 2));
+  const originCy = lot.minCy + Math.max(0, Math.floor((LOT_H - d) / 2));
+  const bMinCx = originCx;
+  const bMinCy = originCy;
+  const bMaxCx = originCx + w - 1;
+  const bMaxCy = originCy + d - 1;
 
   const placed = placeHouse(template, originCx, originCy);
   const houseIndex = b.houses.length;
@@ -189,64 +197,69 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const houseSeed = (Math.imul(originCx + 1, 0x27d4eb2f) ^ Math.imul(originCy + 1, 0x165667b1)) | 0;
   for (const piece of furnishHouse(placed, houseIndex, houseSeed)) b.furniture.push(piece);
 
-  // --- seal the exterior shell: block the whole (W+2)×(D+2) perimeter ring (the template footprint is a
-  // rectangle, so EVERY boundary edge is exterior wall). Door gaps are punched after.
-  for (let cx = bMinCx; cx <= bMaxCx; cx++) {
-    b.navGrid.block(cx, bMinCy);
-    b.navGrid.block(cx, bMaxCy);
-  }
-  for (let cy = bMinCy; cy <= bMaxCy; cy++) {
-    b.navGrid.block(bMinCx, cy);
-    b.navGrid.block(bMaxCx, cy);
+  // --- exterior walls as THIN edge-walls: for every perimeter room-cell OUTER face (a footprint-boundary face,
+  // i.e. the neighbour one step out is OUTSIDE the room map), wall the shared edge against the open street. Both
+  // cells stay walkable; only crossing + LOS + sound are blocked. There is NO sealed cell ring — the footprint
+  // cells are the walkable rooms. The FRONT-door edge is cleared below (for non-player houses); window edges +
+  // any non-front exterior door edges stay walled.
+  for (const rc of placed.rooms) {
+    for (const dir of DIRS) {
+      const n = ringCellFor(rc.cx, rc.cy, dir);
+      if (placed.roomAt(n.cx, n.cy) !== null) continue; // interior neighbour — not an exterior face
+      b.navGrid.setWallBetween(rc.cx, rc.cy, n.cx, n.cy, true);
+    }
   }
 
   // --- interior partitions as REAL edge-wall nav (P0 fix): wall every interior wallEdge on the shared edge
   // between its two walkable room cells, EXCEPT the edges that are door openings (left clear so the doorway is
   // passable). Cells stay walkable; only cross-edge movement + LOS are blocked, so the interior subdivides
-  // into rooms connected only through doorways. Exterior edges are the sealed cell ring above — skip them here.
+  // into rooms connected only through doorways.
   const doorEdgeKeys = new Set(placed.doors.map((dr) => dr.edge.key));
   for (const edge of placed.wallEdges) {
-    if (edge.kind !== 'interior') continue; // exterior is the cell-blocked shell ring
+    if (edge.kind !== 'interior') continue; // exterior faces are walled above
     if (doorEdgeKeys.has(edge.key)) continue; // a doorway — leave the edge clear (passable)
     if (edge.outerCx === null || edge.outerCy === null) continue; // interior edges always have both sides
     b.navGrid.setWallBetween(edge.innerCx, edge.innerCy, edge.outerCx, edge.outerCy);
   }
 
-  // --- front door: a 1-cell gap in the ring, on the ring cell one step OUT from the door's room cell. The
-  // player's house starts SHELTERED (door left blocked) so the beelining horde mills at the wall; every
-  // other house's door gap is walkable. Only the FRONT door is an exit cell (count == buildings, T80).
+  // --- front door: an exterior EDGE-door on the door's room cell. The player's house starts SHELTERED (its door
+  // edge left WALLED → closed) so the beelining horde mills at the wall; every other house's door edge is CLEARED
+  // (open). exitCells carries the INNER room cell + edgeDir so the runtime builds an edge-door. Only the FRONT
+  // door is an exit cell (count == buildings, T80).
   const front = placed.doors.find((dr) => dr.front);
   const isPlayerHouse = i === PLAYER_COL && j === PLAYER_ROW;
   if (front) {
-    const ring = ringCellFor(front.cx, front.cy, front.dir);
-    if (!isPlayerHouse) b.navGrid.clear(ring.cx, ring.cy);
-    b.exitCells.push(ring);
+    const outer = ringCellFor(front.cx, front.cy, front.dir);
+    if (!isPlayerHouse) b.navGrid.setWallBetween(front.cx, front.cy, outer.cx, outer.cy, false);
+    b.exitCells.push({ cx: front.cx, cy: front.cy, edgeDir: front.dir });
     // the player starts DEEP in the house — the interior cell farthest from the (closed) front door — so the
     // start is genuinely sheltered and the lootable corner lands clear of the door.
     if (isPlayerHouse) b.playerCell = shelteredPlayerCell(originCx, originCy, w, d, front.dir);
   }
 
-  // --- windows: each placed window's ring cell stays a blocked wall, flagged for the window system. The
-  // initial decay state is seeded off the per-house style (V26) — render + sim derive the identical state.
+  // --- windows: each placed window is an exterior EDGE-window. Its edge stays a wall (V26 sealed); occlusion +
+  // render state key off the EDGE. The initial decay state is seeded off the per-house style (V26) — render +
+  // sim derive the identical state. The world centre is the EDGE midpoint (half a cell out toward `dir`).
   const style = houseStyleForBuilding({ minCx: bMinCx, minCy: bMinCy, maxCx: bMaxCx, maxCy: bMaxCy }, 1, houseIndex, b.houseVar, -1);
   const cs = b.navGrid.settings.navCellSize;
   for (const win of placed.windows) {
-    const ring = ringCellFor(win.cx, win.cy, win.dir);
+    const outer = ringCellFor(win.cx, win.cy, win.dir);
     b.windowSeeds.push({
-      cx: ring.cx,
-      cy: ring.cy,
+      cx: win.cx,
+      cy: win.cy,
       ns: win.ns,
       slot: win.slot,
       state: windowState(style, win.slot, b.boardedFraction),
       storeys: 1,
-      x: (ring.cx + 0.5) * cs,
-      z: (ring.cy + 0.5) * cs,
+      x: ((win.cx + outer.cx + 1) / 2) * cs,
+      z: ((win.cy + outer.cy + 1) / 2) * cs,
+      edgeDir: win.dir,
     });
   }
 
   b.buildings.push({ bounds: { minCx: bMinCx, maxCx: bMaxCx, minCy: bMinCy, maxCy: bMaxCy }, storeys: 1 });
 
-  const doorCx = front ? ringCellFor(front.cx, front.cy, front.dir).cx : lot.minCx + Math.floor(LOT_W / 2);
+  const doorCx = front ? front.cx : lot.minCx + Math.floor(LOT_W / 2);
   dressYard(b, lot, doorCx, i, j);
 }
 

@@ -36,22 +36,37 @@ describe('city district scene (T80 — large multi-building world)', () => {
     }
   });
 
-  it('gives every building a front door; all enterable EXCEPT the player house (starts sheltered/closed)', () => {
+  it('gives every building a front EDGE-door; all enterable EXCEPT the player house (starts sheltered/closed)', () => {
     const { block } = buildCityDistrict();
     expect(block.exitCells.length).toBe(buildingsOf(block).length); // one door per building
+    const grid = block.navGrid;
+    const DELTA: Record<'n' | 's' | 'e' | 'w', readonly [number, number]> = {
+      n: [0, -1],
+      s: [0, 1],
+      e: [1, 0],
+      w: [-1, 0],
+    };
     const contains = (b: { minCx: number; maxCx: number; minCy: number; maxCy: number }, cell: { cx: number; cy: number }) =>
       cell.cx >= b.minCx && cell.cx <= b.maxCx && cell.cy >= b.minCy && cell.cy <= b.maxCy;
     const playerHouse = buildingsOf(block).find((bld) => contains(bld.bounds, block.playerCell));
     let closed = 0;
     for (const cell of block.exitCells) {
+      // Thin-wall house model: the door is an EDGE-door. The INNER room cell is always walkable floor; the
+      // front door's passability lives on its EXTERIOR EDGE toward `edgeDir` (the outer street cell).
       const c = block.cellCenter(cell);
+      expect(block.isWalkableWorld(c.x, c.z)).toBe(true); // the inner room cell is walkable for every house
+      expect(cell.edgeDir).toBeDefined();
+      const [dx, dy] = DELTA[cell.edgeDir!];
+      const outerCx = cell.cx + dx;
+      const outerCy = cell.cy + dy;
       const inPlayerHouse = playerHouse ? contains(playerHouse.bounds, cell) : false;
       if (inPlayerHouse) {
-        // The player's spawn house starts SHELTERED — its front door begins closed (blocked).
-        expect(block.isWalkableWorld(c.x, c.z)).toBe(false);
+        // The player's spawn house starts SHELTERED — its front-door EDGE begins WALLED (closed): the body can't
+        // cross out and sight/sound don't pass, but the cell stays walkable.
+        expect(grid.canCross(cell.cx, cell.cy, outerCx, outerCy)).toBe(false);
         closed += 1;
       } else {
-        expect(block.isWalkableWorld(c.x, c.z)).toBe(true); // every other house's door gap is walkable
+        expect(grid.canCross(cell.cx, cell.cy, outerCx, outerCy)).toBe(true); // every other house's door edge is open
       }
     }
     expect(closed).toBe(1); // exactly the player house is sealed at start

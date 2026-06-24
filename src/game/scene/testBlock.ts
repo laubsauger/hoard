@@ -44,6 +44,17 @@ export interface CellXY {
   readonly cy: number;
 }
 
+/**
+ * A building exit (front door) cell. A bare `CellXY` is a legacy CELL-door (the §G/cityBlock blocks — the
+ * door is the cell itself). `edgeDir` present ⇒ an EDGE-door (the thin-wall house model): `(cx,cy)` is the
+ * INNER room cell and the door lives on that cell's exterior EDGE toward `edgeDir` (both cells stay walkable;
+ * the door toggles the cross-edge). Structurally a `DoorSpec`, so the runtime feeds `exitCells` straight into
+ * the DoorSystem. Consumers that only need a position read `cx,cy` unchanged.
+ */
+export interface ExitCell extends CellXY {
+  readonly edgeDir?: Edge;
+}
+
 /** Inclusive cell rectangle of the building shell (walls + interior). Cells inside get a roof + cutaway;
  *  cells outside are open-air street. Used purely by the renderer (T38), never by the sim. */
 export interface CellRect {
@@ -145,8 +156,10 @@ export interface TestBlock {
   readonly groundRects?: readonly GroundRect[];
   /** Decorative district dressing (cars/tires/bushes/trees/fences) the renderer instantiates (T80). */
   readonly props?: readonly PropInstance[];
-  /** Walkable cells the player can leave/enter a building through (front doors, T38). May be empty. */
-  readonly exitCells: readonly CellXY[];
+  /** Walkable cells the player can leave/enter a building through (front doors, T38). May be empty. For a
+   *  templated thin-wall house each entry is an EDGE-door (inner room cell + `edgeDir`); legacy blocks emit
+   *  bare cell-doors. */
+  readonly exitCells: readonly ExitCell[];
   /** P0: the room-based houses generated from floor-plan templates (placeHouse). Present for the templated
    *  district; absent for the bare GATE-0 / M1 blocks. The renderer (P0c) builds walls/doors/windows from
    *  each house's `wallEdges`; loot/AI read rooms-as-regions via `roomAt`. */

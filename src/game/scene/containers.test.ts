@@ -31,10 +31,12 @@ describe('lootable container cell placement (T85)', () => {
     );
     expect(building).toBeDefined();
     const b = building!.bounds;
-    expect(cell.cx).toBeGreaterThan(b.minCx);
-    expect(cell.cx).toBeLessThan(b.maxCx);
-    expect(cell.cy).toBeGreaterThan(b.minCy);
-    expect(cell.cy).toBeLessThan(b.maxCy);
+    // Thin-wall house: the building bounds ARE the walkable room cells (no wall ring), so the cabinet can sit on
+    // a perimeter room cell against the exterior wall — within the bounds (inclusive), still walkable floor.
+    expect(cell.cx).toBeGreaterThanOrEqual(b.minCx);
+    expect(cell.cx).toBeLessThanOrEqual(b.maxCx);
+    expect(cell.cy).toBeGreaterThanOrEqual(b.minCy);
+    expect(cell.cy).toBeLessThanOrEqual(b.maxCy);
   });
 
   it('is deterministic (same scene → same cell) and works for the bare test block too', () => {

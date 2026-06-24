@@ -21,7 +21,11 @@ export class DoorSystem {
   sync(runtime: GameRuntime, dtSeconds: number): void {
     if (this.leaves.length === 0) return;
     const access = new Map<number, string>();
-    for (const d of runtime.doorViews()) access.set(runtime.scene.navGrid.index(d.cx, d.cy), d.access);
+    const grid = runtime.scene.navGrid;
+    const cs = grid.settings.navCellSize;
+    // Key by the floored door CENTRE (the edge midpoint for an edge-door, the cell centre for a legacy cell-door)
+    // — the SAME index openingsBuilder tags each leaf with, so the leaf finds its authoritative open/closed state.
+    for (const d of runtime.doorViews()) access.set(grid.index(Math.floor(d.x / cs), Math.floor(d.z / cs)), d.access);
     const speed = this.cfg.swingSpeedRadiansPerSecond;
     for (const leaf of this.leaves) {
       const target = access.get(leaf.navCell) === 'open' ? leaf.openTarget : 0;

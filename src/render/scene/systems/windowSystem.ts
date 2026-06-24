@@ -15,8 +15,12 @@ export class WindowSystem {
   sync(runtime: GameRuntime): void {
     if (this.windows.length === 0) return;
     const glassBy = new Map<number, { glass: WindowGlass; boards: number }>();
+    const grid = runtime.scene.navGrid;
+    const cs = grid.settings.navCellSize;
+    // Key by the floored window CENTRE (the edge midpoint for an edge-window, the cell centre for a legacy cell-
+    // window) — the SAME index openingsBuilder tags each window unit with, so each unit finds its live state.
     for (const w of runtime.windowViews()) {
-      glassBy.set(runtime.scene.navGrid.index(w.cx, w.cy), { glass: w.glass, boards: w.boards });
+      glassBy.set(grid.index(Math.floor(w.x / cs), Math.floor(w.z / cs)), { glass: w.glass, boards: w.boards });
     }
     for (const u of this.windows) {
       const state = glassBy.get(u.navCell);
