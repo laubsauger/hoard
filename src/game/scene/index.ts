@@ -24,6 +24,36 @@ export {
 export { buildCityBlock, CITY_BLOCK_WORLD_VERSION, REGION_STREET } from './cityBlock';
 export { buildCityDistrict, CITY_DISTRICT_WORLD_VERSION, type CityDistrict } from './cityDistrict';
 export {
+  placeHouse,
+  isSingleStorey,
+  type PlacedHouse,
+  type PlacedRoomCell,
+  type PlacedDoor,
+  type PlacedWindow,
+  type WallEdge,
+  type WallKind,
+} from './placeHouse';
+export {
+  HOUSE_TEMPLATES,
+  tileCheck,
+  doorGraphConnected,
+  reachableFromExterior,
+  doorPlacementValid,
+  windowOnExterior,
+  inFootprint,
+  cellInRoom,
+  roomCells,
+  type HouseTemplate,
+  type FloorPlan,
+  type Footprint,
+  type Room,
+  type RoomType,
+  type Door,
+  type WindowSpec,
+  type Edge,
+  type Cell,
+} from './houseTemplates';
+export {
   DoorSystem,
   doorAxis,
   isDoorCell,
