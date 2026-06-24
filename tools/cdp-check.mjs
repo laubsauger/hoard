@@ -94,6 +94,16 @@ async function main() {
     bodyText: (await evalExpr('document.body.innerText'))?.slice(0, 200),
   };
 
+  // Hide the DEV-only overlays (left-edge dev-tools panel `.hbn-dev`, top-left diagnostics `.hbn-dbg`) before the
+  // screenshot — they cover the bottom-left HUD (HP/vitals + noise meter) and aren't part of the shipped frame,
+  // so they'd otherwise obscure exactly the corner we want to inspect. Keep showAll=1 to UN-hide them for debugging.
+  if (process.env.SHOT_SHOW_DEV !== '1') {
+    await evalExpr(
+      '(()=>{const s=document.createElement("style");s.id="smoke-hide-dev";s.textContent=".hbn-dev,.hbn-dbg{display:none !important;}";document.head.appendChild(s);return true;})()',
+    );
+    await sleep(120); // let the layout settle after hiding the overlays
+  }
+
   const shot = await c.send('Page.captureScreenshot', { format: 'png' });
   const fs = await import('node:fs');
   fs.writeFileSync(OUT, Buffer.from(shot.data, 'base64'));
