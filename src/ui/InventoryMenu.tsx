@@ -106,8 +106,11 @@ export function InventoryMenu() {
         e.preventDefault();
         seedIfEmpty();
         const cur = uiStore.getState().activePanel;
+        // Manual inventory: NOT anchored to a world container, so it is not proximity-gated (item A).
+        inventoryViewStore.getState().setLootAnchor(null);
         uiStore.getState().openPanel(cur === 'inventory' ? 'none' : 'inventory');
       } else if (e.code === 'Escape' && uiStore.getState().activePanel === 'inventory') {
+        inventoryViewStore.getState().setLootAnchor(null);
         uiStore.getState().closePanel();
       }
     };

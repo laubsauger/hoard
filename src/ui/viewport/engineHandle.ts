@@ -119,6 +119,9 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       const t = getRuntime().nearestInteractableTarget();
       if (t?.kind !== 'container') return;
       inventoryViewStore.getState().setOpenContainer(t.label);
+      // Anchor the panel to THIS world container so the render loop auto-closes it when the player walks out
+      // of interaction range (item A — the loot panel is proximity-gated, unlike a manual `I` inventory).
+      inventoryViewStore.getState().setLootAnchor(t.label);
       uiStore.getState().openPanel('inventory');
     },
     worldToScreen: (x, y, z) => {

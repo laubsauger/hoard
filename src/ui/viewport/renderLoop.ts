@@ -23,6 +23,8 @@ import { rayDistanceToWall } from '../../game/scene';
 import { sessionStore, simStepDt } from '../../stores/session';
 import { inputStore } from '../../stores/input';
 import { debugViewStore } from '../../diagnostics/store';
+import { uiStore } from '../../stores/ui';
+import { inventoryViewStore } from '../../stores/inventoryView';
 
 const DEG2RAD = Math.PI / 180;
 
@@ -152,7 +154,7 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // camPos = camera EYE (billboard facing); the player position is the LOD/light-selection focus (the
     // near-ortho eye sits ~100m+ away, so using it for distance would cull every fire).
     fireView.update(dt, fireIgnitions, (cell) => runtime.isRouteBurning(cell), camPos, { x: p.x, y: 0, z: p.z }, access.feedback.reduceFlashes);
-    corpseField.update(runtime.corpses.list); // T55/B9 — mirror lingering corpses onto the instanced field
+    corpseField.update(runtime.corpses.list, runtime.absoluteTick); // T55/B9 — mirror corpses; T122 death-collapse by tick age
     // T60/V29: glow the NEAREST interactable in reach (hidden when none). Pulse is damped to a steady glow
     // when reduce-flashes / reduce-motion is set. The runtime gives the placed + sized box; the view only
     // positions/scales/colours it (V1/V2 — never reads world state back).
@@ -161,6 +163,20 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
       dt,
       access.feedback.reduceFlashes || access.feedback.reduceMotion,
     );
+
+    // Item A: a loot panel opened on a world container is proximity-gated — auto-close it the moment the
+    // player walks out of interaction range of THAT container (or turns to a different one). A manually-opened
+    // (I) inventory has no lootAnchor, so it is never auto-closed here.
+    {
+      const inv = inventoryViewStore.getState();
+      if (inv.lootAnchor && uiStore.getState().activePanel === 'inventory') {
+        const near = runtime.nearestInteractableTarget();
+        if (!near || near.kind !== 'container' || near.label !== inv.lootAnchor) {
+          inv.setLootAnchor(null);
+          uiStore.getState().closePanel();
+        }
+      }
+    }
     scene.syncFrame(dt, camera.camera, debugViewStore.getState().flags);
     gizmos.update(
       runtime.zombies,

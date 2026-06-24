@@ -506,11 +506,15 @@ body,
 }
 
 /* ---- InventoryMenu: dual-pane loot/inventory ---- */
+/* Item A: a SIDE panel, NOT a modal. Anchored to the right edge (vertically centred) so the world stays
+   visible AND interactable behind it — no full-screen catcher (the box is only as big as its content, so
+   clicks outside it reach the canvas), no darkening backdrop, no blur. The player can keep moving/aiming. */
 .hbn-inv {
-  position: fixed; inset: 0; z-index: 50;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  background: rgba(6, 9, 12, 0.55); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 50;
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
+  pointer-events: none; /* only the panes/buttons capture input; the surrounding area passes through */
 }
+.hbn-inv__frame, .hbn-inv__hint { pointer-events: auto; }
 .hbn-inv__frame { display: flex; gap: 14px; }
 .hbn-inv__pane {
   width: 280px; max-height: 60vh; display: flex; flex-direction: column;

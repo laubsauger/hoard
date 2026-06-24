@@ -19,8 +19,16 @@ export interface ContainerView {
 export interface InventoryViewState {
   readonly containers: readonly ContainerView[];
   readonly openContainer: string | null;
+  /**
+   * The label of the WORLD container the loot panel is anchored to (set when the panel was opened by the F
+   * "search" verb on a container). Proximity-gated: the render loop auto-closes the panel when the player walks
+   * out of interaction range of THIS container. `null` for a manually-opened (I) inventory, which has no
+   * proximity gate and stays open until I/Esc.
+   */
+  readonly lootAnchor: string | null;
   setContainers(containers: readonly ContainerView[]): void;
   setOpenContainer(container: string | null): void;
+  setLootAnchor(container: string | null): void;
   /** Move a whole item stack between two containers in the view (demo transfer until the sim owns it). */
   transfer(fromContainer: string, toContainer: string, item: number): void;
 }
@@ -56,8 +64,10 @@ export function createInventoryViewStore() {
     subscribeWithSelector((set) => ({
       containers: [],
       openContainer: null,
+      lootAnchor: null,
       setContainers: (containers) => set({ containers }),
       setOpenContainer: (openContainer) => set({ openContainer }),
+      setLootAnchor: (lootAnchor) => set({ lootAnchor }),
       transfer: (from, to, item) => set((s) => ({ containers: applyTransfer(s.containers, from, to, item) })),
     })),
   );
