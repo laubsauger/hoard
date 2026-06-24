@@ -91,8 +91,10 @@ const SINGLE_STOREY_TEMPLATES: readonly HouseTemplate[] = HOUSE_TEMPLATES.filter
  *  fixed compact template (a small bungalow) so the sheltered start is consistent. */
 function templateForLot(i: number, j: number): HouseTemplate {
   if (i === PLAYER_COL && j === PLAYER_ROW) {
-    // a roomier starting home (ranch-3bed, 9×6) for a consistent, slightly larger sheltered start.
-    return SINGLE_STOREY_TEMPLATES.find((t) => t.id === 'ranch-3bed') ?? SINGLE_STOREY_TEMPLATES[0]!;
+    // A SMALL, simple starting home (bungalow-2bed, 5×6): an open-plan living room up front + two back rooms
+    // (a bedroom + a bathroom) — a clean, uncramped layout (no maze of partitions / 1-cell hall) with a natural
+    // dead-end back room to seal the lone captive zombie behind a closed door (T135).
+    return SINGLE_STOREY_TEMPLATES.find((t) => t.id === 'bungalow-2bed') ?? SINGLE_STOREY_TEMPLATES[0]!;
   }
   const n = SINGLE_STOREY_TEMPLATES.length;
   const idx = Math.min(n - 1, Math.floor(lotRand(i, j, 11) * n));
@@ -132,22 +134,30 @@ interface DistrictBuild {
   captiveZombieCell: CellXY | null;
 }
 
-/** A sheltered player-start cell: the interior-edge MIDPOINT on the side OPPOSITE the front door (so the
- *  start is deep from the closed door, yet an edge-midpoint, not a corner — leaving the lootable corner clear
- *  of both the player and the door). */
-function shelteredPlayerCell(originCx: number, originCy: number, w: number, d: number, doorDir: Edge): CellXY {
-  const midX = originCx + Math.floor((w - 1) / 2);
-  const midY = originCy + Math.floor((d - 1) / 2);
-  switch (doorDir) {
-    case 'n':
-      return { cx: midX, cy: originCy + d - 1 }; // door north → start at the south edge
-    case 's':
-      return { cx: midX, cy: originCy };
-    case 'e':
-      return { cx: originCx, cy: midY }; // door east → start at the west edge
-    case 'w':
-      return { cx: originCx + w - 1, cy: midY };
+/** The player-start cell: the cell of `roomId` nearest its centroid — you wake up in the MIDDLE of your home's
+ *  main (living) room, not jammed in a back bathroom corner. The front door is walled closed for the player
+ *  house, so a front-room start is still safe. Falls back to the first room cell if the room is degenerate. */
+function roomCenterCell(placed: PlacedHouse, roomId: number): CellXY | null {
+  const cells = placed.rooms.filter((rc) => rc.roomId === roomId);
+  if (cells.length === 0) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const rc of cells) {
+    sx += rc.cx;
+    sy += rc.cy;
   }
+  const cenX = sx / cells.length;
+  const cenY = sy / cells.length;
+  let best = cells[0]!;
+  let bestD = Infinity;
+  for (const rc of cells) {
+    const dd = (rc.cx - cenX) ** 2 + (rc.cy - cenY) ** 2;
+    if (dd < bestD) {
+      bestD = dd;
+      best = rc;
+    }
+  }
+  return { cx: best.cx, cy: best.cy };
 }
 
 const DIRS: readonly Edge[] = ['n', 's', 'e', 'w'];
@@ -215,13 +225,15 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const houseIndex = b.houses.length;
   b.houses.push(placed);
 
-  // The player's house reserves its sheltered SPAWN cell BEFORE furnishing so no furniture (esp. a SOLID piece)
-  // lands on it — otherwise the player could spawn standing inside a bathtub/bed (V42 collision would trap them).
+  // The player's house reserves its SPAWN cell BEFORE furnishing so no furniture (esp. a SOLID piece) lands on it
+  // — otherwise the player could spawn standing inside a bathtub/bed (V42 collision would trap them). T135: start
+  // in the centre of the LIVING room (the front door's room) — your home's main room — not a back bathroom; the
+  // front door is walled closed for the player house, so a front-room start stays safe from the street horde.
   const front = placed.doors.find((dr) => dr.front);
   const isPlayerHouse = i === PLAYER_COL && j === PLAYER_ROW;
   const reserved: CellXY[] = [];
   if (isPlayerHouse && front) {
-    const spawn = shelteredPlayerCell(originCx, originCy, w, d, front.dir);
+    const spawn = roomCenterCell(placed, front.fromRoom) ?? { cx: front.cx, cy: front.cy };
     reserved.push(spawn);
     b.playerCell = spawn;
   }
@@ -291,18 +303,29 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
       );
       if (cand === undefined || cand === null) continue;
       captiveDoorCell = b.navGrid.index(dr.cx, dr.cy);
-      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway.
+      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway
+      // — but NOT on a window cell, or it spawns embedded in the glass (and used to smash it on load). Window
+      // cells are tracked separately so the captive prefers a solid interior corner; they're only used as a
+      // fallback if (impossibly) every room cell carries a window.
+      const winCells = new Set<number>(placed.windows.map((wn) => b.navGrid.index(wn.cx, wn.cy)));
       let best: CellXY | null = null;
       let bestD = -1;
+      let fallback: CellXY | null = null;
+      let fallbackD = -1;
       for (const rc of placed.rooms) {
         if (rc.roomId !== cand) continue;
         const dd = Math.max(Math.abs(rc.cx - dr.cx), Math.abs(rc.cy - dr.cy));
+        if (dd > fallbackD) {
+          fallbackD = dd;
+          fallback = { cx: rc.cx, cy: rc.cy };
+        }
+        if (winCells.has(b.navGrid.index(rc.cx, rc.cy))) continue; // skip window cells for the primary pick
         if (dd > bestD) {
           bestD = dd;
           best = { cx: rc.cx, cy: rc.cy };
         }
       }
-      if (best) b.captiveZombieCell = best;
+      b.captiveZombieCell = best ?? fallback;
       break;
     }
   }
