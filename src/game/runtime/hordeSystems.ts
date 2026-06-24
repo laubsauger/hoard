@@ -383,22 +383,34 @@ export class HordeSimulation {
         mz = nz;
         moved = true;
       } else {
-        // T134/V101: desired flow step + BOTH axis-slides blocked → STUCK. Rotate the heading off-axis through
-        // the deterministic escape fan (inlined for the rare stuck body — no per-tick closure, V24) and take
-        // the first clear step, so the body wall-FOLLOWS around the corner / out of the pocket, never freezing.
-        for (let i = 0; i < STUCK_ESCAPE_FAN.length; i++) {
-          const r = STUCK_ESCAPE_FAN[i]!;
-          const edx = dirX * r.cos - dirZ * r.sin;
-          const edz = dirX * r.sin + dirZ * r.cos;
-          const ex = pos[0] + edx * step;
-          const ez = pos[2] + edz * step;
-          if (isWalkableRadius(scene, ex, ez, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], ex, ez)) {
-            mx = ex;
-            mz = ez;
-            headX = edx;
-            headZ = edz;
-            moved = true;
-            break;
+        // Desired flow step + BOTH axis-slides blocked. WHY it is blocked decides what to do (T136 anti-wiggle):
+        //  - The body's own cell is REACHABLE in the field → it just needs to wall-FOLLOW around a corner toward
+        //    a target it CAN reach: rotate the heading through the deterministic escape fan (T134/V101) and take
+        //    the first clear step.
+        //  - The body's cell is UNREACHABLE in the field → its target sits behind glass / a sealed wall (the
+        //    flow fell back to a straight beeline). There is NO way around, so escape-fanning just sidesteps
+        //    back and forth every tick — the "glitch around and wiggle like crazy when they can't get in" bug.
+        //    Instead HOLD and face the target so the body PRESSES the obstacle (the window attrition breaks in).
+        const cs = grid.settings.navCellSize;
+        const bcx = Math.floor(pos[0] / cs);
+        const bcy = Math.floor(pos[2] / cs);
+        const bodyReachable =
+          bcx >= 0 && bcy >= 0 && bcx < grid.width && bcy < grid.height && field.isReachable(bcy * grid.width + bcx);
+        if (bodyReachable) {
+          for (let i = 0; i < STUCK_ESCAPE_FAN.length; i++) {
+            const r = STUCK_ESCAPE_FAN[i]!;
+            const edx = dirX * r.cos - dirZ * r.sin;
+            const edz = dirX * r.sin + dirZ * r.cos;
+            const ex = pos[0] + edx * step;
+            const ez = pos[2] + edz * step;
+            if (isWalkableRadius(scene, ex, ez, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], ex, ez)) {
+              mx = ex;
+              mz = ez;
+              headX = edx;
+              headZ = edz;
+              moved = true;
+              break;
+            }
           }
         }
       }
@@ -408,6 +420,9 @@ export class HordeSimulation {
         zombies.setVelocity(slot, headX * effSpeed, 0, headZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {
+        // Held in place (blocked). Still FACE the desired heading so a body pressing a window/wall toward its
+        // target reads as pressing, not twitching — and never jitters its facing (anti-wiggle).
+        zombies.setHeading(slot, Math.atan2(dirZ, dirX));
         zombies.setVelocity(slot, 0, 0, 0);
       }
     });
