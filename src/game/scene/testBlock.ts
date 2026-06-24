@@ -264,7 +264,14 @@ const LOS_STEP_METERS = 1;
  */
 export type LosScene = Pick<TestBlock, 'isWalkableWorld'> &
   Partial<Pick<TestBlock, 'navGrid'>> & {
-    readonly isWindowOpening?: (cx: number, cy: number) => boolean;
+    /**
+     * `(cx,cy)` queries whether a window OPENING sits AT that cell (legacy CELL-window). The OPTIONAL
+     * `(ncx,ncy)` neighbour names the cell on the OTHER side of a crossed EDGE: an EDGE-window (thin-wall
+     * house model) lives on the seam between (cx,cy) and (ncx,ncy), so the predicate answers per-EDGE rather
+     * than per-cell — disambiguating a window edge from a solid wall edge on the same perimeter cell. A
+     * 2-arg implementation (the existing cell-window mocks) is still assignable; the extra args are ignored.
+     */
+    readonly isWindowOpening?: (cx: number, cy: number, ncx?: number, ncy?: number) => boolean;
   };
 
 /**
@@ -281,7 +288,7 @@ export function segmentCrossesWall(
   z0: number,
   x1: number,
   z1: number,
-  isWindowOpening?: (cx: number, cy: number) => boolean,
+  isWindowOpening?: (cx: number, cy: number, ncx?: number, ncy?: number) => boolean,
 ): boolean {
   const cs = navGrid.settings.navCellSize;
   const dx = x1 - x0;
@@ -303,9 +310,10 @@ export function segmentCrossesWall(
     const fromIn = pcx >= 0 && pcy >= 0 && pcx < navGrid.width && pcy < navGrid.height;
     const toIn = cx >= 0 && cy >= 0 && cx < navGrid.width && cy < navGrid.height;
     if (fromIn && toIn && !navGrid.canStep(pcx, pcy, sx, sy)) {
-      // an edge-wall normally blocks the segment — but a window OPENING on EITHER side of the crossed edge is a
-      // sight gap, so the line passes through it (V82). A 2-board/closed window supplies no opening → still blocks.
-      if (!(isWindowOpening && (isWindowOpening(cx, cy) || isWindowOpening(pcx, pcy)))) return true;
+      // an edge-wall normally blocks the segment — but a window OPENING on the crossed EDGE is a sight gap, so
+      // the line passes through it (V82). The predicate is queried per-EDGE (the neighbour cell names the seam);
+      // a CELL-window mock ignores the neighbour and answers per-cell (either side). A closed window → blocks.
+      if (!(isWindowOpening && (isWindowOpening(pcx, pcy, cx, cy) || isWindowOpening(cx, cy, pcx, pcy)))) return true;
     }
     pcx = cx;
     pcy = cy;
@@ -392,8 +400,9 @@ export function rayDistanceToWall(
         const fromIn = pcx >= 0 && pcy >= 0 && pcx < grid.width && pcy < grid.height;
         const toIn = cx >= 0 && cy >= 0 && cx < grid.width && cy < grid.height;
         if (fromIn && toIn && !grid.canStep(pcx, pcy, sx, sy)) {
-          // a window OPENING on either side of the crossed edge is a sight gap — pass it (V82).
-          if (!(opening && (opening(cx, cy) || opening(pcx, pcy)))) return d;
+          // a window OPENING on the crossed edge is a sight gap — pass it (V82). Queried per-EDGE (neighbour
+          // names the seam); a cell-window mock ignores the neighbour and answers per-cell (either side).
+          if (!(opening && (opening(pcx, pcy, cx, cy) || opening(cx, cy, pcx, pcy)))) return d;
         }
         pcx = cx;
         pcy = cy;

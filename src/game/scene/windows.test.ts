@@ -146,6 +146,90 @@ describe('WindowSystem (T108)', () => {
   });
 });
 
+describe('EDGE-windows (thin-wall house model)', () => {
+  /** A fully-walkable grid with a window on the EDGE between (3,2) and (3,3) (dir 's' from the inner cell). The
+   *  exterior wall edge is authored ON (a closed window blocks movement); the window state decides sight/shots. */
+  function edgeFixture(state: WindowPlacement['state']) {
+    const grid = new NavGrid({ width: 7, height: 7 });
+    const cs = grid.settings.navCellSize;
+    grid.setWallBetween(3, 2, 3, 3, true); // the window's exterior edge-wall (movement blocked at all states)
+    const placement: WindowPlacement = {
+      cx: 3, cy: 2, ns: true, slot: 0, state, storeys: 1, edgeDir: 's',
+      x: (3 + 0.5) * cs, z: (2 + 1) * cs, // edge midpoint
+    };
+    const sys = new WindowSystem(grid, [placement], CFG);
+    const nav = grid.index(3, 2); // an edge-window keys by its INNER room cell
+    return { grid, cs, sys, nav };
+  }
+
+  it('keys by the INNER room cell; edgeCellOf resolves the window from EITHER side, -1 elsewhere', () => {
+    const { grid, sys, nav } = edgeFixture('broken');
+    expect(sys.edgeCellOf(3, 2, 3, 3)).toBe(nav); // inner -> outer
+    expect(sys.edgeCellOf(3, 3, 3, 2)).toBe(nav); // outer -> inner (symmetric)
+    expect(sys.edgeCellOf(3, 2, 4, 2)).toBe(-1); // a different edge of the same cell — no window
+    expect(sys.edgeCellOf(0, 0, 1, 0)).toBe(-1); // unrelated edge
+    expect(sys.edgeCellOf(3, 2, 5, 2)).toBe(-1); // not 4-neighbours
+    expect(grid.isBlocked(nav)).toBe(false); // the INNER cell stays walkable (edge-window, not cell-window)
+    expect(grid.isBlocked(grid.index(3, 3))).toBe(false); // ...and so does the outer cell
+  });
+
+  it('the WindowView reports its dir + the edge-midpoint centre', () => {
+    const { cs, sys } = edgeFixture('intact');
+    const view = sys.list()[0]!;
+    expect(view.dir).toBe('s');
+    expect(view.x).toBeCloseTo((3 + 0.5) * cs);
+    expect(view.z).toBeCloseTo((2 + 1) * cs); // the boundary between (3,2) and (3,3)
+  });
+
+  it('smash/board mechanics are identical to a cell-window (state is reused)', () => {
+    const { sys, nav } = edgeFixture('intact');
+    expect(sys.isOpening(nav)).toBe(false);
+    expect(sys.isSeeThrough(nav)).toBe(true); // intact glass is transparent
+    expect(sys.smashGlass(nav)).toBe(true);
+    expect(sys.isOpening(nav)).toBe(true);
+    expect(sys.isFullyOpen(nav)).toBe(true);
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.isFullyOpen(nav)).toBe(false); // 1 board blocks bodily entry
+    expect(sys.isOpening(nav)).toBe(true); // ...but still a shoot/see gap
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.isOpening(nav)).toBe(false); // 2 boards close it
+  });
+
+  it('edge-aware LOS: an OPEN edge-window passes the sightline across its walled edge; a CLOSED one blocks it', () => {
+    const { grid, cs, sys, nav } = edgeFixture('broken'); // glassless opening
+    const scene: LosScene = {
+      isWalkableWorld: (x, z) => {
+        const cx = Math.floor(x / cs);
+        const cy = Math.floor(z / cs);
+        if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+        return !grid.isBlocked(grid.index(cx, cy));
+      },
+      navGrid: grid,
+      // EDGE-aware predicate: the crossed seam (cx,cy)-(ncx,ncy) is queried per-edge.
+      isWindowOpening: (cx, cy, ncx, ncy) => {
+        if (ncx === undefined || ncy === undefined) return false;
+        const e = sys.edgeCellOf(cx, cy, ncx, ncy);
+        return e >= 0 && sys.isOpening(e);
+      },
+    };
+    const a = { x: (3 + 0.5) * cs, z: (1 + 0.5) * cs }; // north of the edge
+    const b = { x: (3 + 0.5) * cs, z: (4 + 0.5) * cs }; // south of the edge
+
+    // 0 boards: the edge-wall would block, but the open window is a sight gap → LOS passes.
+    expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(true);
+    // 2 boards = CLOSED: the edge blocks, no opening → LOS fails.
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.addBoard(nav)).toBe(true);
+    expect(sys.isOpening(nav)).toBe(false);
+    expect(hasLineOfSight(scene, a.x, a.z, b.x, b.z)).toBe(false);
+    // a different (solid) exterior edge on the same inner cell stays opaque even while the window is open.
+    grid.setWallBetween(3, 2, 4, 2, true); // a solid wall on the inner cell's 'e' edge
+    expect(sys.removeBoard(nav)).toBe(true); // window open again
+    const acrossSolid = hasLineOfSight(scene, (2 + 0.5) * cs, (2 + 0.5) * cs, (4 + 0.5) * cs, (2 + 0.5) * cs);
+    expect(acrossSolid).toBe(false); // the solid 'e' edge blocks — the open 's' window must NOT leak through it
+  });
+});
+
 describe('window-aware structural LOS (V82)', () => {
   // A solid wall along cy=3 with one window at (3,3). The LOS ray runs N→S at cx=3, crossing ONLY the window
   // cell of the wall row — so whether the line passes is decided entirely by the window's board state.

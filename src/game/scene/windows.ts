@@ -11,7 +11,7 @@
 // state is derived from the house seed so a window that starts boarded/smashed in the render matches the sim
 // (windowPlacements is the single source both the sim seed and the renderer mesh build consume).
 
-import type { NavGrid } from '@/game/navigation';
+import type { NavGrid, WallDir } from '@/game/navigation';
 import { buildingsOf, type TestBlock } from './testBlock';
 import {
   authorHouseStyle,
@@ -38,9 +38,16 @@ export interface WindowPlacement {
   readonly state: WindowState;
   /** Storeys of the owning building (the renderer stacks a second-floor sill on a two-storey house). */
   readonly storeys: number;
-  /** World-plane centre of the window cell. */
+  /** World-plane centre of the window (the EDGE midpoint for an edge-window; the cell centre for a cell-window). */
   readonly x: number;
   readonly z: number;
+  /**
+   * EDGE-window (thin-wall house model): the OUTWARD edge direction (n/s/e/w). When present `(cx,cy)` is the
+   * INNER room cell and the window lives on that cell's exterior EDGE — both cells stay walkable, the window's
+   * occlusion/state keys off the EDGE, not a dedicated blocked cell. Absent ⇒ legacy CELL-window (the window
+   * cell is a blocked facade cell, V68): the §G/cityBlock path is unchanged.
+   */
+  readonly edgeDir?: WallDir;
 }
 
 /** A live window view for the renderer (mesh swap) + interaction resolution. */
@@ -51,6 +58,8 @@ export interface WindowView {
   readonly z: number;
   readonly glass: WindowGlass;
   readonly boards: number;
+  /** Edge-window outward direction (n/s/e/w), or undefined for a legacy cell-window. */
+  readonly dir?: WallDir;
 }
 
 /** Tunables the window state system needs (from the structures config domain). */
@@ -197,6 +206,25 @@ interface WindowRecord {
   glassHits: number;
   /** Accumulated zombie attack ticks toward the next board-tear / pane-smash. */
   attackTicks: number;
+  /** Edge-window: the outward dir + the neighbour cell whose shared edge carries the window; null = cell-window. */
+  readonly edge: { readonly dir: WallDir; readonly nx: number; readonly ny: number } | null;
+}
+
+const WINDOW_DIR_DELTA: Record<WallDir, { dx: number; dy: number }> = {
+  n: { dx: 0, dy: -1 },
+  s: { dx: 0, dy: 1 },
+  e: { dx: 1, dy: 0 },
+  w: { dx: -1, dy: 0 },
+};
+
+/**
+ * Canonical key for the cell edge between two 4-neighbour cells, independent of which side is named first —
+ * matching placeHouse's `edgeKey` scheme (a vertical seam keyed by the LEFT cx + shared cy; a horizontal seam
+ * by the shared cx + TOP cy). So an edge-window is found by either adjacent cell. Pure.
+ */
+function windowEdgeKey(ax: number, ay: number, bx: number, by: number): string {
+  if (ax !== bx) return `z|${Math.min(ax, bx)}|${ay}`;
+  return `x|${ax}|${Math.min(ay, by)}`;
 }
 
 /** The board count at which a window reads as CLOSED — the SECOND board (V82). A window boards UP TO TWICE,
@@ -240,17 +268,54 @@ export class WindowSystem {
   private readonly navCellSize: number;
   private readonly cfg: WindowSystemConfig;
   private readonly byCell = new Map<number, WindowRecord>();
+  /** Edge-window index: canonical edge key → the record's primary nav cell (the inner room cell). */
+  private readonly byEdge = new Map<string, number>();
 
   constructor(grid: NavGrid, placements: readonly WindowPlacement[], cfg: WindowSystemConfig) {
     this.grid = grid;
     this.navCellSize = grid.settings.navCellSize;
     this.cfg = cfg;
     for (const p of placements) {
+      // EDGE-windows key by the INNER room cell (both cells stay walkable); CELL-windows key by the window cell.
       const key = grid.index(p.cx, p.cy);
       if (this.byCell.has(key)) continue; // dedupe (a cell carries one window even across sills)
       const init = initialStateOf(p.state, cfg.maxBoards);
-      this.byCell.set(key, { cx: p.cx, cy: p.cy, glass: init.glass, boards: init.boards, glassHits: 0, attackTicks: 0 });
+      let edge: WindowRecord['edge'] = null;
+      if (p.edgeDir !== undefined) {
+        const { dx, dy } = WINDOW_DIR_DELTA[p.edgeDir];
+        edge = { dir: p.edgeDir, nx: p.cx + dx, ny: p.cy + dy };
+        this.byEdge.set(windowEdgeKey(p.cx, p.cy, edge.nx, edge.ny), key);
+      }
+      this.byCell.set(key, { cx: p.cx, cy: p.cy, glass: init.glass, boards: init.boards, glassHits: 0, attackTicks: 0, edge });
     }
+  }
+
+  /** World-plane centre of a record — the edge midpoint for an edge-window, the cell centre for a cell-window. */
+  private centreOf(w: WindowRecord): { x: number; z: number } {
+    const cs = this.navCellSize;
+    if (w.edge) {
+      const { dx, dy } = WINDOW_DIR_DELTA[w.edge.dir];
+      return { x: (w.cx + 0.5 + dx * 0.5) * cs, z: (w.cy + 0.5 + dy * 0.5) * cs };
+    }
+    return { x: (w.cx + 0.5) * cs, z: (w.cy + 0.5) * cs };
+  }
+
+  /** Build the immutable view for a record (edge midpoint + dir for an edge-window). */
+  private viewOf(w: WindowRecord): WindowView {
+    const { x, z } = this.centreOf(w);
+    return w.edge
+      ? { cx: w.cx, cy: w.cy, x, z, glass: w.glass, boards: w.boards, dir: w.edge.dir }
+      : { cx: w.cx, cy: w.cy, x, z, glass: w.glass, boards: w.boards };
+  }
+
+  /**
+   * Nav-cell key for the EDGE-window sitting on the shared edge between two 4-neighbour cells, or -1 if none.
+   * The occlusion + LOS raycasts resolve a window crossed on a cell edge through this (the thin-wall analogue
+   * of `cellOf`, which keys a window by its own blocked cell). Out-of-bounds / non-adjacent → -1.
+   */
+  edgeCellOf(ax: number, ay: number, bx: number, by: number): number {
+    if (Math.abs(ax - bx) + Math.abs(ay - by) !== 1) return -1; // not 4-neighbours
+    return this.byEdge.get(windowEdgeKey(ax, ay, bx, by)) ?? -1;
   }
 
   /** True iff the window at `navCell` is a SIGHT/PROJECTILE opening — a round / sight line passes through it
@@ -374,9 +439,7 @@ export class WindowSystem {
   /** Live window views for the renderer (mesh swap) + interaction resolution. */
   list(): WindowView[] {
     const out: WindowView[] = [];
-    for (const w of this.byCell.values()) {
-      out.push({ cx: w.cx, cy: w.cy, x: (w.cx + 0.5) * this.navCellSize, z: (w.cy + 0.5) * this.navCellSize, glass: w.glass, boards: w.boards });
-    }
+    for (const w of this.byCell.values()) out.push(this.viewOf(w));
     return out;
   }
 
@@ -384,16 +447,11 @@ export class WindowSystem {
   nearest(x: number, z: number, rangeMeters: number): { window: WindowView; navCell: number; distanceMeters: number } | null {
     let best: { window: WindowView; navCell: number; distanceMeters: number } | null = null;
     for (const w of this.byCell.values()) {
-      const wx = (w.cx + 0.5) * this.navCellSize;
-      const wz = (w.cy + 0.5) * this.navCellSize;
+      const { x: wx, z: wz } = this.centreOf(w);
       const dist = Math.hypot(wx - x, wz - z);
       if (dist > rangeMeters) continue;
       if (!best || dist < best.distanceMeters) {
-        best = {
-          window: { cx: w.cx, cy: w.cy, x: wx, z: wz, glass: w.glass, boards: w.boards },
-          navCell: this.grid.index(w.cx, w.cy),
-          distanceMeters: dist,
-        };
+        best = { window: this.viewOf(w), navCell: this.grid.index(w.cx, w.cy), distanceMeters: dist };
       }
     }
     return best;
