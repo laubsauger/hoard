@@ -70,8 +70,12 @@ describe('GATE-0: shared flow-field steering (V15/V19)', () => {
     const after = hordeMetrics(rt);
 
     expect(after.n).toBe(COUNT);
-    expect(after.mean).toBeLessThan(before.mean); // crowd closes distance on the player
-    expect(after.min).toBeLessThan(before.min); // the front-runner gets nearer
+    // The ENGAGED front streams toward the player through the breach — the "the horde comes after you" core
+    // promise. The front-runner closes meaningfully (the bulk is bottlenecked behind the 1-cell breach).
+    expect(after.min).toBeLessThan(before.min - 1);
+    // T137: the disengaged back (out of perception range) now WANDERS rather than standing frozen, so the global
+    // mean no longer monotonically closes — but the horde must not FLEE either; idle wander stays bounded.
+    expect(after.mean).toBeLessThan(before.mean + 2);
   });
 });
 

@@ -85,6 +85,34 @@ export const combatConfig = registerDomain('combat', {
     min: 0,
     max: 0.6,
   }),
+  // ---- T137 idle WANDER: a target-less zombie ambles in a slow, deterministic, per-slot-phased direction that
+  //      refreshes periodically (some intervals it just stands), instead of standing frozen — so a crowd that
+  //      lost its target disperses + drifts naturally across the map (V14/V26). ----
+  hordeWanderSpeedFraction: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Idle wander amble speed as a fraction of hordeMoveSpeed — a slow shuffle, far below a pursuit (T137). 0 = idle zombies stand still (the old behaviour).',
+    default: 0.32,
+    min: 0,
+    max: 1,
+  }),
+  hordeWanderRefreshTicks: num({
+    owner: 'combat',
+    unit: 'count',
+    doc: 'Ticks an idle zombie holds one wander direction before re-rolling it (T137). Per-slot phase-offset so the crowd does not all turn at once.',
+    default: 90,
+    min: 1,
+    max: 100000,
+    integer: true,
+  }),
+  hordeWanderPauseChance: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Fraction of wander intervals a zombie just STANDS (no amble) so idle motion reads as organic loitering, not constant drift (T137).',
+    default: 0.45,
+    min: 0,
+    max: 1,
+  }),
   /** Weight of the shared flow direction vs local separation when steering (1 = pure flow). */
   steerFlowWeight: num({
     owner: 'combat',

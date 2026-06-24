@@ -123,6 +123,28 @@ export function slotCornerBias(slot: number): number {
   return (Math.imul(slot + 1, 0x9e3779b1) >>> 0) / 4294967296;
 }
 
+/**
+ * Deterministic IDLE-WANDER heading for a target-less zombie (T137). Returns whether it ambles this interval and,
+ * if so, a unit direction. The direction holds for `refreshTicks` then re-rolls; a PER-SLOT phase offset spreads
+ * the re-roll across the crowd (not all turning on the same tick), and a `pauseChance` fraction of intervals the
+ * body just STANDS — so a crowd that lost its target loiters + drifts organically instead of standing frozen.
+ * Pure + replay-stable (a function of slot + tick only, no RNG — V26).
+ */
+export function idleWanderDir(
+  slot: number,
+  tick: number,
+  refreshTicks: number,
+  pauseChance: number,
+): { readonly moving: boolean; readonly dirX: number; readonly dirZ: number } {
+  const refresh = Math.max(1, refreshTicks);
+  const phase = (Math.imul(slot + 1, 0x85ebca6b) >>> 0) % refresh; // per-slot offset so re-rolls aren't synced
+  const bucket = Math.floor((tick + phase) / refresh);
+  const seed = (Math.imul(slot + 1, 2654435761) ^ Math.imul(bucket + 1, 0x9e3779b1)) >>> 0;
+  if (seed / 4294967296 < pauseChance) return { moving: false, dirX: 0, dirZ: 0 };
+  const angle = ((Math.imul(seed ^ 0x5bd1e995, 2246822519) >>> 0) / 4294967296) * (Math.PI * 2);
+  return { moving: true, dirX: Math.cos(angle), dirZ: Math.sin(angle) };
+}
+
 /** Planar (XZ) distance from a zombie slot to the player — shared by the horde steps and snapshots. */
 export function planarDistanceToPlayer(
   zombies: SimulationZombies,
@@ -314,12 +336,12 @@ export class HordeSimulation {
       // -1 (idle) or one that did not win the capped field budget has no field → the body holds position.
       const targetCell = zombies.getTarget(slot);
       const field = targetCell >= 0 ? fieldByCell.get(targetCell) : undefined;
+      zombies.getPosition(slot, pos);
       if (!field) {
-        zombies.setVelocity(slot, 0, 0, 0);
+        // No target → IDLE WANDER (T137): amble in a slow per-slot direction instead of standing frozen.
+        this.stepIdleWander(slot, pos, clock.tick);
         return;
       }
-
-      zombies.getPosition(slot, pos);
       const adx = this.activeCenterX.get(targetCell)! - pos[0];
       const adz = this.activeCenterZ.get(targetCell)! - pos[2];
       if (adx * adx + adz * adz <= arriveR2) {
@@ -430,6 +452,35 @@ export class HordeSimulation {
     // B4 / V19: the steering above only SOFT-separates. Resolve any remaining hard interpenetration
     // among the individually-visible tiers so bodies never visibly overlap. Abstract/low stays exempt.
     this.resolveCrowdOverlap();
+  }
+
+  /**
+   * T137 idle wander: a target-less zombie ambles in a slow, deterministic per-slot direction (idleWanderDir)
+   * instead of standing frozen, so a crowd that lost its target disperses + drifts naturally. Collision-gated
+   * exactly like the pursuit step (radius-walkable + no walled-edge cross), so a wanderer never clips a wall;
+   * a blocked amble just holds + faces the direction (the next interval re-rolls it). No flow field is used —
+   * wander is a direct heading, so it never consumes the capped flow-field budget (V15).
+   */
+  private stepIdleWander(slot: ZombieSlot, pos: readonly [number, number, number], tick: number): void {
+    const { zombies, scene, spatial, combatCfg, clock, agentRadius } = this.d;
+    const w = idleWanderDir(slot, tick, combatCfg.hordeWanderRefreshTicks, combatCfg.hordeWanderPauseChance);
+    if (!w.moving) {
+      zombies.setVelocity(slot, 0, 0, 0); // loitering this interval — stand
+      return;
+    }
+    const speed = combatCfg.hordeMoveSpeed * combatCfg.hordeWanderSpeedFraction;
+    const step = speed * clock.tickSeconds;
+    const nx = pos[0] + w.dirX * step;
+    const nz = pos[2] + w.dirZ * step;
+    const grid = scene.navGrid;
+    zombies.setHeading(slot, Math.atan2(w.dirZ, w.dirX));
+    if (isWalkableRadius(scene, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
+      zombies.setPosition(slot, nx, pos[1], nz);
+      zombies.setVelocity(slot, w.dirX * speed, 0, w.dirZ * speed);
+      spatial.update(slot, nx, nz);
+    } else {
+      zombies.setVelocity(slot, 0, 0, 0); // blocked — hold; next interval picks a fresh direction
+    }
   }
 
   /**
