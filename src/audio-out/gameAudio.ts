@@ -27,6 +27,7 @@ import {
   shouldGroan,
   voiceGain,
 } from './audioMapping';
+import { SampleBank, type SfxBankName } from './sampleBank';
 
 /** Resolve the `out*` output tuning from the typed audio config for a quality tier (V4). */
 export function resolveAudioOutTuning(tier: QualityTier): AudioOutTuning {
@@ -109,6 +110,8 @@ export class GameAudio {
   private bed: BedNodes | null = null;
   private music: MusicNodes | null = null;
   private noise: AudioBuffer | null = null;
+  /** Authored sampled-SFX bank (gunshots/footsteps/grunts/doors/…); decoded async after the ctx resumes. */
+  private readonly samples = new SampleBank();
 
   // Live bus volumes (0..1) from the settings store. The node graph applies master × bus; the pure
   // shaping functions take volume = 1 (the bus nodes carry the master/sfx/music scaling), not master.
@@ -172,6 +175,7 @@ export class GameAudio {
       this.sfxBus = sfxBus;
       this.musicBus = musicBus;
       this.noise = this.buildNoiseBuffer(ctx);
+      void this.samples.load(ctx); // decode the authored sfx clips in the background (best-effort, never throws)
       this.bed = this.buildBed(ctx, sfxBus);
       this.music = this.buildMusic(ctx, musicBus);
       void ctx.resume();
@@ -183,8 +187,9 @@ export class GameAudio {
     }
   }
 
-  /** Player gunshot — direct, crisp, exempt from the voice cap (player-action feedback priority). */
-  gunshot(): void {
+  /** Player gunshot — direct, crisp, exempt from the voice cap (player-action feedback priority). `indoor`
+   *  picks the tighter indoor pistol sample vs the open outdoor one (the shot reads differently in a room). */
+  gunshot(indoor = false): void {
     const ctx = this.ctx;
     const bus = this.sfxBus;
     if (!ctx || !bus) return;
@@ -192,6 +197,8 @@ export class GameAudio {
     // Volume = 1: the SFX bus (master × sfx) applies the live volumes; this is just the per-voice shape.
     const peak = voiceGain(1, this.tuning.gunshotGain, 1, this.tuning.masterCeiling);
     if (peak <= 0) return;
+    // Authored pistol sample (indoor/outdoor) when decoded; else fall back to the synthesized crack below.
+    if (this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03)) return;
 
     // Crack: short white-noise burst through a band, fast exponential decay.
     if (this.noise) {
@@ -383,12 +390,17 @@ export class GameAudio {
 
   private playOneShot(voice: OneShotVoice, gain: number, pan: number): void {
     switch (voice) {
-      case 'glass': return this.playNoiseBurst(gain, pan, 'highpass', 3500, 0.18);
+      // Authored sample first (when decoded), else the synth voice — so the event stream upgrades for free.
+      case 'glass':
+        if (this.playSample('windowBreak', gain, pan, 0.02)) return;
+        return this.playNoiseBurst(gain, pan, 'highpass', 3500, 0.18);
       case 'alarm': return this.playAlarm(gain, pan);
       case 'impact': return this.playNoiseBurst(gain, pan, 'lowpass', 600, 0.16);
       case 'breach': return this.playNoiseBurst(gain, pan, 'lowpass', 400, 0.22);
       case 'footstep': return this.playNoiseBurst(gain, pan, 'lowpass', 900, 0.07);
-      case 'groan': return this.playGroan(pan, gain);
+      case 'groan':
+        if (this.playSample('zombie', gain, pan, 0.08)) return;
+        return this.playGroan(pan, gain);
     }
   }
 
@@ -408,6 +420,55 @@ export class GameAudio {
     g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
     src.connect(flt).connect(g).connect(this.panner(ctx, pan, bus));
     this.startTransient(src, t, decay, true);
+  }
+
+  /**
+   * Play a random VARIANT of a sampled bank through the SFX bus (panned, optional ± pitch jitter so repeats
+   * don't sound identical). Returns false when the bank has not decoded / is absent, so callers fall back to
+   * the synth voice. Pooled + voice-capped via startTransient (V24).
+   */
+  private playSample(bank: SfxBankName, gain: number, pan: number, pitchVar = 0): boolean {
+    const ctx = this.ctx;
+    const bus = this.sfxBus;
+    if (!ctx || !bus || gain <= 0) return false;
+    const buf = this.samples.pick(bank);
+    if (!buf) return false;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const rate = pitchVar > 0 ? 1 + (Math.random() * 2 - 1) * pitchVar : 1;
+    src.playbackRate.value = rate;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(g).connect(this.panner(ctx, pan, bus));
+    this.startTransient(src, ctx.currentTime, buf.duration / rate, /* counted */ true);
+    return true;
+  }
+
+  /** Door OPEN — sampled, pitch-jittered (the door system fires this on a successful open). */
+  doorOpen(pan = 0): void {
+    this.playSample('doorOpen', 0.85, pan, 0.05);
+  }
+
+  /** Door CLOSE — sampled. */
+  doorClose(pan = 0): void {
+    this.playSample('doorClose', 0.85, pan, 0.05);
+  }
+
+  /** Player exertion / pain grunt — a random one of the separated male-grunt variants (T-audio). */
+  grunt(): void {
+    this.playSample('grunt', 0.8, 0, 0.06);
+  }
+
+  /** A loot container opening (cardboard box). */
+  containerOpen(pan = 0): void {
+    this.playSample('containerOpen', 0.8, pan, 0.04);
+  }
+
+  /** A player footstep on a TERRAIN surface — picks the matching sampled bank + pitch-jitters it. */
+  footstep(terrain: 'concrete' | 'dirt' | 'grass' | 'wood', pan = 0): void {
+    const bank: SfxBankName =
+      terrain === 'concrete' ? 'footstepConcrete' : terrain === 'dirt' ? 'footstepDirt' : terrain === 'grass' ? 'footstepGrass' : 'footstepWood';
+    this.playSample(bank, 0.6, pan, 0.1);
   }
 
   /** Two-tone alarm warble. */

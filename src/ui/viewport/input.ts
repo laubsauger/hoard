@@ -95,7 +95,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
     // otherwise the player "shoots" with no ammo. `undefined` = a melee/non-counting weapon, which DOES act.
     const didFire = shot.firedRounds === undefined || shot.firedRounds > 0;
     if (!didFire) return;
-    gameAudio.gunshot(); // procedural gunshot synthesized directly off the player-fire path.
+    gameAudio.gunshot(scene.isPlayerInsideBuilding()); // sampled pistol — indoor/outdoor by the player's location.
     bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
     // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
     // never draws through a wall on a miss into structure (V49/V53/B20).

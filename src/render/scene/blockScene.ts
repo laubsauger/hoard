@@ -622,7 +622,8 @@ export class BlockScene {
     return buildingIndexAt(this.runtime.scene, this.navCellSize, p.x, p.z);
   }
 
-  private isPlayerInsideBuilding(): boolean {
+  /** True when the player stands inside a building footprint (drives the indoor pistol sample, the floor lift). */
+  isPlayerInsideBuilding(): boolean {
     return this.playerBuildingIndex() >= 0;
   }
 
