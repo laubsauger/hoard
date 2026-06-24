@@ -35,4 +35,11 @@ export interface Stimulus {
   readonly bornTick: number;
   /** Intensity lost per tick (>=0). When intensity <= 0 the stimulus is retired. */
   readonly decayPerTick: number;
+  /**
+   * P3 multi-floor: the nav LEVEL the stimulus originated on (0 = ground). OPTIONAL + additive — every existing
+   * producer omits it (⇒ undefined ⇒ treated as level 0), so the single-floor sim is byte-identical. A consumer
+   * on a DIFFERENT level attenuates the reaching intensity by the sound-through-floor factor (V4) — a gunshot
+   * downstairs is heard upstairs, muffled, via the stairwell. The frozen XZ-plane contract is otherwise intact.
+   */
+  readonly level?: number;
 }

@@ -220,6 +220,25 @@ export function gridWalkableRadius(grid: NavGrid, x: number, z: number, r: numbe
 }
 
 /**
+ * Line-of-sight on a SPECIFIC level's grid (P3 multi-floor): true when the segment crosses no blocked cell and
+ * no interior edge-wall ON THAT LEVEL. The per-level analogue of `hasLineOfSight` — a level-0 observer uses the
+ * ground grid, a level-1 observer uses the upstairs grid, so sight is contained within a floor (you don't see
+ * through a ceiling). Endpoints excluded (the observer's + target's own cells never self-occlude).
+ */
+export function gridHasLineOfSight(grid: NavGrid, x0: number, z0: number, x1: number, z1: number): boolean {
+  if (segmentCrossesWall(grid, x0, z0, x1, z1)) return false;
+  const dx = x1 - x0;
+  const dz = z1 - z0;
+  const dist = Math.hypot(dx, dz);
+  const steps = Math.max(1, Math.ceil(dist / LOS_STEP_METERS));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (!gridWalkableWorld(grid, x0 + dx * t, z0 + dz * t)) return false;
+  }
+  return true;
+}
+
+/**
  * The buildings of a scene as a non-empty list (T80). Multi-building districts supply `buildings`; every
  * legacy single-building scene falls back to the one-element `[{ bounds: buildingBounds }]` so the renderer
  * has ONE code path. A building with no explicit storeys reads as single-storey at the configured height.

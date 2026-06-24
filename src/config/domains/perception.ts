@@ -116,6 +116,20 @@ export const perceptionConfig = registerDomain('perception', {
     min: 0,
     max: 1,
   }),
+  /**
+   * P3 multi-floor: per-FLOOR sound attenuation. A sound made on one level reaching a hearer on another is
+   * multiplied by this factor RAISED TO the floor distance (a gunshot one storey up/down is `× this`, two
+   * storeys `× this²`) — the muffle of a sound bleeding through the floor via the stairwell (V4). 1 = no muffle.
+   * Combines with the in-plane wall occlusion. A single-storey world never crosses floors, so it is inert there.
+   */
+  soundThroughFloorAttenuation: num({
+    owner: 'perception',
+    unit: 'ratio',
+    doc: 'Per-floor intensity multiplier for a sound heard one storey away (P3 sound-through-floor, V4).',
+    default: 0.4,
+    min: 0,
+    max: 1,
+  }),
   /** Base hearing range for a default-intensity stimulus. */
   hearingRange: num({
     owner: 'perception',

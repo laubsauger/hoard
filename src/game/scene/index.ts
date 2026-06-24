@@ -8,6 +8,7 @@ export {
   gridWalkableRadius,
   segmentCrossesWall,
   hasLineOfSight,
+  gridHasLineOfSight,
   rayDistanceToWall,
   castVisibilityFan,
   seesWithinFan,

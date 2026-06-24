@@ -67,3 +67,25 @@ describe('hasLineOfSight — interior edge-walls occlude sight + sound (V47/V28)
     expect(rayDistanceToWall(wall, 0, 0, 0, 20)).toBeCloseTo(5, 0);
   });
 });
+
+// P3c — per-level line of sight. gridHasLineOfSight occludes on a SPECIFIC level's grid (a level-0 observer
+// uses the ground grid, a level-1 observer the upstairs grid), so sight is contained within a floor.
+import { gridHasLineOfSight } from './testBlock';
+
+describe('gridHasLineOfSight — per-level occlusion (P3c)', () => {
+  it('clear on an open level, blocked when that level carries a wall on the segment', () => {
+    const g = new NavGrid({ width: 6, height: 3 });
+    // clear sight along row 1 with nothing blocking.
+    expect(gridHasLineOfSight(g, center(0), center(1), center(5), center(1))).toBe(true);
+    // a blocked cell mid-segment occludes (a solid upstairs partition).
+    g.block(3, 1);
+    expect(gridHasLineOfSight(g, center(0), center(1), center(5), center(1))).toBe(false);
+  });
+
+  it('an interior edge-wall on the level occludes; an open doorway passes', () => {
+    const g = new NavGrid({ width: 6, height: 3 });
+    for (let cy = 0; cy < 3; cy++) if (cy !== 1) g.setWallBetween(2, cy, 3, cy); // doorway at cy=1
+    expect(gridHasLineOfSight(g, center(1), center(0), center(4), center(0))).toBe(false); // across the wall
+    expect(gridHasLineOfSight(g, center(1), center(1), center(4), center(1))).toBe(true); // through the doorway
+  });
+});

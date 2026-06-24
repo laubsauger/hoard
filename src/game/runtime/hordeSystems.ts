@@ -39,6 +39,7 @@ import type { ResolvedDomain } from '@/config/types';
 import {
   isWalkableRadius,
   hasLineOfSight,
+  gridHasLineOfSight,
   segmentCrossesWall,
   levelNavOf,
   gridWalkableRadius,
@@ -678,7 +679,7 @@ export class HordeSimulation {
    * per-level + stairwell-gated test.
    */
   private stepPerceptionMulti(ctx: SystemContext): void {
-    const { zombies, perception, playerEntityId, getPlayerPos, scene, stimulus } = this.d;
+    const { zombies, perception, playerEntityId, getPlayerPos, stimulus } = this.d;
     stimulus.update(ctx.tick);
     const p = getPlayerPos();
     const nav = this.nav;
@@ -701,9 +702,11 @@ export class HordeSimulation {
       const dx = p.x - pos[0];
       const dz = p.z - pos[2];
       const dist = Math.hypot(dx, dz);
-      let inSight = dist <= sight;
+      // P3c: sight is CONTAINED within a level — a zombie sees the player only on its OWN floor, through that
+      // floor's walls (no seeing through a ceiling). Cross-floor awareness comes from sound bleed (below).
+      let inSight = zlevel === playerLevel && dist <= sight;
       if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
-      if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
+      if (inSight) inSight = gridHasLineOfSight(nav.grid(zlevel), pos[0], pos[2], p.x, p.z);
       const sensesPlayer = inSight && playerGlobal >= 0;
 
       let target: number;
@@ -712,9 +715,11 @@ export class HordeSimulation {
         target = playerGlobal;
         acquired = true;
       } else {
-        const heardLocal = this.loudestHeardSoundCell(pos[0], pos[2], ctx.tick);
-        if (heardLocal >= 0) {
-          target = nav.globalCell(zlevel, heardLocal); // sound stays on the hearer's level (P3b)
+        // P3c: a heard sound is targeted on the SOUND's own level (cross-floor sounds bleed up/down the
+        // stairwell, attenuated) — so a gunshot downstairs pulls an upstairs body toward the stairs + down.
+        const heardGlobal = this.loudestHeardSoundGlobal(pos[0], pos[2], zlevel, ctx.tick);
+        if (heardGlobal >= 0) {
+          target = heardGlobal;
           acquired = true;
         } else if (zombies.getTarget(slot) >= 0 && ctx.tick <= this.targetExpiry[slot]!) {
           target = zombies.getTarget(slot);
@@ -764,6 +769,48 @@ export class HordeSimulation {
       }
     }
     return bestCell;
+  }
+
+  /**
+   * P3c multi-floor analogue of `loudestHeardSoundCell`: the GLOBAL cell of the loudest sound reaching (x,z) for
+   * a hearer on `hearerLevel`. A sound made on a DIFFERENT level is attenuated by the sound-through-floor factor
+   * raised to the floor distance (V4) — it bleeds up/down the stairwell, muffled — and its target is the sound's
+   * cell ON ITS OWN LEVEL, so the hearer paths toward the stairs + climbs/descends to investigate. Same-floor
+   * sounds keep the in-plane wall occlusion (V28). All levels share the cell dims, so the XZ cell index is common.
+   */
+  private loudestHeardSoundGlobal(x: number, z: number, hearerLevel: number, tick: number): number {
+    const { stimulus, scene, perception } = this.d;
+    const nav = this.nav;
+    const threshold = perception.alertIntensityThreshold;
+    const floorAtt = perception.soundThroughFloorAttenuation;
+    const hits = stimulus.query(x, z, tick);
+    let bestGlobal = -1;
+    let bestIntensity = -1;
+    for (const h of hits) {
+      if (h.stimulus.kind !== 'sound') continue;
+      const soundLevel = h.stimulus.level ?? 0;
+      const floors = Math.abs(soundLevel - hearerLevel);
+      // in-plane occlusion (same floor) OR per-floor muffle (cross floor). The straight XZ ray approximates the
+      // path; for a cross-floor sound the floor factor models the stairwell bleed.
+      let intensity = h.intensity;
+      if (floors === 0) {
+        if (!hasLineOfSight(scene, h.stimulus.x, h.stimulus.z, x, z)) intensity *= perception.soundWallOcclusion;
+      } else {
+        intensity *= Math.pow(floorAtt, floors);
+      }
+      if (intensity < threshold) continue;
+      const grid = nav.grid(soundLevel);
+      const c = grid.worldToCell(h.stimulus.x, h.stimulus.z);
+      if (c.cx < 0 || c.cy < 0 || c.cx >= grid.width || c.cy >= grid.height) continue;
+      const local = grid.index(c.cx, c.cy);
+      if (grid.isBlocked(local)) continue; // no field can be built to a blocked cell (e.g. a sound off the upstairs footprint)
+      const global = nav.globalCell(soundLevel, local);
+      if (intensity > bestIntensity || (intensity === bestIntensity && global < bestGlobal)) {
+        bestIntensity = intensity;
+        bestGlobal = global;
+      }
+    }
+    return bestGlobal;
   }
 
   /**

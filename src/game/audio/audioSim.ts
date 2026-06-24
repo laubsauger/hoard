@@ -32,6 +32,9 @@ export interface HearOptions {
   readonly durationTicks?: number;
   /** Extra scale on intensity (e.g. a louder-than-usual impact). */
   readonly intensityScale?: number;
+  /** P3 multi-floor: the nav level the sound was made on (0 = ground, default). Tags the stimulus so a hearer
+   *  on another floor attenuates it (sound-through-floor, V4). Omit for single-floor — treated as level 0. */
+  readonly level?: number;
 }
 
 function clamp01(v: number): number {
@@ -96,17 +99,18 @@ export class AudioSim {
       radius: p.radius,
       bornTick: tick,
       decayPerTick,
+      ...(opts.level !== undefined ? { level: opts.level } : {}),
     };
     if (intensity > 0) this.field.emit(stim, tick);
 
     // major event -> persistent disturbance keeps influencing migration after the sample ends (V28).
     if (intensity >= this.settings.majorEventThreshold) {
-      this.registerDisturbance(p, intensity, x, z, tick);
+      this.registerDisturbance(p, intensity, x, z, tick, opts.level);
     }
     return stim;
   }
 
-  private registerDisturbance(p: ClassProfile, intensity: number, x: number, z: number, tick: number): void {
+  private registerDisturbance(p: ClassProfile, intensity: number, x: number, z: number, tick: number, level?: number): void {
     const linger = this.settings.disturbanceLingerTicks;
     const stim: Stimulus = {
       id: this.ids.next<StimulusId>('stimulus'),
@@ -119,6 +123,7 @@ export class AudioSim {
       radius: p.radius,
       bornTick: tick,
       decayPerTick: intensity / linger,
+      ...(level !== undefined ? { level } : {}),
     };
     this.field.emit(stim, tick);
     this.disturbances.push({ bornTick: tick, expiresTick: tick + linger });

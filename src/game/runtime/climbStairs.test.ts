@@ -93,18 +93,17 @@ describe('P3b player climb', () => {
   });
 });
 
-describe('P3b zombie climb', () => {
-  it('a zombie pathing to a target upstairs climbs the stairs after the player', () => {
+describe('P3b/P3c zombie climb driven by cross-floor sound', () => {
+  it('a zombie that HEARS the upstairs player (gunshot through the floor) climbs the stairs after it', () => {
     const rt = new GameRuntime({ tier: TIER, adapter: new InMemoryPersistenceAdapter(), scene: buildTwoStoreyScene() });
-    // player goes upstairs.
-    expect(rt.climbStairs()).toBe(true);
+    expect(rt.climbStairs()).toBe(true); // player goes upstairs (level 1)
     expect(rt.playerLevelValue()).toBe(1);
-    // a zombie starts on the ground floor, a few cells west of the stairs, facing the player (+x).
-    const z = rt.spawnZombie({ x: 1.5 * 2, y: 0, z: 2.5 * 2 });
+    const z = rt.spawnZombie({ x: 1.5 * 2, y: 0, z: 2.5 * 2 }); // ground floor, west of the stairs
     expect(rt.zombieLevel(z)).toBe(0);
 
     let climbed = false;
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 240; i++) {
+      if (i % 20 === 0) rt.fire(1, 0, 'torsoUpper'); // an upstairs gunshot the downstairs zombie hears, muffled
       rt.update(TICK_DT);
       if (rt.zombieLevel(z) === 1) {
         climbed = true;
@@ -112,5 +111,16 @@ describe('P3b zombie climb', () => {
       }
     }
     expect(climbed).toBe(true);
+  });
+
+  it('LOS respects levels: a SILENT upstairs player is NOT sensed by a zombie right below (no cross-floor sight)', () => {
+    const rt = new GameRuntime({ tier: TIER, adapter: new InMemoryPersistenceAdapter(), scene: buildTwoStoreyScene() });
+    expect(rt.climbStairs()).toBe(true); // player upstairs, makes no noise
+    // a zombie directly under the player's upstairs cell. With sight contained to a floor and no sound, it
+    // must never acquire the player as a target (a level-0 body can't see through the ceiling).
+    const z = rt.spawnZombie({ x: 5.5 * 2, y: 0, z: 2.5 * 2 });
+    for (let i = 0; i < 60; i++) rt.update(TICK_DT);
+    expect(rt.zombieTargetCell(z)).toBe(-1);
+    expect(rt.zombieLevel(z)).toBe(0);
   });
 });

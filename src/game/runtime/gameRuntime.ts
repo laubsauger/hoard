@@ -730,7 +730,7 @@ export class GameRuntime {
     const stride = this.audioCfg.footstepStrideMeters;
     while (this.footstepAccumMeters >= stride) {
       this.footstepAccumMeters -= stride;
-      this.audio.hearEvent('footstep', this.playerPos.x, this.playerPos.z, this.clock.tick, { intensityScale: stanceNoise });
+      this.audio.hearEvent('footstep', this.playerPos.x, this.playerPos.z, this.clock.tick, { intensityScale: stanceNoise, level: this.playerLevel });
     }
   }
 
@@ -1250,7 +1250,7 @@ export class GameRuntime {
 
   /** Emit a gunshot sound stimulus at the player's current muzzle position into the shared field. */
   private emitGunfire(): void {
-    this.audio.hearEvent('gunfire', this.playerPos.x, this.playerPos.z, this.clock.tick);
+    this.audio.hearEvent('gunfire', this.playerPos.x, this.playerPos.z, this.clock.tick, { level: this.playerLevel });
   }
 
   /** Aim at a specific live entity and fire at the given region (convenience for tests/AI). */
@@ -1473,7 +1473,7 @@ export class GameRuntime {
     let shot = this.pendingShots.shift();
     while (shot) {
       this.combat.fire(shot.origin, shot.dirX, shot.dirZ, shot.region, { rollHitLocation: true });
-      this.audio.hearEvent('gunfire', shot.origin.x, shot.origin.z, this.clock.tick);
+      this.audio.hearEvent('gunfire', shot.origin.x, shot.origin.z, this.clock.tick, { level: this.playerLevel });
       shot = this.pendingShots.shift();
     }
   }
