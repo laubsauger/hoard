@@ -56,6 +56,10 @@ export interface WallEdge {
   readonly outerCx: number | null;
   readonly outerCy: number | null;
   readonly kind: WallKind;
+  /** For an EXTERIOR edge: the cardinal direction (n/s/e/w) that leaves the footprint — the authoritative outward
+   *  face, captured at scan time so the renderer NEVER re-derives it (re-derivation mis-placed some walls). null
+   *  for interior partitions (use innerCx/Cy ↔ outerCx/Cy). */
+  readonly outwardDir: Edge | null;
   /** Room id on the inner side. */
   readonly innerRoom: number;
   /** Room id on the outer side, or null when exterior. */
@@ -185,6 +189,7 @@ export function placeHouse(template: HouseTemplate, originCx: number, originCy: 
           outerCx: outside ? null : originCx + ncx,
           outerCy: outside ? null : originCy + ncy,
           kind: outside ? 'exterior' : 'interior',
+          outwardDir: outside ? dir : null,
           innerRoom,
           outerRoom: outside ? null : outerRoom,
         });

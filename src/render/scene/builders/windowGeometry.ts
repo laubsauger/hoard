@@ -7,13 +7,13 @@
 // so the wall punch + glass stay aligned). At the default ~3 m storey these resolve to a sill ~0.9 m, a head
 // ~2.1 m and a ~1.2 m opening — a window centred at chest/eye height rather than floating high under the eave.
 /** Window opening height as a fraction of ONE storey's wall height (head − sill ≈ 1.2 m at a 3 m storey). */
-const WINDOW_HEIGHT_FRACTION = 0.4;
+const WINDOW_HEIGHT_FRACTION = 0.52;
 /** Ground-floor sill height as a fraction of one storey's wall height (≈ 0.9 m at a 3 m storey). */
-const WINDOW_SILL_FRACTION = 0.3;
+const WINDOW_SILL_FRACTION = 0.26;
 /** Horizontal opening width as a fraction of the nav-cell run. Kept narrow so the opening + its painted frame
  *  trim (which laps ~0.08 m past each jamb) sit comfortably WITHIN the cell with a real jamb reveal on each
  *  side — the glass never touches the cell edge / its neighbour. */
-const WINDOW_SPAN_FRACTION = 0.7;
+const WINDOW_SPAN_FRACTION = 0.82;
 
 /** The wall shell thickness: the configured panel thickness, never wider than one nav cell (a thin shell). */
 export function wallShellThicknessMeters(wallPanelThicknessMeters: number, navCellSize: number): number {

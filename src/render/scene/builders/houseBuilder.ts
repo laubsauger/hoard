@@ -492,7 +492,9 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     for (const edge of house.wallEdges) {
       if (edge.kind !== 'exterior') continue; // interior partitions are built separately
       if (doorGapKeys.has(edge.key)) continue; // doorway gap
-      const dir = exteriorEdgeDir(house, edge.innerCx, edge.innerCy, edge.along);
+      // Authoritative outward face from placeHouse's scan — NEVER re-derive (the old roomAt re-derivation
+      // mis-placed some walls: a face landed one cell inward / a room edge ended up outside the wall).
+      const dir = edge.outwardDir ?? exteriorEdgeDir(house, edge.innerCx, edge.innerCy, edge.along);
       const dl = EXT_DIR_DELTA[dir];
       // world face centre = midpoint of the inner room cell + the outer street cell.
       const faceX = ((edge.innerCx + (edge.innerCx + dl.dx) + 1) / 2) * cs;
