@@ -7,8 +7,9 @@
 // the opaque roof and revealed when the cutaway fades the roof/upper wall, exactly like the interior floor +
 // partition walls. Tracked for disposal (V24, via `res`). Cast + receive shadow. Pure static construction.
 
-import { BoxGeometry, InstancedMesh, Matrix4, Quaternion, Vector3 } from 'three';
+import { BoxGeometry, Group, InstancedMesh, Matrix4, Mesh, MeshStandardMaterial, Quaternion, Vector3 } from 'three';
 import type { Edge, FurnitureKind } from '../../../game/scene';
+import { tagInteractable } from '../../effects/highlightView';
 import type { BuildContext } from './buildContext';
 
 export interface FurnitureConfig {
@@ -142,6 +143,7 @@ export function buildFurniture(ctx: BuildContext, cfg: FurnitureConfig): void {
   const { root, res, town, navCellSize: cs } = ctx;
   const furniture = town.placedFurniture;
   if (!furniture || furniture.length === 0) return;
+  const grid = town.navGrid;
 
   // batch every box by colour → one InstancedMesh per colour (shared unit cube, transformed per box).
   const byColor = new Map<number, Matrix4[]>();
@@ -151,6 +153,33 @@ export function buildFurniture(ctx: BuildContext, cfg: FurnitureConfig): void {
   const _off = new Vector3();
   const yUp = new Vector3(0, 1, 0);
 
+  // P1d/V79 — a CONTAINER furniture piece (fridge / dresser / wardrobe / …) is a lootable INTERACTABLE, so its
+  // boxes are built as INDIVIDUAL meshes TAGGED with the piece's anchor nav cell (== grid.index(cx,cy), the SAME
+  // cell the runtime resolves the highlight target by) — so the active-interactable silhouette GLOW hugs THIS
+  // piece's real mesh shape (a tall fridge vs a low dresser vs a wide wardrobe), not a generic box. Non-container
+  // pieces (the cheap bulk) stay INSTANCED. Per-(kind,part) geometry + per-colour material are cached so the
+  // container set still costs only a geometry per distinct box shape + a material per colour, all tracked (V24).
+  const containerGroup = new Group();
+  const contGeo = new Map<string, BoxGeometry>();
+  const contMat = new Map<number, MeshStandardMaterial>();
+  const geoFor = (kind: FurnitureKind, idx: number, sx: number, sy: number, sz: number): BoxGeometry => {
+    const k = `${kind}.${idx}`;
+    let g = contGeo.get(k);
+    if (!g) {
+      g = res.geo(`furniture.cont.${k}`, new BoxGeometry(sx, sy, sz));
+      contGeo.set(k, g);
+    }
+    return g;
+  };
+  const matFor = (color: number): MeshStandardMaterial => {
+    let m = contMat.get(color);
+    if (!m) {
+      m = res.mat(`furniture.cont.${color.toString(16)}`, { color, roughness: 0.85 });
+      contMat.set(color, m);
+    }
+    return m;
+  };
+
   for (const piece of furniture) {
     const parts = KIND_PARTS[piece.kind];
     const rot = FACING_ROT[piece.facing];
@@ -158,17 +187,34 @@ export function buildFurniture(ctx: BuildContext, cfg: FurnitureConfig): void {
     // world centre of the piece's anchor cell (1x1 footprint → the cell centre is the piece centre).
     const wx = (piece.cx + (piece.footprint.w) / 2) * cs;
     const wz = (piece.cy + (piece.footprint.d) / 2) * cs;
-    for (const part of parts) {
+    const isContainer = piece.container !== null;
+    const navCell = isContainer ? grid.index(piece.cx, piece.cy) : -1;
+    parts.forEach((part, idx) => {
       // rotate the local offset into world, then add the cell centre + the floor base height.
       _off.set(part.ox, 0, part.oz).applyQuaternion(_q);
-      _pos.set(wx + _off.x, cfg.floorThicknessMeters + part.oy, wz + _off.z);
-      _scale.set(part.sx, part.sy, part.sz);
-      const m = new Matrix4().compose(_pos.clone(), _q.clone(), _scale.clone());
-      const list = byColor.get(part.color) ?? [];
-      list.push(m);
-      byColor.set(part.color, list);
-    }
+      const px = wx + _off.x;
+      const py = cfg.floorThicknessMeters + part.oy;
+      const pz = wz + _off.z;
+      if (isContainer) {
+        // individual TAGGED mesh per box → the silhouette glow resolves + hugs this piece's real shape.
+        const mesh = new Mesh(geoFor(piece.kind, idx, part.sx, part.sy, part.sz), matFor(part.color));
+        mesh.position.set(px, py, pz);
+        mesh.quaternion.copy(_q);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        tagInteractable(mesh, navCell);
+        containerGroup.add(mesh);
+      } else {
+        _pos.set(px, py, pz);
+        _scale.set(part.sx, part.sy, part.sz);
+        const m = new Matrix4().compose(_pos.clone(), _q.clone(), _scale.clone());
+        const list = byColor.get(part.color) ?? [];
+        list.push(m);
+        byColor.set(part.color, list);
+      }
+    });
   }
+  if (containerGroup.children.length > 0) root.add(containerGroup);
 
   const unit = res.geo('furniture.unitBox', new BoxGeometry(1, 1, 1));
   for (const [colorHex, mats] of byColor) {
