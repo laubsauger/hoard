@@ -1727,11 +1727,31 @@ export class GameRuntime {
     if (windows.length === 0) return;
     const reach = this.structuresCfg.windowZombieReachMeters;
     const underAttack: number[] = [];
+    const zpos: [number, number, number] = [0, 0, 0];
+    const tw = this.scene.navGrid.width;
     for (const w of windows) {
       if (w.glass !== 'intact' && w.boards === 0) continue; // already an opening — nothing left to attrite
-      if (this.spatial.query(w.x, w.z, reach, MOVEMENT_LAYER).length > 0) {
-        underAttack.push(this.windowSystem.cellOf(w.cx, w.cy));
+      // A window is under attack ONLY when a nearby zombie is trying to get at something BEHIND it — i.e. it is
+      // PURSUING a target (targetCell >= 0) that lies BEYOND the window (the window sits between the body and its
+      // goal). A zombie merely passing within reach, or one whose goal is elsewhere, does NOT casually knock the
+      // glass out (the bug) — and the captive sealed in a back room won't smash its EXTERIOR window on spawn
+      // (its target, the player inside, is not beyond that outward-facing pane).
+      const nearby = this.spatial.query(w.x, w.z, reach, MOVEMENT_LAYER);
+      let attacked = false;
+      for (const id of nearby) {
+        const slot = id as ZombieSlot;
+        const target = this.zombies.getTarget(slot);
+        if (target < 0) continue; // no goal → wandering/idle, not pressing the glass
+        this.zombies.getPosition(slot, zpos);
+        const tc = this.scene.cellCenter({ cx: target % tw, cy: Math.floor(target / tw) });
+        // window BETWEEN body and target: (window−body)·(target−window) >= 0 (the path body→window→target runs
+        // roughly straight through, so the body must breach the glass to continue toward what it wants).
+        if ((w.x - zpos[0]) * (tc.x - w.x) + (w.z - zpos[2]) * (tc.z - w.z) >= 0) {
+          attacked = true;
+          break;
+        }
       }
+      if (attacked) underAttack.push(this.windowSystem.cellOf(w.cx, w.cy));
     }
     // Snapshot pre-tick glass so we can fire a shard burst for any pane a zombie actually SMASHES this tick
     // (a board-tear is silent visually — only a glass break throws shards).
