@@ -103,6 +103,39 @@ export const combatConfig = registerDomain('combat', {
     min: 0.1,
     max: 8,
   }),
+  /** T134/V101: weight of the WALL-CLEARANCE repulsion blended into the steering heading (like separation) so
+   *  a body keeps clearance from walls/corners/furniture and threads only the gaps it fits. 0 = off (the bare
+   *  flow+separation steer). Kept modest so it nudges off walls without overpowering the flow toward the target. */
+  steerWallClearanceWeight: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Weight of the wall-clearance repulsion blended into the steering heading (T134/V101). 0 = off.',
+    default: 0.35,
+    min: 0,
+    max: 4,
+  }),
+  /** T134/V101: distance (m) the wall-clearance probe ring is sampled around the body. ~> a cell + the agent
+   *  radius so a wide body senses a wall before its rim clips it. 0 = off. */
+  steerWallClearanceProbeMeters: num({
+    owner: 'combat',
+    unit: 'meters',
+    doc: 'Probe ring distance for the steering wall-clearance repulsion (T134/V101). 0 = off.',
+    default: 1.2,
+    min: 0,
+    max: 8,
+  }),
+  /** T134/V101: max nav-cell rings searched outward when SNAPPING a spawn position that landed on a blocked /
+   *  edge / off-grid cell to the nearest walkable cell centre (a body must never start embedded in a wall).
+   *  A spawn that finds no walkable cell within this many rings is a content error (throws — no silent drop). */
+  spawnSnapMaxCells: num({
+    owner: 'combat',
+    unit: 'cells',
+    doc: 'Max nav-cell rings searched to snap a blocked spawn position to the nearest walkable cell (T134/V101).',
+    default: 24,
+    min: 1,
+    max: 256,
+    integer: true,
+  }),
   /** Available perf budget fed to the tier policy each frame (1 = full; lowers suppress promotions). */
   perfBudget: num({
     owner: 'combat',

@@ -65,6 +65,7 @@ import { CombatSystem, type ShotResult, type DeathImpact } from '@/game/combat';
 import {
   buildTestBlock,
   isWalkableRadius,
+  nearestWalkablePoint,
   segmentCrossesWall,
   levelNavOf,
   gridWalkableRadius,
@@ -285,6 +286,10 @@ export class GameRuntime {
    * (which must shatter the pane first). Built once (no per-call alloc).
    */
   readonly sightScene: LosScene;
+  /** V100: the scene wrapped with the SOUND window predicate — an open/blasted/glassed window passes sound
+   *  HEIGHT-INDEPENDENTLY (unlike `sightScene`, which V87 height-gates), so a gunshot through a window alerts
+   *  the zombies OUTSIDE (not only an open door). The perception sound-occlusion LOS uses this. */
+  readonly soundScene: LosScene;
   /** V85/V86: per nav-cell OCCLUDER HEIGHT (m) for cells blocked by a SOLID prop — the MAX prop height on that
    *  cell. `sightScene` treats such a cell as TRANSPARENT iff its height is below the CURRENT observer eye height
    *  (`playerEyeHeight()`): a standing player sees over a 1 m fence; a crouched one (lower eye) does not — and is
@@ -398,6 +403,14 @@ export class GameRuntime {
         isWindowOpening: (cx, cy) => this.isWindowSeeThrough(cx, cy),
       };
     }
+    // V100: the SOUND scene — sound passes any open/blasted/glassed window (height-INDEPENDENT, unlike sight's
+    // V87 band) so a gunshot through a window alerts the zombies outside, not only an open door. Solid walls /
+    // boarded-shut windows still occlude (→ the ×soundWallOcclusion muffle in the perception sound LOS).
+    this.soundScene = {
+      isWalkableWorld: (x, z) => this.scene.isWalkableWorld(x, z),
+      navGrid: this.scene.navGrid,
+      isWindowOpening: (cx, cy) => this.isWindowSoundOpen(cx, cy),
+    };
 
     const time = resolveDomain(timeConfig, this.tier);
     this.clock = new FixedClock({
@@ -466,6 +479,7 @@ export class GameRuntime {
       spatial: this.spatial,
       scene: this.scene,
       sightScene: this.sightScene, // V83/V84: zombie SIGHT sees THROUGH glassed windows (only a 2-board shut one blocks)
+      soundScene: this.soundScene, // V100: SOUND passes open/blasted/glassed windows (height-independent) → alerts outside zombies
       flowCache: this.flowCache,
       tierManager: this.tierManager,
       stimulus: this.stimulus,
@@ -977,26 +991,33 @@ export class GameRuntime {
    * flashlight clamp consult, so they see/light THROUGH glassed windows but are blocked by a boarded-shut one.
    */
   isWindowSeeThrough(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
-    // (1) is the window see-through BY STATE? (glass-transparent, < 2 boards) — edge-window resolved first, else cell.
-    let stateOpen = false;
-    let edgeResolved = false;
-    if (ncx !== undefined && ncy !== undefined) {
-      const e = this.windowSystem.edgeCellOf(cx, cy, ncx, ncy);
-      if (e >= 0) {
-        stateOpen = this.windowSystem.isSeeThrough(e);
-        edgeResolved = true;
-      }
-    }
-    if (!edgeResolved) {
-      const nav = this.windowSystem.cellOf(cx, cy);
-      stateOpen = nav >= 0 && this.windowSystem.isSeeThrough(nav);
-    }
-    if (!stateOpen) return false;
+    // (1) is the window see-through BY STATE? (glass-transparent, < 2 boards), height-independent.
+    if (!this.windowOpenState(cx, cy, ncx, ncy)) return false;
     // (2) V87 HEIGHT gate — sight passes through the window's vertical OPENING only. The (player-referenced) eye
     // must be within [sill, opening top]; a CROUCHED player whose eye drops below the sill is hidden through the
     // window (and cannot see out of it), a STANDING one is seen. Same dynamic threshold as the see-over (V86).
     const eye = this.playerEyeHeight();
     return eye > this.windowSillBottomMeters && eye < this.windowOpeningTopMeters;
+  }
+
+  /** The window OPEN STATE (boards < BOARDS_TO_CLOSE, glass-independent) at (cx,cy) — edge-window resolved first,
+   *  else the legacy cell-window. NO height gate. The see-through STATE `isWindowSeeThrough` then height-gates
+   *  (V87), and the state SOUND uses directly (V100). */
+  private windowOpenState(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
+    if (ncx !== undefined && ncy !== undefined) {
+      const e = this.windowSystem.edgeCellOf(cx, cy, ncx, ncy);
+      if (e >= 0) return this.windowSystem.isSeeThrough(e);
+    }
+    const nav = this.windowSystem.cellOf(cx, cy);
+    return nav >= 0 && this.windowSystem.isSeeThrough(nav);
+  }
+
+  /** V100: does SOUND pass through this window cell right now? = the open STATE (boards < 2), HEIGHT-INDEPENDENT
+   *  (sound fills the room + passes any open / blasted / glassed window regardless of head height — unlike SIGHT,
+   *  which V87 height-gates to the opening band). A boarded-shut (2-board) window muffles. The perception sound
+   *  LOS uses this so firing through a blasted window alerts the zombies OUTSIDE, not only an open door. */
+  isWindowSoundOpen(cx: number, cy: number, ncx?: number, ncy?: number): boolean {
+    return this.windowOpenState(cx, cy, ncx, ncy);
   }
 
   /** The window NEAREST the player within interaction reach, or null. */
@@ -1598,12 +1619,17 @@ export class GameRuntime {
    */
   spawnZombie(position: Vec3, archetypeId = 0): EntityId {
     const entity = this.ids.next<EntityId>('entity');
+    // T134/V101: a spawn position that resolves onto a blocked / edge / off-grid cell (a wall, solid furniture,
+    // the sealed exterior) can never move — every step clips, so the body stands embedded forever. SNAP it to
+    // the nearest radius-walkable cell centre (deterministic, V26). A clear position (the scatterWalkable path,
+    // which already resamples to a walkable point) is returned unchanged → no-op for the common spawn path.
+    const snapped = nearestWalkablePoint(this.scene, position.x, position.z, this.collision.defaultAgentRadius, this.combatCfg.spawnSnapMaxCells);
     this.placeZombie(entity, {
       entity: entity as number,
       archetype: archetypeId,
-      x: position.x,
+      x: snapped.x,
       y: position.y,
-      z: position.z,
+      z: snapped.z,
       heading: 0,
       state: 0,
       health: this.archetypes.byIndexOf(archetypeId).durability.health,

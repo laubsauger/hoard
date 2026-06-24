@@ -230,6 +230,41 @@ export function isWalkableRadius(
 }
 
 /**
+ * Snap a spawn position to the NEAREST radius-walkable cell centre (T134/V101). A body spawned onto a blocked /
+ * edge / off-grid cell (a wall, solid furniture, the sealed exterior) can never move — every step clips, so it
+ * stands embedded in the wall forever. This searches Chebyshev rings OUTWARD from the position's cell and
+ * returns the first cell centre that fits a body of radius `r` (radius-aware, so a wide body lands somewhere it
+ * actually clears). A position already clear is returned UNCHANGED (the common scatter-spawn path is a no-op).
+ * Deterministic (pure fn of scene + position, no RNG — V26): within a ring the scan order is fixed (rows ascend,
+ * columns ascend) so a replay snaps to the same cell. Throws if no walkable cell lies within `maxRings` (a
+ * content error — never a silent drop).
+ */
+export function nearestWalkablePoint(
+  scene: Pick<TestBlock, 'isWalkableWorld' | 'cellCenter'> & { readonly navGrid: NavGrid },
+  x: number,
+  z: number,
+  r: number,
+  maxRings: number,
+): { x: number; z: number } {
+  if (isWalkableRadius(scene, x, z, r)) return { x, z };
+  const grid = scene.navGrid;
+  const { cx, cy } = grid.worldToCell(x, z);
+  for (let ring = 1; ring <= maxRings; ring++) {
+    for (let dy = -ring; dy <= ring; dy++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue; // ring boundary cells only
+        const ncx = cx + dx;
+        const ncy = cy + dy;
+        if (ncx < 0 || ncy < 0 || ncx >= grid.width || ncy >= grid.height) continue;
+        const c = scene.cellCenter({ cx: ncx, cy: ncy });
+        if (isWalkableRadius(scene, c.x, c.z, r)) return { x: c.x, z: c.z };
+      }
+    }
+  }
+  throw new Error(`nearestWalkablePoint: no walkable cell within ${maxRings} rings of (${x.toFixed(2)},${z.toFixed(2)})`);
+}
+
+/**
  * The scene's level stack as a `LevelNav` (P3). Returns the scene's own `levelNav` when present (a 2-storey
  * district), else wraps the single `navGrid` as a one-level nav so callers have ONE code path. A single-level
  * result routes byte-identically to the bare grid (LevelNav level-0 offset is 0, zero stair links).

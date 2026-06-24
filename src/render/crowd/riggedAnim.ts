@@ -38,6 +38,9 @@ export interface ClipStateMap {
   readonly attack: string;
   readonly stagger: string;
   readonly down: string;
+  /** True when `idle` is a LOCOMOTION clip used as a FALLBACK (the GLB ships no real idle) — the idle pose must be
+   *  FROZEN on a held frame, else the body "runs/walks on the spot" while standing still (V96 asset limitation). */
+  readonly idleFrozen?: boolean;
 }
 
 /**
@@ -50,7 +53,7 @@ export const CLIP_MAPS: Readonly<Record<ArchetypeKey, ClipStateMap>> = {
   // standard: Idle_9 / Walking / Unsteady_Walk / Running / run_fast_8 / Zombie_Scream / Hit_Reaction_to_Waist
   standard: { idle: 'Idle_9', wander: 'Walking', pursue: 'Running', attack: 'Zombie_Scream', stagger: 'Hit_Reaction_to_Waist', down: 'Idle_9' },
   // runner: Casual_Walk / Walking / Running / run_fast_2 (no idle/hit/scream clip)
-  runner: { idle: 'Casual_Walk', wander: 'Walking', pursue: 'run_fast_2', attack: 'Running', stagger: 'Walking', down: 'Casual_Walk' },
+  runner: { idle: 'Casual_Walk', wander: 'Walking', pursue: 'run_fast_2', attack: 'Running', stagger: 'Walking', down: 'Casual_Walk', idleFrozen: true },
   // bloated: Idle_5 / Idle_9 / Slow_Orc_Walk / Unsteady_Walk / Walking / Running (no hit/scream clip)
   bloated: { idle: 'Idle_5', wander: 'Slow_Orc_Walk', pursue: 'Running', attack: 'Unsteady_Walk', stagger: 'Unsteady_Walk', down: 'Idle_9' },
 };
@@ -148,6 +151,13 @@ export const MAX_GAIT_RATE_HZ = 4;
 /** Whether a ZombieState is LOCOMOTION (the gait cadence should track ground speed) vs a stationary/one-off pose. */
 export function isLocomotionState(state: number): boolean {
   return state === ZombieState.Wander || state === ZombieState.Pursue;
+}
+
+/** True when the body must HOLD a frozen pose this frame instead of cycling its clip — an archetype with NO real
+ *  idle clip (`idleFrozen`, e.g. the runner whose idle falls back to Casual_Walk) that is currently Idle. Without
+ *  this it "walks/runs on the spot" while standing still. Pure. */
+export function isFrozenIdle(map: ClipStateMap, state: number): boolean {
+  return state === ZombieState.Idle && map.idleFrozen === true;
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   phaseToFrameRow,
   clipPhaseRateHz,
   advancePhase,
+  isFrozenIdle,
   isLocomotionState,
   locomotionRateHz,
   MAX_GAIT_RATE_HZ,
@@ -45,9 +46,17 @@ describe('CLIP_MAPS', () => {
       const map = CLIP_MAPS[key];
       const available = GLB_CLIPS[key]!;
       for (const state of Object.values(map)) {
+        if (typeof state !== 'string') continue; // skip non-clip-name flags (e.g. idleFrozen)
         expect(available, `${key}:${state}`).toContain(state);
       }
     }
+  });
+
+  it('freezes the RUNNER idle (no real idle clip → Casual_Walk fallback) but not standard/bloated', () => {
+    expect(isFrozenIdle(CLIP_MAPS.runner, ZombieState.Idle)).toBe(true); // would otherwise walk on the spot
+    expect(isFrozenIdle(CLIP_MAPS.standard, ZombieState.Idle)).toBe(false); // has Idle_9
+    expect(isFrozenIdle(CLIP_MAPS.bloated, ZombieState.Idle)).toBe(false); // has Idle_5
+    expect(isFrozenIdle(CLIP_MAPS.runner, ZombieState.Wander)).toBe(false); // only Idle freezes; moving cycles
   });
 
   it('clipForState routes each ZombieState to the configured clip', () => {

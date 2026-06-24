@@ -241,11 +241,11 @@ export const impactFields = {
   impactWoundSizeMeters: num({
     owner: 'rendering',
     unit: 'meters',
-    doc: 'Diameter of a dark wound mark stamped at the struck region of a body (T81/V57).',
-    default: 0.16,
+    doc: 'Diameter of a dark wound mark stamped at the struck region of a body (T81/V57). Trimmed (was 0.16): on the rigged zombie the old size read as a HUGE plump blotch; a small dark nick reads as a wound, not a paint splat.',
+    default: 0.1,
     min: 0.02,
     max: 1,
-    tiers: { 'desktop-high': 0.18, 'mobile-webgpu': 0.13 },
+    tiers: { 'desktop-high': 0.11, 'mobile-webgpu': 0.08 },
   }),
   impactWoundLifeSeconds: num({
     owner: 'rendering',

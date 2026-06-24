@@ -11,4 +11,12 @@ export {
   type LevelMove,
 } from './levelNav';
 export { RegionGraph, type Portal } from './regionGraph';
-export { steer, combineSteer, type SteerInputs, type SteerResult } from './steering';
+export {
+  steer,
+  combineSteer,
+  sampleFlowDirection,
+  wallClearanceBias,
+  type SteerInputs,
+  type SteerResult,
+  type Vec2,
+} from './steering';

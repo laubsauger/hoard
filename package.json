@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "Ho(a)rdish by Nature — cinematic isometric zombie-survival game.",
+  "description": "Hoard — cinematic isometric zombie-survival game.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

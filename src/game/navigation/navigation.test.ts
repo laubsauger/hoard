@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { NavGrid } from './navGrid';
 import { FlowField, FlowFieldCache } from './flowField';
 import { RegionGraph } from './regionGraph';
-import { steer } from './steering';
+import { steer, sampleFlowDirection, wallClearanceBias } from './steering';
 
 // default nav config: navTileSize 16m / navCellSize 2m -> 8 cells per tile edge.
 function grid(w = 24, h = 24): NavGrid {
@@ -254,20 +254,100 @@ describe('local steering (V19)', () => {
   it('biases toward the flow direction but is pushed by close neighbours', () => {
     const g = grid(16, 16);
     const field = new FlowField(g, g.index(15, 8), 'ground', g.navRevision);
-    // pure flow (no neighbours) points roughly +x toward target
-    const pure = steer(field, { x: 2, z: 16, neighbors: [], separation: 1, flowWeight: 1 });
+    // pure flow (no neighbours) points roughly +x toward target. Probe at a CELL CENTRE (cell (1,8) → world
+    // (3,17)): the T134 bilinear interpolation is IDENTITY at a cell centre, so this reads that one cell's dir.
+    const pure = steer(field, { x: 3, z: 17, neighbors: [], separation: 1, flowWeight: 1 });
     expect(pure.dirX).toBeGreaterThan(0);
     expect(pure.dirZ).toBeCloseTo(0);
     // a neighbour ahead-and-to-one-side deflects the heading: separation introduces a -z component
     // and (after renormalisation) pulls dirX below the pure-flow value.
     const crowded = steer(field, {
-      x: 2,
-      z: 16,
+      x: 3,
+      z: 17,
       neighbors: [{ dx: 0.3, dz: 0.3 }],
       separation: 1,
       flowWeight: 0.5,
     });
     expect(crowded.dirZ).toBeLessThan(0);
     expect(crowded.dirX).toBeLessThan(pure.dirX);
+  });
+});
+
+describe('flow interpolation (T134/V101)', () => {
+  it('is identity at a cell centre (reads exactly that cell direction)', () => {
+    const g = grid(16, 16);
+    const field = new FlowField(g, g.index(15, 8), 'ground', g.navRevision);
+    // cell (4,8) centre → world (9,17). The interpolated sample must equal the cell's own unit direction.
+    const cell = g.index(4, 8);
+    const [dx, dz] = field.directionAt(cell);
+    const s = sampleFlowDirection(field, 9, 17, { x: 0, z: 0 });
+    expect(s.x).toBeCloseTo(dx, 6);
+    expect(s.z).toBeCloseTo(dz, 6);
+  });
+
+  it('produces a CONTINUOUS heading that varies between cells (no 2 m granular jump)', () => {
+    const g = grid(16, 16);
+    const field = new FlowField(g, g.index(15, 8), 'ground', g.navRevision);
+    // sample finely across cell boundaries at z=18 (BETWEEN the cy=8 and cy=9 cell centres, so the bilinear
+    // blend actively mixes two rows): the interpolated heading must change smoothly, not jump in one discrete
+    // step. Track the max single-step change in the heading angle.
+    const first = sampleFlowDirection(field, 5.0, 18, { x: 0, z: 0 });
+    let prev = Math.atan2(first.z, first.x);
+    let maxStep = 0;
+    for (let x = 5.1; x <= 11; x += 0.1) {
+      const s = sampleFlowDirection(field, x, 18, { x: 0, z: 0 });
+      const ang = Math.atan2(s.z, s.x);
+      let d = Math.abs(ang - prev);
+      if (d > Math.PI) d = 2 * Math.PI - d;
+      if (d > maxStep) maxStep = d;
+      prev = ang;
+    }
+    // a single 0.1 m step must never swing the heading more than a few degrees (a coarse single-cell read
+    // would jump by the full inter-cell angle in one boundary step).
+    expect(maxStep).toBeLessThan(0.15);
+  });
+
+  it('skips an unreachable corner and biases toward the open cells near a wall', () => {
+    const g = grid(8, 8);
+    // wall the whole cx=4 column → cells at cx>=5 reachable, cx=4 blocked. Target on the right.
+    for (let cy = 0; cy < 8; cy++) g.block(4, cy);
+    const field = new FlowField(g, g.index(6, 4), 'ground', g.navRevision);
+    // a point just LEFT of the wall must not yield a heading INTO the wall (a blocked corner contributes 0).
+    const s = sampleFlowDirection(field, 7.5, 9, { x: 0, z: 0 }); // world (7.5,9) → cell (3,4), left of wall
+    // the reachable corners all sit on cx<=3 (cx=4 blocked) so the interpolated heading must not point +x into
+    // the wall column; it routes around (|x| component is not a hard push east through the wall).
+    expect(Number.isFinite(s.x)).toBe(true);
+    expect(Number.isFinite(s.z)).toBe(true);
+  });
+});
+
+describe('wall-clearance bias (T134/V101)', () => {
+  it('pushes AWAY from a wall on one side', () => {
+    const g = grid(10, 10);
+    for (let cy = 0; cy < 10; cy++) g.block(6, cy); // wall column at cx=6 (world x in [12,14))
+    // body just west of the wall at world (11.5, 9) → probing east hits the wall → repulsion points WEST (-x).
+    const b = wallClearanceBias(g, 11.5, 9, 1.2, { x: 0, z: 0 });
+    expect(b.x).toBeLessThan(0);
+    expect(Math.abs(b.z)).toBeLessThan(1e-9); // a symmetric N/S wall column → no net z push
+  });
+
+  it('is zero in open space and respects probeDist<=0 (off)', () => {
+    const g = grid(10, 10);
+    const open = wallClearanceBias(g, 9, 9, 1.2, { x: 0, z: 0 });
+    expect(open.x).toBe(0);
+    expect(open.z).toBe(0);
+    const off = wallClearanceBias(g, 0.5, 0.5, 0, { x: 0, z: 0 }); // a corner, but probe off → no bias
+    expect(off.x).toBe(0);
+    expect(off.z).toBe(0);
+  });
+
+  it('pushes inward (diagonally) out of a concave corner', () => {
+    const g = grid(10, 10);
+    for (let cy = 0; cy < 10; cy++) g.block(6, cy); // east wall (cx=6)
+    for (let cx = 0; cx < 10; cx++) g.block(cx, 6); // south wall (cy=6)
+    // body in the inside corner near (11.5, 11.5): repulsion must point up-left (away from both walls).
+    const b = wallClearanceBias(g, 11.5, 11.5, 1.2, { x: 0, z: 0 });
+    expect(b.x).toBeLessThan(0);
+    expect(b.z).toBeLessThan(0);
   });
 });

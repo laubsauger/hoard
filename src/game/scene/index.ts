@@ -3,6 +3,7 @@
 export {
   buildTestBlock,
   isWalkableRadius,
+  nearestWalkablePoint,
   levelNavOf,
   gridWalkableWorld,
   gridWalkableRadius,

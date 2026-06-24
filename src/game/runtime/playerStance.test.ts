@@ -63,5 +63,12 @@ describe('player crouch stance + eye height (V86)', () => {
     // back up to standing → seen again (no latching).
     rt.setCrouch(false);
     expect(rt.isWindowSeeThrough(win.cx, win.cy)).toBe(true);
+
+    // V100: SOUND is HEIGHT-INDEPENDENT — an open window passes the gunshot regardless of stance, so a crouched
+    // player firing through a blasted window still alerts the zombies outside (sight is height-gated, sound is not).
+    rt.setCrouch(false);
+    expect(rt.isWindowSoundOpen(win.cx, win.cy)).toBe(true);
+    rt.setCrouch(true);
+    expect(rt.isWindowSoundOpen(win.cx, win.cy)).toBe(true); // crouch does NOT mute the window for sound
   });
 });

@@ -44,7 +44,7 @@ import { regionImpactHeight, type RegionHeights } from './combatFeedback';
 const HOLE_COLOR = new Color(0.05, 0.05, 0.055);
 // Wound on a body: a dark maroon mark (much darker than fresh blood spray so it reads as a torn entry wound,
 // not a splatter). Still on the red axis but very dark — it sits ON the body, paired with the bright blood jet.
-const WOUND_COLOR = new Color(0.14, 0.018, 0.018);
+const WOUND_COLOR = new Color(0.08, 0.01, 0.01); // dark dried-blood nick — was 0.14 (read too BRIGHT on the dark rigged zombie)
 
 export interface ImpactSettings {
   readonly sparkPoolSize: number;

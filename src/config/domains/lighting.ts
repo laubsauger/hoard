@@ -272,8 +272,8 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightHeightMeters: num({
     owner: 'lighting',
     unit: 'meters',
-    doc: 'Height above the ground the flashlight is mounted (chest/torch height) so the cone rakes forward across the ground. Lowered slightly (B44) so the beam meets the floor closer to the feet (less dead zone right in front).',
-    default: 1.05,
+    doc: 'Height above the ground the flashlight is mounted (chest/torch height). 1.35 (raised from the B44 1.05): high enough to shine IN/OUT of windows (above the ~0.9 m sill) and OVER low furniture, while the near-ground AIM (flashlightAimGroundDistanceMeters) still rakes the cone down to light the floor at the feet — so no feet dead-zone returns.',
+    default: 1.35,
     min: 0.1,
     max: 4,
   }),

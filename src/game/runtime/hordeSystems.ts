@@ -18,6 +18,7 @@ import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/g
 import {
   steer,
   combineSteer,
+  wallClearanceBias,
   resolveLevelMove,
   LevelNav,
   LevelFlowFieldCache,
@@ -50,6 +51,40 @@ import {
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
+
+/**
+ * Deterministic STUCK-ESCAPE fan (T134/V101): when the desired flow step AND both axis-slides are blocked, the
+ * body rotates its desired heading by these signed angle offsets — tried in this FIXED order (nearest the
+ * desired heading first, alternating sides) — and takes the first that yields a radius-walkable, non-wall-
+ * crossing step. This wall-FOLLOWS the body around a corner / out of a pocket instead of freezing it against
+ * the wall. Precomputed cos/sin → no per-tick trig or allocation (V24); a fixed small set (V26).
+ */
+const ESCAPE_FAN_DEGREES: readonly number[] = [30, -30, 60, -60, 90, -90];
+export const STUCK_ESCAPE_FAN: readonly { cos: number; sin: number }[] = ESCAPE_FAN_DEGREES.map((deg) => {
+  const a = (deg * Math.PI) / 180;
+  return { cos: Math.cos(a), sin: Math.sin(a) };
+});
+
+/**
+ * PURE stuck-escape selection (T134/V101): rotate the desired unit heading (dirX,dirZ) by each fan offset in
+ * order and return the FIRST rotated heading the `isClear(edx,edz)` predicate accepts, or null if every fan
+ * direction is blocked (a genuine dead-end → the caller stops). The rotation preserves unit length (cos/sin of
+ * a unit vector), so the chosen heading drives the same locomotion speed. Deterministic — pure fn of the inputs
+ * + the fixed fan (V26). Exposed for unit testing the selection against a blocked fan.
+ */
+export function selectEscapeDir(
+  dirX: number,
+  dirZ: number,
+  isClear: (edx: number, edz: number) => boolean,
+): { dirX: number; dirZ: number } | null {
+  for (let i = 0; i < STUCK_ESCAPE_FAN.length; i++) {
+    const r = STUCK_ESCAPE_FAN[i]!;
+    const edx = dirX * r.cos - dirZ * r.sin;
+    const edz = dirX * r.sin + dirZ * r.cos;
+    if (isClear(edx, edz)) return { dirX: edx, dirZ: edz };
+  }
+  return null;
+}
 
 /** Strips readonly so pooled penetration-resolution agents can be re-filled in place across ticks. */
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -100,6 +135,13 @@ export interface HordeSimulationDeps {
    * term) or movement collision (windows never alter nav, V68).
    */
   readonly sightScene: LosScene;
+  /**
+   * V100: the SOUND scene (GameRuntime.soundScene) — like `sightScene` but the window predicate is HEIGHT-
+   * INDEPENDENT (an open/blasted/glassed window passes sound regardless of head height, unlike V87 sight). The
+   * perception SOUND occlusion (`loudestHeardSound*`) uses this so a gunshot through a window alerts the zombies
+   * outside, not only an open door.
+   */
+  readonly soundScene: LosScene;
   readonly flowCache: FlowFieldCache;
   readonly tierManager: TierManager;
   readonly stimulus: StimulusField;
@@ -227,6 +269,8 @@ export class HordeSimulation {
     const jitterAmt = combatCfg.hordeMoveSpeedJitter; // per-slot ± spread so the crowd isn't homogeneous
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
+    const wallWeight = combatCfg.steerWallClearanceWeight; // T134/V101: bias the heading off nearby walls
+    const wallProbe = combatCfg.steerWallClearanceProbeMeters;
     const pos: [number, number, number] = [0, 0, 0];
     // Arrival: once within this radius of the target, STOP steering so the body settles at the ring instead
     // of piling into the target and fighting the separation pass each tick (the jitter, V19/V35).
@@ -290,19 +334,30 @@ export class HordeSimulation {
         const a = spatial.get(id);
         return { dx: a.x - pos[0], dz: a.z - pos[2] };
       });
-      const { dirX, dirZ } = steer(field, { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight });
+      const { dirX, dirZ } = steer(field, {
+        x: pos[0],
+        z: pos[2],
+        neighbors,
+        separation: sep,
+        flowWeight,
+        wallClearanceProbe: wallProbe, // T134/V101: smooth interpolated heading + wall-clearance bias
+        wallClearanceWeight: wallWeight,
+      });
       if (dirX === 0 && dirZ === 0) {
         zombies.setVelocity(slot, 0, 0, 0);
         return;
       }
-      const nx = pos[0] + dirX * effSpeed * dt;
-      const nz = pos[2] + dirZ * effSpeed * dt;
+      const step = effSpeed * dt;
+      const nx = pos[0] + dirX * step;
+      const nz = pos[2] + dirZ * step;
       // T58/V42: radius-aware static collision + wall-slide so a body never clips half into a wall. The
       // edge-wall test additionally rejects a step that would cross an interior partition between two walkable
       // cells (the flow field already routes the body to the doorway; this stops the final-step clip-through).
       const grid = scene.navGrid;
       let mx = pos[0];
       let mz = pos[2];
+      let headX = dirX;
+      let headZ = dirZ;
       let moved = false;
       if (isWalkableRadius(scene, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
         mx = nx;
@@ -314,11 +369,30 @@ export class HordeSimulation {
       } else if (isWalkableRadius(scene, pos[0], nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], pos[0], nz)) {
         mz = nz;
         moved = true;
+      } else {
+        // T134/V101: desired flow step + BOTH axis-slides blocked → STUCK. Rotate the heading off-axis through
+        // the deterministic escape fan (inlined for the rare stuck body — no per-tick closure, V24) and take
+        // the first clear step, so the body wall-FOLLOWS around the corner / out of the pocket, never freezing.
+        for (let i = 0; i < STUCK_ESCAPE_FAN.length; i++) {
+          const r = STUCK_ESCAPE_FAN[i]!;
+          const edx = dirX * r.cos - dirZ * r.sin;
+          const edz = dirX * r.sin + dirZ * r.cos;
+          const ex = pos[0] + edx * step;
+          const ez = pos[2] + edz * step;
+          if (isWalkableRadius(scene, ex, ez, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], ex, ez)) {
+            mx = ex;
+            mz = ez;
+            headX = edx;
+            headZ = edz;
+            moved = true;
+            break;
+          }
+        }
       }
       if (moved) {
         zombies.setPosition(slot, mx, pos[1], mz);
-        zombies.setHeading(slot, Math.atan2(dirZ, dirX));
-        zombies.setVelocity(slot, dirX * effSpeed, 0, dirZ * effSpeed);
+        zombies.setHeading(slot, Math.atan2(headZ, headX));
+        zombies.setVelocity(slot, headX * effSpeed, 0, headZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {
         zombies.setVelocity(slot, 0, 0, 0);
@@ -395,6 +469,8 @@ export class HordeSimulation {
     const jitterAmt = combatCfg.hordeMoveSpeedJitter; // per-slot ± spread so the crowd isn't homogeneous
     const sep = combatCfg.steerSeparationMeters;
     const flowWeight = combatCfg.steerFlowWeight;
+    const wallWeight = combatCfg.steerWallClearanceWeight; // T134/V101: mirror the wall-clearance + escape fix
+    const wallProbe = combatCfg.steerWallClearanceProbeMeters;
     const pos: [number, number, number] = [0, 0, 0];
     const arriveR2 = combatCfg.hordeArriveRadiusMeters * combatCfg.hordeArriveRadiusMeters;
 
@@ -470,16 +546,29 @@ export class HordeSimulation {
         const a = spatial.get(id);
         return { dx: a.x - pos[0], dz: a.z - pos[2] };
       });
-      const { dirX, dirZ } = combineSteer(move.flowX, move.flowZ, { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight });
+      const grid = nav.grid(level);
+      // T134/V101: wall-clearance bias on THIS level's grid (resolveLevelMove already supplies the flow vector;
+      // the bilinear interpolation is single-floor-only — it routes through `steer`, which this path bypasses).
+      const wb = wallWeight > 0 && wallProbe > 0 ? wallClearanceBias(grid, pos[0], pos[2], wallProbe) : null;
+      const { dirX, dirZ } = combineSteer(
+        move.flowX,
+        move.flowZ,
+        { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight },
+        wb?.x ?? 0,
+        wb?.z ?? 0,
+        wb ? wallWeight : 0,
+      );
       if (dirX === 0 && dirZ === 0) {
         zombies.setVelocity(slot, 0, 0, 0);
         return;
       }
-      const nx = pos[0] + dirX * effSpeed * dt;
-      const nz = pos[2] + dirZ * effSpeed * dt;
-      const grid = nav.grid(level);
+      const step = effSpeed * dt;
+      const nx = pos[0] + dirX * step;
+      const nz = pos[2] + dirZ * step;
       let mx = pos[0];
       let mz = pos[2];
+      let headX = dirX;
+      let headZ = dirZ;
       let moved = false;
       if (gridWalkableRadius(grid, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
         mx = nx;
@@ -491,11 +580,28 @@ export class HordeSimulation {
       } else if (gridWalkableRadius(grid, pos[0], nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], pos[0], nz)) {
         mz = nz;
         moved = true;
+      } else {
+        // T134/V101: STUCK on this level → the same deterministic escape fan wall-follows around the corner.
+        for (let i = 0; i < STUCK_ESCAPE_FAN.length; i++) {
+          const r = STUCK_ESCAPE_FAN[i]!;
+          const edx = dirX * r.cos - dirZ * r.sin;
+          const edz = dirX * r.sin + dirZ * r.cos;
+          const ex = pos[0] + edx * step;
+          const ez = pos[2] + edz * step;
+          if (gridWalkableRadius(grid, ex, ez, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], ex, ez)) {
+            mx = ex;
+            mz = ez;
+            headX = edx;
+            headZ = edz;
+            moved = true;
+            break;
+          }
+        }
       }
       if (moved) {
         zombies.setPosition(slot, mx, pos[1], mz);
-        zombies.setHeading(slot, Math.atan2(dirZ, dirX));
-        zombies.setVelocity(slot, dirX * effSpeed, 0, dirZ * effSpeed);
+        zombies.setHeading(slot, Math.atan2(headZ, headX));
+        zombies.setVelocity(slot, headX * effSpeed, 0, headZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {
         zombies.setVelocity(slot, 0, 0, 0);
@@ -784,7 +890,7 @@ export class HordeSimulation {
    * (no field can be built to it). Ties break to the lower cell index (deterministic, V12/V26).
    */
   private loudestHeardSoundCell(x: number, z: number, tick: number): number {
-    const { stimulus, scene, sightScene, perception } = this.d;
+    const { stimulus, scene, soundScene, perception } = this.d;
     const navGrid = scene.navGrid;
     const threshold = perception.alertIntensityThreshold;
     const hits = stimulus.query(x, z, tick);
@@ -792,10 +898,11 @@ export class HordeSimulation {
     let bestIntensity = -1;
     for (const h of hits) {
       if (h.stimulus.kind !== 'sound') continue;
-      // V98: SOUND occlusion is WINDOW-AWARE — an OPEN window (or doorway) lets the sound through UNMUFFLED, like
-      // a clear LOS, so firing out an open window alerts the zombies outside exactly as opening the door does. A
-      // solid wall / boarded-shut window muffles it (×soundWallOcclusion). Use the same see-through scene sight uses.
-      const occluded = !hasLineOfSight(sightScene, h.stimulus.x, h.stimulus.z, x, z);
+      // V98/V100: SOUND occlusion is WINDOW-AWARE on the HEIGHT-INDEPENDENT `soundScene` — an open / blasted /
+      // glassed window (or doorway) lets the shot through UNMUFFLED regardless of head height (sight's V87 band
+      // does NOT apply to sound), so firing out a window alerts the zombies outside, not only an open door. A
+      // solid wall / boarded-shut window still muffles (×soundWallOcclusion).
+      const occluded = !hasLineOfSight(soundScene, h.stimulus.x, h.stimulus.z, x, z);
       const intensity = occluded ? h.intensity * perception.soundWallOcclusion : h.intensity;
       if (intensity < threshold) continue;
       const c = navGrid.worldToCell(h.stimulus.x, h.stimulus.z);
@@ -818,7 +925,7 @@ export class HordeSimulation {
    * sounds keep the in-plane wall occlusion (V28). All levels share the cell dims, so the XZ cell index is common.
    */
   private loudestHeardSoundGlobal(x: number, z: number, hearerLevel: number, tick: number): number {
-    const { stimulus, sightScene, perception } = this.d;
+    const { stimulus, soundScene, perception } = this.d;
     const nav = this.nav;
     const threshold = perception.alertIntensityThreshold;
     const floorAtt = perception.soundThroughFloorAttenuation;
@@ -833,8 +940,8 @@ export class HordeSimulation {
       // path; for a cross-floor sound the floor factor models the stairwell bleed.
       let intensity = h.intensity;
       if (floors === 0) {
-        // V98: window-aware (open window/door passes sound unmuffled) — same see-through scene sight uses.
-        if (!hasLineOfSight(sightScene, h.stimulus.x, h.stimulus.z, x, z)) intensity *= perception.soundWallOcclusion;
+        // V98/V100: window-aware on the height-independent soundScene (open/blasted/glassed window passes sound).
+        if (!hasLineOfSight(soundScene, h.stimulus.x, h.stimulus.z, x, z)) intensity *= perception.soundWallOcclusion;
       } else {
         intensity *= Math.pow(floorAtt, floors);
       }
