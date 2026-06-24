@@ -24,7 +24,7 @@ const SQRT2 = Math.SQRT2;
 /** Binary min-heap over (key=distance, val=cell) on parallel arrays — the Dijkstra frontier. Replaces the
  *  old O(N²) linear-scan + `includes` frontier that froze the frame when a flow field recomputed (e.g. a
  *  gunshot retargeting the horde lure). Lazy deletion: stale entries are skipped on pop. O(N log N). */
-class MinHeap {
+export class MinHeap {
   private readonly keys: number[] = [];
   private readonly vals: number[] = [];
   get size(): number {
