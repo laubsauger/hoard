@@ -4,13 +4,28 @@
 
 import { Group, Mesh, PlaneGeometry } from 'three';
 import type { MeshStandardMaterial } from 'three';
-import { buildingsOf, type GroundKind } from '../../../game/scene';
+import { buildingsOf, type GroundKind, type RoomType } from '../../../game/scene';
 import { worldExtent, type BuildContext } from './buildContext';
 
 export interface GroundConfig {
   /** Y of the per-building interior floor slab (so rooms read above the base ground). */
   readonly floorThicknessMeters: number;
 }
+
+/** Per-room-type FLOOR tint (P1c). Kitchen/bath read as cool tile; bedroom/living/dining as warm carpet/wood;
+ *  garage/laundry as concrete; hall/closet neutral wood. Distinct flat colours so each room reads as its own
+ *  space in the cutaway — no texture files, pure material (V4 named consts, no magic numbers in logic). */
+const ROOM_FLOOR_COLOR: Record<RoomType, number> = {
+  kitchen: 0x9aa7a3, // light cool tile
+  bathroom: 0xa7b0b5, // cool tile
+  bedroom: 0x7a6552, // warm carpet
+  living: 0x8a6a45, // warm wood
+  dining: 0x7d5d3c, // wood
+  hall: 0x6f6052, // neutral wood
+  garage: 0x595a57, // bare concrete
+  closet: 0x6b5a48, // wood
+  laundry: 0x8f9690, // utility tile
+};
 
 export function buildGround(ctx: BuildContext, cfg: GroundConfig): void {
   const { root, res, town, navCellSize } = ctx;
@@ -26,10 +41,40 @@ export function buildGround(ctx: BuildContext, cfg: GroundConfig): void {
   ground.receiveShadow = true;
   root.add(ground);
 
-  // Per-building interior floor slab — slightly raised + lighter so each house's rooms read (multi-building).
+  // Per-building interior floor slab. For a templated house (P1c) the slab is SPLIT PER ROOM, each tinted by its
+  // RoomType so the cutaway reveals each room as its own space; non-templated buildings keep one neutral slab.
   const floorMat = res.mat('floor', { color: 0x6b6e64, roughness: 0.9 });
+  const roomFloorMat: Partial<Record<RoomType, MeshStandardMaterial>> = {};
   buildingsOf(town).forEach((bld, i) => {
     const b = bld.bounds;
+    const house = town.placedHouses?.[i];
+    if (house) {
+      // group the house's cells into per-room inclusive rects, then one tinted quad per room.
+      const rects = new Map<number, { minCx: number; minCy: number; maxCx: number; maxCy: number; type: RoomType }>();
+      for (const rc of house.rooms) {
+        const r = rects.get(rc.roomId);
+        if (!r) rects.set(rc.roomId, { minCx: rc.cx, minCy: rc.cy, maxCx: rc.cx, maxCy: rc.cy, type: rc.type });
+        else {
+          r.minCx = Math.min(r.minCx, rc.cx);
+          r.minCy = Math.min(r.minCy, rc.cy);
+          r.maxCx = Math.max(r.maxCx, rc.cx);
+          r.maxCy = Math.max(r.maxCy, rc.cy);
+        }
+      }
+      for (const [roomId, r] of rects) {
+        const mat =
+          roomFloorMat[r.type] ??
+          (roomFloorMat[r.type] = res.mat(`floor.room.${r.type}`, { color: ROOM_FLOOR_COLOR[r.type], roughness: 0.92 }));
+        const fw = (r.maxCx - r.minCx + 1) * navCellSize;
+        const fd = (r.maxCy - r.minCy + 1) * navCellSize;
+        const floor = new Mesh(res.geo(`floor.geo.${i}.${roomId}`, new PlaneGeometry(fw, fd)), mat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set(((r.minCx + r.maxCx + 1) / 2) * navCellSize, cfg.floorThicknessMeters, ((r.minCy + r.maxCy + 1) / 2) * navCellSize);
+        floor.receiveShadow = true;
+        root.add(floor);
+      }
+      return;
+    }
     const fw = (b.maxCx - b.minCx + 1) * navCellSize;
     const fd = (b.maxCy - b.minCy + 1) * navCellSize;
     const floor = new Mesh(res.geo(`floor.geo.${i}`, new PlaneGeometry(fw, fd)), floorMat);

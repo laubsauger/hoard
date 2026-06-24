@@ -48,6 +48,7 @@ import { passiveRadiusFromAmbient } from '../world/passiveAwareness';
 import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { buildProps } from './builders/propsBuilder';
 import { buildContainers } from './builders/containersBuilder';
+import { buildFurniture } from './builders/furnitureBuilder';
 import { buildPlayer } from './builders/playerBuilder';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
@@ -373,6 +374,9 @@ export class BlockScene {
       cupboardDepthMeters: this.structures.cupboardDepthMeters,
       floorThicknessMeters: this.world.floorThicknessMeters,
     });
+    // P1c: furniture meshes (interior content — revealed by the cutaway, NOT a fade surface). Stands on the
+    // per-room floor slab; one InstancedMesh per colour keeps the whole street's furniture draw-call cheap.
+    buildFurniture(this.buildCtx(), { floorThicknessMeters: this.world.floorThicknessMeters });
     const playerHandles = buildPlayer(this.buildCtx(), {
       bodyRadiusMeters: this.player.bodyRadiusMeters,
       bodyHeightMeters: this.player.bodyHeightMeters,
