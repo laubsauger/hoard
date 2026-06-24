@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { NavGrid } from './navGrid';
 import { FlowField } from './flowField';
-import { LevelNav, LevelFlowField, LevelFlowFieldCache } from './levelNav';
+import { LevelNav, LevelFlowField, LevelFlowFieldCache, resolveLevelMove } from './levelNav';
 
 function grid(w: number, h: number): NavGrid {
   return new NavGrid({ width: w, height: h });
@@ -138,6 +138,67 @@ describe('LevelFlowField traverses stair links across levels', () => {
     // level 0 fully reachable; level 1 entirely unreachable (no portal).
     expect(f.isReachable(0, g0.index(0, 0))).toBe(true);
     for (let cell = 0; cell < g1.cellCount; cell++) expect(f.isReachable(1, cell)).toBe(false);
+  });
+});
+
+describe('resolveLevelMove (shared player/zombie climb decision, P3b)', () => {
+  // a 2-level world: level 0 fully open 8x4, level 1 sparse (a 3-cell landing strip at row 1, cx 4..6),
+  // a stair link at cx=4,row=1, target a bedroom cell upstairs at (6,1).
+  function twoLevel() {
+    const g0 = new NavGrid({ width: 8, height: 4 });
+    const g1 = new NavGrid({ width: 8, height: 4 });
+    for (let cy = 0; cy < g1.height; cy++) for (let cx = 0; cx < g1.width; cx++) g1.block(cx, cy);
+    for (const cx of [4, 5, 6]) g1.clear(cx, 1);
+    const nav = new LevelNav([g0, g1]);
+    nav.addStairLink(0, g0.index(4, 1), 1, g1.index(4, 1));
+    const field = new LevelFlowField(nav, 1, g1.index(6, 1), 'ground', nav.navRevision);
+    return { g0, g1, nav, field };
+  }
+  const cs = new NavGrid({ width: 1, height: 1 }).settings.navCellSize; // 2 m
+
+  it('an agent steering toward the target gets a steer move (non-zero flow)', () => {
+    const { nav, field } = twoLevel();
+    const m = resolveLevelMove(field, nav, 0, 0.5 * cs, 1.5 * cs); // far cell (0,1) on level 0
+    expect(m.kind).toBe('steer');
+    if (m.kind === 'steer') expect(Math.hypot(m.flowX, m.flowZ)).toBeGreaterThan(0);
+  });
+
+  it('an agent standing ON the stair cell is told to CLIMB to the linked level + cell', () => {
+    const { g1, nav, field } = twoLevel();
+    const m = resolveLevelMove(field, nav, 0, 4.5 * cs, 1.5 * cs); // the level-0 stair cell (4,1)
+    expect(m.kind).toBe('climb');
+    if (m.kind === 'climb') {
+      expect(m.toLevel).toBe(1);
+      expect(m.toCell).toBe(g1.index(4, 1));
+    }
+  });
+
+  it('an agent off-grid / unreachable for the field is told to idle', () => {
+    const { nav, field } = twoLevel();
+    // a level-1 cell that is blocked (not the landing strip) is unreachable for this field.
+    const m = resolveLevelMove(field, nav, 1, 0.5 * cs, 0.5 * cs);
+    expect(m.kind).toBe('idle');
+  });
+
+  it('a level-0 agent walked down the flow eventually reaches the stair cell and is told to climb', () => {
+    const { g0, nav, field } = twoLevel();
+    let cx = 0;
+    let cy = 1;
+    let climbed = false;
+    for (let s = 0; s < 50; s++) {
+      const m = resolveLevelMove(field, nav, 0, (cx + 0.5) * cs, (cy + 0.5) * cs);
+      if (m.kind === 'climb') {
+        climbed = true;
+        expect(g0.index(cx, cy)).toBe(g0.index(4, 1));
+        break;
+      }
+      expect(m.kind).toBe('steer');
+      if (m.kind === 'steer') {
+        cx += Math.sign(Math.round(m.flowX));
+        cy += Math.sign(Math.round(m.flowZ));
+      }
+    }
+    expect(climbed).toBe(true);
   });
 });
 

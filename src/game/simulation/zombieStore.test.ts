@@ -99,6 +99,18 @@ describe('SimulationZombies SoA store (T8)', () => {
     expect(z.getPosition(s)).toEqual([9, 9, 9]);
   });
 
+  it('P3 level defaults to 0 (ground), is settable, and resets to 0 on slot reuse', () => {
+    const z = mk(2);
+    const a = z.spawn({ archetype: 1, position: [0, 0, 0], health: 1 });
+    expect(z.getLevel(a)).toBe(0); // a freshly spawned body is on the ground level
+    z.setLevel(a, 1);
+    expect(z.getLevel(a)).toBe(1);
+    z.free(a);
+    const b = z.spawn({ archetype: 1, position: [0, 0, 0], health: 1 }); // reuses slot a
+    expect(b).toBe(a);
+    expect(z.getLevel(b)).toBe(0); // a recycled slot starts back on the ground level (V26)
+  });
+
   it('rejects out-of-range slots and double-free', () => {
     const z = mk(2);
     const s = z.spawn({ archetype: 1, position: [0, 0, 0], health: 1 });

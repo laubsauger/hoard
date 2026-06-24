@@ -15,7 +15,16 @@ import type { FixedClock, SystemContext } from '@/game/core';
 import type { StimulusField } from '@/game/stimulus';
 import { ZombieState, SimTier } from '@/game/simulation';
 import type { SimulationZombies, TierManager, TierInputs, ZombieSlot } from '@/game/simulation';
-import { steer, type FlowField, type FlowFieldCache } from '@/game/navigation';
+import {
+  steer,
+  combineSteer,
+  resolveLevelMove,
+  LevelNav,
+  LevelFlowFieldCache,
+  type FlowField,
+  type FlowFieldCache,
+  type LevelFlowField,
+} from '@/game/navigation';
 import {
   CollisionLayer,
   layerMask,
@@ -27,7 +36,15 @@ import { limbConsequences, type ConsequenceConfig } from '@/game/combat';
 import type { combatConfig } from '@/config/domains/combat';
 import type { perceptionConfig } from '@/config/domains/perception';
 import type { ResolvedDomain } from '@/config/types';
-import { isWalkableRadius, hasLineOfSight, segmentCrossesWall, type TestBlock, type Vec3 } from '@/game/scene';
+import {
+  isWalkableRadius,
+  hasLineOfSight,
+  segmentCrossesWall,
+  levelNavOf,
+  gridWalkableRadius,
+  type TestBlock,
+  type Vec3,
+} from '@/game/scene';
 
 const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
@@ -73,6 +90,12 @@ export interface HordeSimulationDeps {
   readonly playerEntityId: number;
   /** Live player position (GameRuntime owns it; the horde only reads it — never the omniscient coord, V14). */
   readonly getPlayerPos: () => Readonly<Vec3>;
+  /** Live player nav LEVEL (P3 multi-floor). Default 0 — a single-floor scene never leaves the ground level,
+   *  so the level-aware horde path is dormant and the ground hot path runs unchanged (V26 backward-compat). */
+  readonly getPlayerLevel?: () => number;
+  /** P3 multi-floor: the scene's level stack. Absent ⇒ derived as a single level from `scene.navGrid` (the
+   *  ground hot path). Present with >1 level ⇒ the horde runs its level-aware perception + movement (climb). */
+  readonly levelNav?: LevelNav;
   /** Live selected target slot (-1 = none); promotes that slot to hero next tier pass (V13). */
   readonly getTargetSlot: () => ZombieSlot;
   /** Tick of last damage per slot, owned by GameRuntime's combat callbacks; read here for tier recency. */
@@ -124,6 +147,17 @@ export class HordeSimulation {
   /** Missing-limb consequence tunables (V17), read straight from the combat domain — no literals. */
   private readonly consequence: ConsequenceConfig;
 
+  // ---- P3 multi-floor (dormant unless the scene has >1 level) ----
+  /** The scene's level stack (ground + sparse upper floors + stair links). One level for a single-floor scene. */
+  private readonly nav: LevelNav;
+  /** True only when the scene has a second storey — gates the level-aware perception + movement paths. A
+   *  single-floor scene keeps `multiLevel === false`, so every step runs its ORIGINAL ground-level code. */
+  private readonly multiLevel: boolean;
+  /** Per-level flow fields, lazily built only on the multi-floor path. Targets are stored as GLOBAL cells. */
+  private readonly levelFlowCache: LevelFlowFieldCache | null;
+  /** Active per-tick fields by GLOBAL target cell (multi-floor analogue of activeFieldByCell). */
+  private readonly activeLevelFieldByGlobal = new Map<number, LevelFlowField>();
+
   constructor(private readonly d: HordeSimulationDeps) {
     this.consequence = {
       armLossLocomotionPenalty: d.combatCfg.armLossLocomotionPenalty,
@@ -132,6 +166,11 @@ export class HordeSimulation {
       legsLostToCrawl: d.combatCfg.legsLostToCrawl,
     };
     this.targetExpiry = new Int32Array(d.zombies.capacity).fill(-1);
+    this.nav = d.levelNav ?? levelNavOf(d.scene);
+    this.multiLevel = this.nav.levelCount > 1;
+    this.levelFlowCache = this.multiLevel
+      ? new LevelFlowFieldCache(d.scene.navGrid.settings.flowFieldCacheSize)
+      : null;
     this.compareByPopularity = (a, b) => {
       const ca = this.targetCounts.get(a) ?? 0;
       const cb = this.targetCounts.get(b) ?? 0;
@@ -148,6 +187,10 @@ export class HordeSimulation {
    * holds position (idle/wander) — firing never reroutes a zombie that did not hear the shot.
    */
   stepMovement(): void {
+    if (this.multiLevel) {
+      this.stepMovementMulti();
+      return;
+    }
     const { zombies, spatial, scene, combatCfg, clock, agentRadius } = this.d;
     const dt = clock.tickSeconds;
     const speed = combatCfg.hordeMoveSpeed;
@@ -305,6 +348,173 @@ export class HordeSimulation {
   }
 
   /**
+   * P3 multi-floor movement: the level-aware analogue of `stepMovement`, run ONLY when the scene has >1 level.
+   * Each zombie follows the per-LEVEL flow field for its GLOBAL target cell; a body whose cheapest next step is
+   * a stair link CLIMBS (transitions level + snaps to the linked cell), else it steers in-plane on its own
+   * level's grid (per-level walkable + edge-wall tests). Same steering/separation math as the ground path; only
+   * the grid + the climb branch differ. Mirrors `stepMovement`'s stagger/anatomy/arrival handling.
+   */
+  private stepMovementMulti(): void {
+    const { zombies, spatial, scene, combatCfg, clock, agentRadius } = this.d;
+    const nav = this.nav;
+    const dt = clock.tickSeconds;
+    const speed = combatCfg.hordeMoveSpeed;
+    const sep = combatCfg.steerSeparationMeters;
+    const flowWeight = combatCfg.steerFlowWeight;
+    const pos: [number, number, number] = [0, 0, 0];
+    const arriveR2 = combatCfg.hordeArriveRadiusMeters * combatCfg.hordeArriveRadiusMeters;
+
+    this.buildActiveLevelFields();
+    const fieldByGlobal = this.activeLevelFieldByGlobal;
+
+    zombies.forEachAlive((slot) => {
+      if (zombies.getNavGroup(slot) < 0) return;
+
+      if (zombies.getState(slot) === ZombieState.Stagger) {
+        const remaining = zombies.getStateTimer(slot) - dt;
+        if (remaining > 0) zombies.setStateTimer(slot, remaining);
+        else {
+          zombies.setStateTimer(slot, 0);
+          zombies.setState(slot, ZombieState.Idle);
+        }
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+
+      const targetGlobal = zombies.getTarget(slot);
+      const field = targetGlobal >= 0 ? fieldByGlobal.get(targetGlobal) : undefined;
+      if (!field) {
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+      zombies.getPosition(slot, pos);
+      const level = zombies.getLevel(slot);
+      const move = resolveLevelMove(field, nav, level, pos[0], pos[2]);
+
+      if (move.kind === 'idle') {
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+      if (move.kind === 'climb') {
+        // Take the stair portal: transition level + snap to the linked cell's world centre (XZ stacked). The
+        // body keeps its sim y (render offsets by level); the spatial hash is re-bucketed at the new XZ.
+        const toGrid = nav.grid(move.toLevel);
+        const c = toGrid.coordOf(move.toCell);
+        const center = scene.cellCenter({ cx: c.cx, cy: c.cy });
+        zombies.setLevel(slot, move.toLevel);
+        zombies.setPosition(slot, center.x, pos[1], center.z);
+        zombies.setVelocity(slot, 0, 0, 0);
+        spatial.update(slot, center.x, center.z);
+        return;
+      }
+
+      // steer in-plane on this level's grid.
+      const { decoded } = this.decodeTargetCenter(targetGlobal);
+      if (decoded.level === level) {
+        const adx = decoded.centerX - pos[0];
+        const adz = decoded.centerZ - pos[2];
+        if (adx * adx + adz * adz <= arriveR2) {
+          zombies.setVelocity(slot, 0, 0, 0);
+          return;
+        }
+      }
+      let moveScale = 1;
+      const flags = zombies.getAnatomyFlags(slot);
+      if (flags !== 0) {
+        const cons = limbConsequences(flags, this.consequence);
+        moveScale = cons.locomotionScale;
+        zombies.setAnimState(slot, cons.posture);
+        if (moveScale <= 0) {
+          zombies.setVelocity(slot, 0, 0, 0);
+          return;
+        }
+      }
+      const effSpeed = speed * moveScale;
+      const ids = spatial.query(pos[0], pos[2], sep, MOVEMENT_MASK, { exclude: slot });
+      const neighbors = ids.map((id) => {
+        const a = spatial.get(id);
+        return { dx: a.x - pos[0], dz: a.z - pos[2] };
+      });
+      const { dirX, dirZ } = combineSteer(move.flowX, move.flowZ, { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight });
+      if (dirX === 0 && dirZ === 0) {
+        zombies.setVelocity(slot, 0, 0, 0);
+        return;
+      }
+      const nx = pos[0] + dirX * effSpeed * dt;
+      const nz = pos[2] + dirZ * effSpeed * dt;
+      const grid = nav.grid(level);
+      let mx = pos[0];
+      let mz = pos[2];
+      let moved = false;
+      if (gridWalkableRadius(grid, nx, nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, nz)) {
+        mx = nx;
+        mz = nz;
+        moved = true;
+      } else if (gridWalkableRadius(grid, nx, pos[2], agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], nx, pos[2])) {
+        mx = nx;
+        moved = true;
+      } else if (gridWalkableRadius(grid, pos[0], nz, agentRadius) && !segmentCrossesWall(grid, pos[0], pos[2], pos[0], nz)) {
+        mz = nz;
+        moved = true;
+      }
+      if (moved) {
+        zombies.setPosition(slot, mx, pos[1], mz);
+        zombies.setHeading(slot, Math.atan2(dirZ, dirX));
+        zombies.setVelocity(slot, dirX * effSpeed, 0, dirZ * effSpeed);
+        spatial.update(slot, mx, mz);
+      } else {
+        zombies.setVelocity(slot, 0, 0, 0);
+      }
+    });
+
+    // Soft separation across the visible tiers (XZ only — cross-level overlap is rare on the sparse upstairs).
+    this.resolveCrowdOverlap();
+  }
+
+  /** Decode a GLOBAL target cell to its level + world-centre XZ (cached per call site; cheap). */
+  private decodeTargetCenter(global: number): { decoded: { level: number; centerX: number; centerZ: number } } {
+    const { level, cell } = this.nav.decode(global);
+    const grid = this.nav.grid(level);
+    const c = grid.coordOf(cell);
+    const center = this.d.scene.cellCenter({ cx: c.cx, cy: c.cy });
+    return { decoded: { level, centerX: center.x, centerZ: center.z } };
+  }
+
+  /**
+   * Multi-floor analogue of `buildActiveFields`: group the horde by GLOBAL target cell, assign the capped flow
+   * budget to the most-pursued cells, and build a per-LEVEL field for each. Deterministic ordering (V12/V26).
+   */
+  private buildActiveLevelFields(): void {
+    const { zombies, perception } = this.d;
+    const counts = this.targetCounts;
+    const distinct = this.distinctTargets;
+    counts.clear();
+    distinct.length = 0;
+    zombies.forEachAlive((slot) => {
+      if (zombies.getNavGroup(slot) < 0) return;
+      const tc = zombies.getTarget(slot);
+      if (tc < 0) return;
+      const prev = counts.get(tc);
+      if (prev === undefined) {
+        counts.set(tc, 1);
+        distinct.push(tc);
+      } else counts.set(tc, prev + 1);
+    });
+
+    this.activeLevelFieldByGlobal.clear();
+    if (distinct.length === 0) return;
+    distinct.sort(this.compareByPopularity);
+    const limit = Math.min(perception.maxSimultaneousFlowFields, distinct.length);
+    const cache = this.levelFlowCache!;
+    for (let i = 0; i < limit; i++) {
+      const global = distinct[i]!;
+      const { level, cell } = this.nav.decode(global);
+      if (this.nav.grid(level).isBlocked(cell)) continue;
+      this.activeLevelFieldByGlobal.set(global, cache.get(this.nav, level, cell, MOVEMENT_PROFILE));
+    }
+  }
+
+  /**
    * Hard min-spacing penetration resolution (B4 / V19). Runs AFTER the movement integrate: gathers the
    * visible-tier agents (sim tier <= configured max), pushes overlapping pairs apart to at least their
    * min spacing via a pure relaxation pass, keeps the walkable check authoritative (no wall push-through),
@@ -386,6 +596,10 @@ export class HordeSimulation {
    * melee gate, V14). Sight beats sound beats investigate beats idle. Runs on a fixed cadence (V12/V26).
    */
   stepPerception(ctx: SystemContext): void {
+    if (this.multiLevel) {
+      this.stepPerceptionMulti(ctx);
+      return;
+    }
     const { zombies, perception, playerEntityId, getPlayerPos, scene, stimulus } = this.d;
     stimulus.update(ctx.tick); // retire fully-decayed stimuli so each hearing query sees only live sources
     const p = getPlayerPos();
@@ -449,6 +663,79 @@ export class HordeSimulation {
     });
   }
 
+  /** Live player level (P3) — 0 unless the runtime wires `getPlayerLevel` and the player has climbed. */
+  private playerLevelNow(): number {
+    return this.d.getPlayerLevel?.() ?? 0;
+  }
+
+  /**
+   * P3 multi-floor perception: the level-aware analogue of `stepPerception`, run ONLY when the scene has >1
+   * level. Targets are GLOBAL cells (level + cell). A zombie that SENSES the player targets the player's CURRENT
+   * (level, cell) — so once acquired it pursues across floors and the field climbs it up the stairs; a heard
+   * sound targets that sound's cell on the HEARER's own level (cross-floor sound bleed is P3c). All levels share
+   * the district cell dimensions, so a cell index means the same XZ on every level (stair links connect equal
+   * indices). NOTE (P3b): cross-level LOS is approximated by the ground-projection LOS; P3c tightens it to a
+   * per-level + stairwell-gated test.
+   */
+  private stepPerceptionMulti(ctx: SystemContext): void {
+    const { zombies, perception, playerEntityId, getPlayerPos, scene, stimulus } = this.d;
+    stimulus.update(ctx.tick);
+    const p = getPlayerPos();
+    const nav = this.nav;
+    const playerLevel = this.playerLevelNow();
+    const sight = perception.sightRange;
+    const fovHalf = (perception.fieldOfViewDegrees * Math.PI) / 360;
+    const coned = fovHalf < Math.PI;
+    const attackRange = perception.attackRangeMeters;
+    const investigate = perception.investigateTicks;
+    const pGrid = nav.grid(playerLevel);
+    const pc = pGrid.worldToCell(p.x, p.z);
+    const playerGlobal =
+      pc.cx >= 0 && pc.cy >= 0 && pc.cx < pGrid.width && pc.cy < pGrid.height
+        ? nav.globalCell(playerLevel, pGrid.index(pc.cx, pc.cy))
+        : -1;
+    const pos: [number, number, number] = [0, 0, 0];
+    zombies.forEachAlive((slot) => {
+      zombies.getPosition(slot, pos);
+      const zlevel = zombies.getLevel(slot);
+      const dx = p.x - pos[0];
+      const dz = p.z - pos[2];
+      const dist = Math.hypot(dx, dz);
+      let inSight = dist <= sight;
+      if (inSight && coned) inSight = withinCone(dx, dz, zombies.getHeading(slot), fovHalf);
+      if (inSight) inSight = hasLineOfSight(scene, pos[0], pos[2], p.x, p.z);
+      const sensesPlayer = inSight && playerGlobal >= 0;
+
+      let target: number;
+      let acquired = false;
+      if (sensesPlayer) {
+        target = playerGlobal;
+        acquired = true;
+      } else {
+        const heardLocal = this.loudestHeardSoundCell(pos[0], pos[2], ctx.tick);
+        if (heardLocal >= 0) {
+          target = nav.globalCell(zlevel, heardLocal); // sound stays on the hearer's level (P3b)
+          acquired = true;
+        } else if (zombies.getTarget(slot) >= 0 && ctx.tick <= this.targetExpiry[slot]!) {
+          target = zombies.getTarget(slot);
+        } else {
+          target = -1;
+        }
+      }
+      zombies.setTarget(slot, target);
+      if (acquired) this.targetExpiry[slot] = ctx.tick + investigate;
+      zombies.setStimulus(slot, sensesPlayer ? playerEntityId : -1);
+
+      if (zombies.getState(slot) === ZombieState.Stagger && zombies.getStateTimer(slot) > 0) return;
+      let state: number;
+      // Attack only when on the player's level AND in reach; otherwise pursue (climb) / wander / idle.
+      if (sensesPlayer) state = zlevel === playerLevel && dist <= attackRange ? ZombieState.Attack : ZombieState.Pursue;
+      else if (target >= 0) state = ZombieState.Wander;
+      else state = ZombieState.Idle;
+      zombies.setState(slot, state);
+    });
+  }
+
   /**
    * The cell of the LOUDEST sound stimulus actually reaching (x,z) right now, or -1 if nothing audible above
    * the alert threshold (V14). Overlapping sounds resolve to the loudest-reaching-this-point; V28 wall
@@ -489,8 +776,10 @@ export class HordeSimulation {
   stepAttacks(ctx: SystemContext): void {
     const { zombies, playerEntityId, getPlayerPos, attackOf, damagePlayer, lastAttackTick } = this.d;
     const p = getPlayerPos();
+    const plevel = this.playerLevelNow();
     zombies.forEachAlive((slot) => {
       if (zombies.getState(slot) !== ZombieState.Attack) return; // staggered/pursuing/idle do not bite
+      if (this.multiLevel && zombies.getLevel(slot) !== plevel) return; // P3: never bite across a floor
       if (zombies.getStimulus(slot) !== playerEntityId) return; // only the player it actually senses (V14)
       let threatScale = 1;
       const flags = zombies.getAnatomyFlags(slot);

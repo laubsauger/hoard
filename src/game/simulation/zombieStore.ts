@@ -72,6 +72,13 @@ export class SimulationZombies {
   private readonly fRenderTier: Uint8Array;
   private readonly fAnimState: Uint8Array;
   private readonly fAnimPhase: Float32Array;
+  /**
+   * P3 multi-floor: the nav LEVEL a zombie occupies (0 = ground/district, default). A PARALLEL array, NOT
+   * part of the SoA backing buffer, so the save/reload byte layout + every replay stream stays byte-identical
+   * (a 1-storey / all-outdoors world keeps every body on level 0, V26). Render reads it to stack upstairs
+   * bodies +storeyHeight Y; movement uses it to pick the per-level nav grid + climb stairs.
+   */
+  private readonly fLevel: Int8Array;
 
   /** Free-list stack of reusable slots. Initialised so the first spawns yield 0,1,2,… */
   private readonly freeStack: number[] = [];
@@ -102,6 +109,7 @@ export class SimulationZombies {
     this.fRenderTier = v.renderTier as Uint8Array;
     this.fAnimState = v.animState as Uint8Array;
     this.fAnimPhase = v.animPhase as Float32Array;
+    this.fLevel = new Int8Array(capacity); // P3: parallel level array (all 0 → byte-identical single-floor)
     for (let i = capacity - 1; i >= 0; i--) this.freeStack.push(i);
   }
 
@@ -278,6 +286,10 @@ export class SimulationZombies {
   getAnimPhase(slot: ZombieSlot): number { this.assertSlot(slot); return this.fAnimPhase[slot]!; }
   setAnimPhase(slot: ZombieSlot, v: number): void { this.assertSlot(slot); this.fAnimPhase[slot] = v; }
 
+  /** P3 multi-floor: the nav level the body occupies (0 = ground, default). Parallel to the SoA (see fLevel). */
+  getLevel(slot: ZombieSlot): number { this.assertSlot(slot); return this.fLevel[slot]!; }
+  setLevel(slot: ZombieSlot, v: number): void { this.assertSlot(slot); this.fLevel[slot] = v; }
+
   private resetSlot(slot: number): void {
     const b = slot * 3;
     this.fArchetype[slot] = 0;
@@ -297,6 +309,7 @@ export class SimulationZombies {
     this.fRenderTier[slot] = 3;
     this.fAnimState[slot] = 0;
     this.fAnimPhase[slot] = 0;
+    this.fLevel[slot] = 0; // a recycled slot always starts on the ground level (V26)
   }
 
   private assertSlot(slot: number): void {

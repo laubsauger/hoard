@@ -10,6 +10,7 @@
 
 import { NavGrid } from '@/game/navigation';
 import { RegionGraph } from '@/game/navigation';
+import { LevelNav } from '@/game/navigation';
 import { StructuralModule } from '@/game/destruction';
 import type { ModuleId } from '@/game/core/contracts';
 import type { PlacedHouse } from './placeHouse';
@@ -117,6 +118,14 @@ export interface PlacedFurniture {
 
 export interface TestBlock {
   readonly navGrid: NavGrid;
+  /**
+   * P3 multi-floor: the per-level nav stack + stair-link portal graph. `navGrid` is ALWAYS `levelNav.levels[0]`
+   * (the ground/district grid — the single source of truth the whole single-floor sim already uses). ABSENT for
+   * every single-floor scene (gate-0/M1, and a district with no 2-storey houses) → the runtime treats it as one
+   * level and runs the existing level-0 hot path byte-identically. PRESENT (levelCount > 1) only when the
+   * district stamps a 2-storey house, opting the horde/player into the level-aware path (V26 backward-compat).
+   */
+  readonly levelNav?: LevelNav;
   readonly region: RegionGraph;
   /** The single destructible wall section connecting room A <-> room B. */
   readonly wall: StructuralModule;
@@ -180,6 +189,33 @@ export function isWalkableRadius(
     scene.isWalkableWorld(x - r, z) &&
     scene.isWalkableWorld(x, z + r) &&
     scene.isWalkableWorld(x, z - r)
+  );
+}
+
+/**
+ * The scene's level stack as a `LevelNav` (P3). Returns the scene's own `levelNav` when present (a 2-storey
+ * district), else wraps the single `navGrid` as a one-level nav so callers have ONE code path. A single-level
+ * result routes byte-identically to the bare grid (LevelNav level-0 offset is 0, zero stair links).
+ */
+export function levelNavOf(scene: Pick<TestBlock, 'navGrid' | 'levelNav'>): LevelNav {
+  return scene.levelNav ?? LevelNav.single(scene.navGrid);
+}
+
+/** True when (x,z) is an in-bounds, walkable cell on a SPECIFIC level's grid (the per-level isWalkableWorld). */
+export function gridWalkableWorld(grid: NavGrid, x: number, z: number): boolean {
+  const { cx, cy } = grid.worldToCell(x, z);
+  if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return false;
+  return !grid.isBlocked(grid.index(cx, cy));
+}
+
+/** Radius-aware walkability on a SPECIFIC level's grid (the per-level `isWalkableRadius`, P3 multi-floor). */
+export function gridWalkableRadius(grid: NavGrid, x: number, z: number, r: number): boolean {
+  return (
+    gridWalkableWorld(grid, x, z) &&
+    gridWalkableWorld(grid, x + r, z) &&
+    gridWalkableWorld(grid, x - r, z) &&
+    gridWalkableWorld(grid, x, z + r) &&
+    gridWalkableWorld(grid, x, z - r)
   );
 }
 

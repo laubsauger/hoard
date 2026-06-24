@@ -25,9 +25,6 @@ export interface SteerResult {
 
 /** Combine the shared flow direction at the agent's cell with local separation from neighbours. */
 export function steer(field: FlowField, input: SteerInputs): SteerResult {
-  if (input.separation <= 0) throw new Error(`separation must be > 0, got ${input.separation}`);
-  if (input.flowWeight < 0 || input.flowWeight > 1) throw new Error(`flowWeight must be in [0,1], got ${input.flowWeight}`);
-
   const { cx, cy } = field.grid.worldToCell(input.x, input.z);
   let flowX = 0;
   let flowZ = 0;
@@ -39,6 +36,18 @@ export function steer(field: FlowField, input: SteerInputs): SteerResult {
       flowZ = fz;
     }
   }
+  return combineSteer(flowX, flowZ, input);
+}
+
+/**
+ * Combine an ALREADY-RESOLVED flow direction (flowX, flowZ) with local separation from neighbours — the shared
+ * core of `steer`. Exposed so the P3 multi-floor horde path can feed a flow vector sampled from a per-LEVEL
+ * field (`LevelFlowField.directionAt(level, cell)`) through the SAME steering math the single-floor path uses,
+ * with no behavioural drift. A zero (flowX,flowZ) yields pure separation.
+ */
+export function combineSteer(flowX: number, flowZ: number, input: SteerInputs): SteerResult {
+  if (input.separation <= 0) throw new Error(`separation must be > 0, got ${input.separation}`);
+  if (input.flowWeight < 0 || input.flowWeight > 1) throw new Error(`flowWeight must be in [0,1], got ${input.flowWeight}`);
 
   // Separation: sum repulsion from neighbours inside the separation radius.
   let sepX = 0;

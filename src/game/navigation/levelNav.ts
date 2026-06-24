@@ -324,6 +324,32 @@ export class LevelFlowField {
   }
 }
 
+/**
+ * The next move an agent on `level` at world `(x,z)` should make to progress toward a `LevelFlowField`'s
+ * target — the shared decision used by BOTH the player (auto/explicit climb) and the horde (zombie climb):
+ * - `climb`  : the agent's cell is a stair cell whose cheapest next step is the portal — take it (transition
+ *              to `toLevel`, snap to `toCell`).
+ * - `steer`  : follow the in-level flow vector `(flowX, flowZ)` toward the target / the stair.
+ * - `idle`   : off-grid or unreachable for this field — hold position.
+ * Pure + deterministic (V26): a function of the field + the agent's cell only.
+ */
+export type LevelMove =
+  | { readonly kind: 'climb'; readonly toLevel: number; readonly toCell: number }
+  | { readonly kind: 'steer'; readonly flowX: number; readonly flowZ: number }
+  | { readonly kind: 'idle' };
+
+export function resolveLevelMove(field: LevelFlowField, nav: LevelNav, level: number, x: number, z: number): LevelMove {
+  const grid = nav.grid(level);
+  const { cx, cy } = grid.worldToCell(x, z);
+  if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height) return { kind: 'idle' };
+  const cell = grid.index(cx, cy);
+  if (!field.isReachable(level, cell)) return { kind: 'idle' };
+  const link = field.stairFrom(level, cell);
+  if (link) return { kind: 'climb', toLevel: link.toLevel, toCell: link.toCell };
+  const [flowX, flowZ] = field.directionAt(level, cell);
+  return { kind: 'steer', flowX, flowZ };
+}
+
 /** LRU cache of level flow fields keyed by (targetLevel, targetCell, profile, navRevision). */
 export class LevelFlowFieldCache {
   private readonly map = new Map<string, LevelFlowField>();

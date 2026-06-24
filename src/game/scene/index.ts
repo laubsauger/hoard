@@ -3,6 +3,9 @@
 export {
   buildTestBlock,
   isWalkableRadius,
+  levelNavOf,
+  gridWalkableWorld,
+  gridWalkableRadius,
   segmentCrossesWall,
   hasLineOfSight,
   rayDistanceToWall,
