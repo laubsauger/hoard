@@ -155,10 +155,11 @@ function ringCellFor(cx: number, cy: number, dir: Edge): CellXY {
  * door is a 1-cell gap in the ring (left closed for the player's house — sheltered start); window cells are
  * ring cells flagged for the window system; the interior W×D cells are walkable, room-tagged floor.
  *
- * Interior partition walls are RENDERED (P0c) + carried as rooms-as-regions, but the 2 m nav grid is too
- * coarse to wall off 1-cell rooms, so partitions are not nav blockers in P0 — the house enters/exits only
- * through its doors (sealed shell), and the interior is one navigable space subdivided into typed rooms.
- * A finer sub-cell wall nav is explicitly deferred (docs/PROCEDURAL-HOUSES.md note). Mutates `b`.
+ * Interior partition walls are REAL nav collision: each interior `wallEdge` is fed into the nav grid as an
+ * EDGE-wall (a wall on the shared edge between two walkable room cells — the PZ model), so an agent can't
+ * cross a partition while BOTH room cells stay walkable. Door edges are left CLEAR (passable doorways), so the
+ * flow field routes a pursuer through the doorway and the steering/LOS stop the clip-through + see-through. The
+ * exterior shell stays cell-blocked (the sealed ring, punched for doors/windows below). Mutates `b`.
  */
 function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   const lot = lotOrigin(i, j);
@@ -186,6 +187,18 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   for (let cy = bMinCy; cy <= bMaxCy; cy++) {
     b.navGrid.block(bMinCx, cy);
     b.navGrid.block(bMaxCx, cy);
+  }
+
+  // --- interior partitions as REAL edge-wall nav (P0 fix): wall every interior wallEdge on the shared edge
+  // between its two walkable room cells, EXCEPT the edges that are door openings (left clear so the doorway is
+  // passable). Cells stay walkable; only cross-edge movement + LOS are blocked, so the interior subdivides
+  // into rooms connected only through doorways. Exterior edges are the sealed cell ring above — skip them here.
+  const doorEdgeKeys = new Set(placed.doors.map((dr) => dr.edge.key));
+  for (const edge of placed.wallEdges) {
+    if (edge.kind !== 'interior') continue; // exterior is the cell-blocked shell ring
+    if (doorEdgeKeys.has(edge.key)) continue; // a doorway — leave the edge clear (passable)
+    if (edge.outerCx === null || edge.outerCy === null) continue; // interior edges always have both sides
+    b.navGrid.setWallBetween(edge.innerCx, edge.innerCy, edge.outerCx, edge.outerCy);
   }
 
   // --- front door: a 1-cell gap in the ring, on the ring cell one step OUT from the door's room cell. The

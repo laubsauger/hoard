@@ -4,8 +4,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildCityDistrict } from './cityDistrict';
-import { buildingsOf } from './testBlock';
+import { buildingsOf, hasLineOfSight } from './testBlock';
 import { reachableFromExterior } from './houseTemplates';
+import { FlowField } from '@/game/navigation';
 
 describe('city district scene (T80 — large multi-building world)', () => {
   it('authors MANY separately-enterable buildings on a street grid', () => {
@@ -119,6 +120,72 @@ describe('city district scene (T80 — large multi-building world)', () => {
         (b) => cell.cx >= b.bounds.minCx && cell.cx <= b.bounds.maxCx && cell.cy >= b.bounds.minCy && cell.cy <= b.bounds.maxCy,
       );
       expect(insideAHouse).toBe(false);
+    }
+  });
+
+  // P0 fix: interior partition walls are REAL nav collision (edge-walls), wired from each house's wallEdges.
+  it('wires interior partitions as edge-walls: cells stay walkable but cannot cross, doorways stay open', () => {
+    const { block } = buildCityDistrict();
+    const grid = block.navGrid;
+    let walledPartitions = 0;
+    let openDoorways = 0;
+    for (const house of block.placedHouses!) {
+      const doorKeys = new Set(house.doors.map((d) => d.edge.key));
+      for (const e of house.wallEdges) {
+        if (e.kind !== 'interior' || e.outerCx === null || e.outerCy === null) continue;
+        const innerOk = !grid.isBlocked(grid.index(e.innerCx, e.innerCy));
+        const outerOk = !grid.isBlocked(grid.index(e.outerCx, e.outerCy));
+        // BOTH room cells stay walkable (the PZ model) — only the cross-edge changes.
+        expect(innerOk).toBe(true);
+        expect(outerOk).toBe(true);
+        if (doorKeys.has(e.key)) {
+          expect(grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)).toBe(true); // doorway: passable
+          openDoorways += 1;
+        } else {
+          expect(grid.canCross(e.innerCx, e.innerCy, e.outerCx, e.outerCy)).toBe(false); // wall: blocked
+          walledPartitions += 1;
+        }
+      }
+    }
+    expect(walledPartitions).toBeGreaterThan(0); // real partitions exist
+    expect(openDoorways).toBeGreaterThan(0); // and interior doors stay open
+  });
+
+  it('a zombie in one room can only reach the adjacent room via the doorway, never through the wall', () => {
+    const { block } = buildCityDistrict();
+    const grid = block.navGrid;
+    // find an interior partition (walled, non-door) with both room cells walkable, in a house that has an
+    // interior door (so the rooms ARE connected — just not through the wall).
+    let probe: { ax: number; ay: number; bx: number; by: number } | null = null;
+    for (const house of block.placedHouses!) {
+      const hasInteriorDoor = house.doors.some((d) => !d.exterior);
+      if (!hasInteriorDoor) continue;
+      const doorKeys = new Set(house.doors.map((d) => d.edge.key));
+      for (const e of house.wallEdges) {
+        if (e.kind !== 'interior' || e.outerCx === null || e.outerCy === null) continue;
+        if (doorKeys.has(e.key)) continue;
+        probe = { ax: e.innerCx, ay: e.innerCy, bx: e.outerCx, by: e.outerCy };
+        break;
+      }
+      if (probe) break;
+    }
+    expect(probe).not.toBeNull();
+    const { ax, ay, bx, by } = probe!;
+    // sight does not pass through the partition (zombie in room B can't see player in room A through the wall)
+    const aC = block.cellCenter({ cx: ax, cy: ay });
+    const bC = block.cellCenter({ cx: bx, cy: by });
+    expect(hasLineOfSight(block, aC.x, aC.z, bC.x, bC.z)).toBe(false);
+    // flow toward the player's cell (A): the neighbour B across the wall is still reachable (via the door) but
+    // its cost-to-target is NOT the single adjacent step it would be without the wall — it detours to a door.
+    const field = new FlowField(grid, grid.index(ax, ay), 'zombie-walk', grid.navRevision);
+    expect(field.isReachable(grid.index(bx, by))).toBe(true);
+    expect(field.distance[grid.index(bx, by)]!).toBeGreaterThan(grid.getCost(grid.index(bx, by)) * 1.5);
+    // and B's flow vector must not point straight across the walled edge into A.
+    const [dx, dz] = field.directionAt(grid.index(bx, by));
+    const sx = Math.sign(Math.round(dx));
+    const sy = Math.sign(Math.round(dz));
+    if (sx === Math.sign(ax - bx) && sy === Math.sign(ay - by) && (sx === 0 || sy === 0)) {
+      expect(grid.canStep(bx, by, sx, sy)).toBe(true); // if it points toward A it must be a crossable step
     }
   });
 
