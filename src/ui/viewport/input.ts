@@ -62,7 +62,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
       }
     }
     // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
-    if (e.code === 'KeyR') getRuntime().reloadWeapon();
+    if (e.code === 'KeyR' && getRuntime().reloadWeapon()) gameAudio.reload(); // sampled magazine-swap on a real reload
     if (e.code === 'BracketRight') getRuntime().cycleWeapon(1);
     if (e.code === 'BracketLeft') getRuntime().cycleWeapon(-1);
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
@@ -80,6 +80,9 @@ export function registerInput(args: RegisterInputArgs): () => void {
   };
   const onClick = (): void => {
     gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio (always, even a dry click).
+    // T136: a UI panel owns the mouse — a click in the world must NOT fire the gun while the inventory/loot/
+    // settings pane is open (you're operating the UI, not shooting). The wheel/panes capture their own clicks.
+    if (uiStore.getState().activePanel !== 'none') return;
     const runtime = getRuntime();
     const access = getAccess();
     const hit = aim.worldPoint(camera);

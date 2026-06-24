@@ -109,7 +109,6 @@ export class GameAudio {
   private musicBus: GainNode | null = null;
   private bed: BedNodes | null = null;
   private music: MusicNodes | null = null;
-  private noise: AudioBuffer | null = null;
   /** Authored sampled-SFX bank (gunshots/footsteps/grunts/doors/…); decoded async after the ctx resumes. */
   private readonly samples = new SampleBank();
 
@@ -174,10 +173,11 @@ export class GameAudio {
       this.master = master;
       this.sfxBus = sfxBus;
       this.musicBus = musicBus;
-      this.noise = this.buildNoiseBuffer(ctx);
       void this.samples.load(ctx); // decode the authored sfx clips in the background (best-effort, never throws)
-      this.bed = this.buildBed(ctx, sfxBus);
-      this.music = this.buildMusic(ctx, musicBus);
+      // The procedural DRONE beds (horde + music) are GONE — they read as an ugly constant sine. Not built at
+      // all (config gains were already 0; this removes the oscillators outright). One-shots/groans still play.
+      this.bed = null;
+      this.music = null;
       void ctx.resume();
     } catch {
       this.ctx = null;
@@ -187,68 +187,39 @@ export class GameAudio {
     }
   }
 
-  /** Player gunshot — direct, crisp, exempt from the voice cap (player-action feedback priority). `indoor`
-   *  picks the tighter indoor pistol sample vs the open outdoor one (the shot reads differently in a room). */
+  /** Player gunshot — the authored indoor/outdoor pistol SAMPLE (no synthesized stand-in; if the clip hasn't
+   *  decoded the shot is simply silent that frame, never a fake crack). `indoor` picks the tighter room sample. */
   gunshot(indoor = false): void {
-    const ctx = this.ctx;
-    const bus = this.sfxBus;
-    if (!ctx || !bus) return;
-    const t = ctx.currentTime;
-    // Volume = 1: the SFX bus (master × sfx) applies the live volumes; this is just the per-voice shape.
     const peak = voiceGain(1, this.tuning.gunshotGain, 1, this.tuning.masterCeiling);
     if (peak <= 0) return;
-    // Authored pistol sample (indoor/outdoor) when decoded; else fall back to the synthesized crack below.
-    if (this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03)) return;
+    this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03);
+  }
 
-    // Crack: short white-noise burst through a band, fast exponential decay.
-    if (this.noise) {
-      const src = ctx.createBufferSource();
-      src.buffer = this.noise;
-      const bp = ctx.createBiquadFilter();
-      bp.type = 'bandpass';
-      bp.frequency.value = 1800;
-      bp.Q.value = 0.7;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(peak, t);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + this.tuning.gunshotNoiseDecaySeconds);
-      src.connect(bp).connect(g).connect(bus);
-      this.startTransient(src, t, this.tuning.gunshotNoiseDecaySeconds, /* counted */ false);
-    }
-
-    // Thump: low sine that drops in pitch and decays.
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(this.tuning.gunshotThumpFreqHz, t);
-    osc.frequency.exponentialRampToValueAtTime(this.tuning.gunshotThumpFreqHz * 0.5, t + this.tuning.gunshotThumpDecaySeconds);
-    const tg = ctx.createGain();
-    tg.gain.setValueAtTime(peak * 0.8, t);
-    tg.gain.exponentialRampToValueAtTime(0.0001, t + this.tuning.gunshotThumpDecaySeconds);
-    osc.connect(tg).connect(bus);
-    this.startTransient(osc, t, this.tuning.gunshotThumpDecaySeconds, false);
+  /** Player weapon RELOAD — the authored reload sample (magazine swap). */
+  reload(): void {
+    this.playSample('pistolReload', 0.8, 0, 0.02);
   }
 
   /** Advance the live audio: bed level, occasional groans, and discrete world one-shots (V2 read-only). */
   frame(input: AudioFrameInput): void {
     const ctx = this.ctx;
-    const bed = this.bed;
-    const music = this.music;
     const bus = this.sfxBus;
-    if (!ctx || !bed || !music || !bus) {
+    if (!ctx || !bus) {
       // Still track ids so the first audible frame after resume() does not re-fire a backlog of onsets.
       this.prevIds = new Set(input.audible.map((s) => s.id));
       return;
     }
     const t = ctx.currentTime;
 
-    // GROUP BED (SFX bus): one drone, level scales with nearby horde count, glided to avoid pops (V28).
-    // Volume = 1: the SFX bus (master × sfx) applies the live volumes downstream.
-    const bedTarget = hordeBedGain(input.hordeCount, 1, this.tuning);
-    bed.gain.gain.setTargetAtTime(bedTarget, t, this.tuning.hordeBedGlideSeconds);
-
-    // MUSIC BED (MUSIC bus): one ever-present drone whose level + cutoff rise with horde tension, glided
-    // so changes never pop. Volume = 1 here; the MUSIC bus (master × music) applies the live volumes.
-    music.gain.gain.setTargetAtTime(musicBedGain(input.hordeCount, this.tuning), t, this.tuning.musicGlideSeconds);
-    music.lowpass.frequency.setTargetAtTime(musicFilterHz(input.hordeCount, this.tuning), t, this.tuning.musicGlideSeconds);
+    // Drone beds are no longer built (the constant-sine annoyance). If they ever are again, drive them here;
+    // their absence does NOT gate the one-shots/groans below (those are the live, transient audio).
+    const bed = this.bed;
+    const music = this.music;
+    if (bed) bed.gain.gain.setTargetAtTime(hordeBedGain(input.hordeCount, 1, this.tuning), t, this.tuning.hordeBedGlideSeconds);
+    if (music) {
+      music.gain.gain.setTargetAtTime(musicBedGain(input.hordeCount, this.tuning), t, this.tuning.musicGlideSeconds);
+      music.lowpass.frequency.setTargetAtTime(musicFilterHz(input.hordeCount, this.tuning), t, this.tuning.musicGlideSeconds);
+    }
 
     // OCCASIONAL FOREGROUND GROANS — never one per zombie; gated + capped (V28).
     this.secondsSinceGroan += input.dtSeconds;
@@ -262,7 +233,8 @@ export class GameAudio {
         tuning: this.tuning,
       })
     ) {
-      this.playGroan((Math.random() * 2 - 1) * 0.4);
+      // Sampled zombie moan (was a synth groan) — silent if the clips haven't decoded, never a fake.
+      this.playSample('zombie', voiceGain(1, this.tuning.groanGain, 1, this.tuning.masterCeiling), (Math.random() * 2 - 1) * 0.4, 0.08);
       this.secondsSinceGroan = 0;
     }
 
@@ -305,127 +277,36 @@ export class GameAudio {
     this.master = null;
     this.sfxBus = null;
     this.musicBus = null;
-    this.noise = null;
     this.ctx = null;
     this.activeVoices = 0;
     this.prevIds = new Set();
     if (ctx) void ctx.close().catch(() => { /* already closed */ });
   }
 
-  // ---- synthesis helpers (boundary-only; no decisions) ----
-
-  private buildNoiseBuffer(ctx: AudioContext): AudioBuffer {
-    const length = Math.floor(ctx.sampleRate * 1);
-    const buf = ctx.createBuffer(1, length, ctx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
-    return buf;
-  }
-
-  private buildBed(ctx: AudioContext, bus: GainNode): BedNodes {
-    const base = this.tuning.hordeBedBaseFreqHz;
-    const oscA = ctx.createOscillator();
-    oscA.type = 'sawtooth';
-    oscA.frequency.value = base;
-    const oscB = ctx.createOscillator();
-    oscB.type = 'sine';
-    oscB.frequency.value = base * 1.01; // slight detune → slow beating, an uneasy crowd hum.
-    const lowpass = ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = base * 6;
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
-    // Slow amplitude LFO → the drone "breathes".
-    const lfo = ctx.createOscillator();
-    lfo.type = 'sine';
-    lfo.frequency.value = this.tuning.hordeBedLfoHz;
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = 0.3;
-    lfo.connect(lfoGain).connect(gain.gain);
-
-    oscA.connect(lowpass);
-    oscB.connect(lowpass);
-    lowpass.connect(gain).connect(bus);
-    oscA.start();
-    oscB.start();
-    lfo.start();
-    return { oscA, oscB, lfo, lfoGain, lowpass, gain };
-  }
+  // ---- world one-shots: AUTHORED SAMPLES ONLY (no synthesized stand-ins) ----
 
   /**
-   * Procedural MUSIC drone (one bed, no per-frame nodes): two low detuned oscillators through a lowpass
-   * whose cutoff a slow LFO modulates so the bed evolves. frame() glides the bed gain + cutoff toward
-   * their horde-tension targets (musicBedGain / musicFilterHz). Routed to the MUSIC bus (master × music).
+   * Map a world one-shot voice to its authored sample bank and play it. NO synthesized fallback: a voice with
+   * no decoded clip (or no asset at all — impact/breach/alarm currently have none) is SILENT, never a made-up
+   * synth noise played on top of / instead of a real sample (the explicit "samples or nothing" rule).
    */
-  private buildMusic(ctx: AudioContext, bus: GainNode): MusicNodes {
-    const base = this.tuning.musicBaseFreqHz;
-    const oscA = ctx.createOscillator();
-    oscA.type = 'sine';
-    oscA.frequency.value = base;
-    const oscB = ctx.createOscillator();
-    oscB.type = 'triangle';
-    oscB.frequency.value = base;
-    oscB.detune.value = this.tuning.musicDetuneCents; // cents → slow beating between the two voices.
-    const lowpass = ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = this.tuning.musicFilterBaseHz;
-    // Slow filter LFO → the drone "breathes" / evolves even at a fixed tension.
-    const lfo = ctx.createOscillator();
-    lfo.type = 'sine';
-    lfo.frequency.value = this.tuning.musicLfoHz;
-    const lfoGain = ctx.createGain();
-    lfoGain.gain.value = this.tuning.musicLfoDepthHz;
-    lfo.connect(lfoGain).connect(lowpass.frequency);
-    const gain = ctx.createGain();
-    gain.gain.value = 0; // frame() glides this up toward the tension target (no pop on start).
-
-    oscA.connect(lowpass);
-    oscB.connect(lowpass);
-    lowpass.connect(gain).connect(bus);
-    oscA.start();
-    oscB.start();
-    lfo.start();
-    return { oscA, oscB, lfo, lfoGain, lowpass, gain };
-  }
-
   private playOneShot(voice: OneShotVoice, gain: number, pan: number): void {
     switch (voice) {
-      // Authored sample first (when decoded), else the synth voice — so the event stream upgrades for free.
-      case 'glass':
-        if (this.playSample('windowBreak', gain, pan, 0.02)) return;
-        return this.playNoiseBurst(gain, pan, 'highpass', 3500, 0.18);
-      case 'alarm': return this.playAlarm(gain, pan);
-      case 'impact': return this.playNoiseBurst(gain, pan, 'lowpass', 600, 0.16);
-      case 'breach': return this.playNoiseBurst(gain, pan, 'lowpass', 400, 0.22);
-      case 'footstep': return this.playNoiseBurst(gain, pan, 'lowpass', 900, 0.07);
-      case 'groan':
-        if (this.playSample('zombie', gain, pan, 0.08)) return;
-        return this.playGroan(pan, gain);
+      case 'glass': this.playSample('windowBreak', gain, pan, 0.02); return;
+      case 'groan': this.playSample('zombie', gain, pan, 0.08); return;
+      case 'footstep': this.playSample('footstepConcrete', gain, pan, 0.1); return;
+      // impact / breach / alarm: no authored asset yet → silent (no synth).
+      case 'impact':
+      case 'breach':
+      case 'alarm':
+        return;
     }
-  }
-
-  /** Filtered noise burst (impacts/glass/footsteps). */
-  private playNoiseBurst(gain: number, pan: number, filter: BiquadFilterType, freq: number, decay: number): void {
-    const ctx = this.ctx;
-    const bus = this.sfxBus;
-    if (!ctx || !bus || !this.noise) return;
-    const t = ctx.currentTime;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const flt = ctx.createBiquadFilter();
-    flt.type = filter;
-    flt.frequency.value = freq;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(gain, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
-    src.connect(flt).connect(g).connect(this.panner(ctx, pan, bus));
-    this.startTransient(src, t, decay, true);
   }
 
   /**
    * Play a random VARIANT of a sampled bank through the SFX bus (panned, optional ± pitch jitter so repeats
-   * don't sound identical). Returns false when the bank has not decoded / is absent, so callers fall back to
-   * the synth voice. Pooled + voice-capped via startTransient (V24).
+   * don't sound identical). Returns false when the bank has not decoded / is absent — there is NO synth
+   * fallback, so the caller simply makes no sound. Pooled + voice-capped via startTransient (V24).
    */
   private playSample(bank: SfxBankName, gain: number, pan: number, pitchVar = 0): boolean {
     const ctx = this.ctx;
@@ -471,58 +352,6 @@ export class GameAudio {
     this.playSample(bank, 0.6, pan, 0.1);
   }
 
-  /** Two-tone alarm warble. */
-  private playAlarm(gain: number, pan: number): void {
-    const ctx = this.ctx;
-    const bus = this.sfxBus;
-    if (!ctx || !bus) return;
-    const t = ctx.currentTime;
-    const dur = 0.4;
-    const osc = ctx.createOscillator();
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(880, t);
-    osc.frequency.setValueAtTime(660, t + dur / 2);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(gain * 0.7, t);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    osc.connect(g).connect(this.panner(ctx, pan, bus));
-    this.startTransient(osc, t, dur, true);
-  }
-
-  /** A low, vibrato'd groan — a single FOREGROUND voice over the bed (V28). Routed to the SFX bus. */
-  private playGroan(pan: number, gainOverride?: number): void {
-    const ctx = this.ctx;
-    const bus = this.sfxBus;
-    if (!ctx || !bus) return;
-    const t = ctx.currentTime;
-    const dur = this.tuning.groanDecaySeconds;
-    const peak = gainOverride ?? voiceGain(1, this.tuning.groanGain, 1, this.tuning.masterCeiling);
-    if (peak <= 0) return;
-    const base = 90 + Math.random() * 50;
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(base, t);
-    osc.frequency.linearRampToValueAtTime(base * 0.7, t + dur);
-    const lowpass = ctx.createBiquadFilter();
-    lowpass.type = 'lowpass';
-    lowpass.frequency.value = 500;
-    // Pitch vibrato.
-    const vib = ctx.createOscillator();
-    vib.type = 'sine';
-    vib.frequency.value = 5;
-    const vibGain = ctx.createGain();
-    vibGain.gain.value = 6;
-    vib.connect(vibGain).connect(osc.frequency);
-    vib.onended = () => { try { vib.disconnect(); } catch { /* already gone */ } };
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(peak, t + dur * 0.25);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    osc.connect(lowpass).connect(g).connect(this.panner(ctx, pan, bus));
-    vib.start(t);
-    vib.stop(t + dur);
-    this.startTransient(osc, t, dur, true);
-  }
 
   private panner(ctx: AudioContext, pan: number, dest: GainNode): StereoPannerNode {
     const p = ctx.createStereoPanner();

@@ -13,20 +13,23 @@ const SFX_URLS = import.meta.glob('../assets/sfx/**/*.mp3', {
 
 /** Logical bank → path SUBSTRINGS; every clip whose source path contains one becomes a variant of that bank. */
 export const SFX_BANKS = {
-  pistolIndoor: ['weapons/pistol/single-pistol-indoor'],
-  pistolOutdoor: ['weapons/pistol/single-pistol-outdoor'],
-  grunt: ['character/grunt/grunt-'], // 7 separated variants
-  footstepConcrete: ['footsteps/concrete-footsteps'],
-  footstepDirt: ['footsteps/walking-on-dirt', 'footsteps/dirt-gravel'],
-  footstepGrass: ['footsteps/walking-on-grass'],
-  footstepWood: ['footsteps/wood-creak'],
-  doorOpen: ['misc/door/door-open'],
-  doorClose: ['misc/door/door-close'],
-  windowBreak: ['misc/window-breaking'],
-  containerOpen: ['misc/cardboard-box-open'],
-  knock: ['misc/books-banging'],
+  // SUBSTRINGS that appear in the actual filenames (the authored clips carry an `author-` prefix between the
+  // folder and the descriptive name, so a `folder/name` substring would NOT match — match the name part only).
+  pistolIndoor: ['single-pistol-indoor'],
+  pistolOutdoor: ['single-pistol-outdoor'],
+  pistolReload: ['pistol-reload'],
+  grunt: ['grunt/grunt-'], // 7 separated variants
+  footstepConcrete: ['concrete-footsteps'],
+  footstepDirt: ['walking-on-dirt', 'footsteps-dirt-gravel'],
+  footstepGrass: ['walking-on-grass'],
+  footstepWood: ['wood-creak'],
+  doorOpen: ['door/door-open'],
+  doorClose: ['door/door-close'],
+  windowBreak: ['window-breaking'],
+  containerOpen: ['cardboard-box-open'],
+  knock: ['books-banging'],
   zombie: ['zombie/screams/'], // several moans/screams
-  zombieDeath: ['zombie/screams/dragon-studio-zombie-dying'],
+  zombieDeath: ['zombie-dying'],
 } as const;
 
 export type SfxBankName = keyof typeof SFX_BANKS;

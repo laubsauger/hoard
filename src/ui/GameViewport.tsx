@@ -256,7 +256,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
       });
 
       // Render-lane effect views + their shared static-structure surface projector (FRAGILE — see module).
-      const { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField, surfaceProjector, firearmRangeMeters } =
+      const { bloodView, gibView, impactView, weatherView, fireView, highlightView, cursorView, corpseField, surfaceProjector, firearmRangeMeters } =
         createEffectViews({ tier, registry: host.resources, scene, gizmosGroup: gizmos.group, getRuntime: () => runtime });
 
       const camera = createCameraController(canvas, tier);
@@ -289,6 +289,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           adapter: adp,
           camera,
           scene,
+          gameAudio,
           canvas,
           promptLayout: {
             anchorHeightMeters: ui.interactionPromptAnchorHeightMeters,
@@ -310,7 +311,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
         camera,
         aim,
         keys,
-        views: { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField, surfaceProjector, firearmRangeMeters },
+        views: { bloodView, gibView, impactView, weatherView, fireView, highlightView, cursorView, corpseField, surfaceProjector, firearmRangeMeters },
         gizmos,
         noiseGate,
         gameAudio,

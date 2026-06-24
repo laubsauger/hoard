@@ -57,7 +57,7 @@ export interface RenderLoopContext {
 /** Start the rAF frame loop; returns a stop() that cancels the pending frame. */
 export function startRenderLoop(ctx: RenderLoopContext): () => void {
   const { isCancelled, stats, host, scene, camera, aim, keys, gizmos, noiseGate, gameAudio, hordeProximityRadiusMeters, getRuntime, getAccess, selfNoise } = ctx;
-  const { bloodView, gibView, impactView, weatherView, fireView, highlightView, corpseField } = ctx.views;
+  const { bloodView, gibView, impactView, weatherView, fireView, highlightView, cursorView, corpseField } = ctx.views;
 
   // ---- frame loop: real dt -> runtime.update (fixed ticks) -> sync scene -> render (V12) ----
   let last = performance.now();
@@ -65,6 +65,9 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
   // T126: only re-publish the HUD time-of-day when the displayed MINUTE changes (a full day = dayLengthSeconds,
   // so this fires a couple of times a second at most) — avoids a per-frame store write + React churn (V11).
   let lastTodMinute = -1;
+  // Play a player pain GRUNT on each fresh damage hit — compares the sim's last-damage tick frame-over-frame
+  // (the same signal the avatar hit-reaction reads), so one grunt per hit, never per frame.
+  let lastGruntDamageTick = -1;
   const moveSpeedKeys = (): { x: number; z: number } => {
     const yaw = camera.state.yawDeg * DEG2RAD;
     const fwdX = -Math.sin(yaw);
@@ -113,10 +116,14 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
       // the held key. Sprint takes precedence (you cannot sprint crouched).
       runtime.setCrouch(sneak && !sprint);
       if (mv.x !== 0 || mv.z !== 0) runtime.movePlayer(mv.x, mv.z, stepDt, sprint, sneak);
-      const hit = aim.worldPoint(camera);
-      if (hit) {
-        const pp = runtime.player();
-        runtime.aim(hit.x - pp.x, hit.z - pp.z);
+      // T136: while a UI panel is open (inventory/loot/settings/…), the mouse belongs to the UI — DON'T turn the
+      // character to follow the cursor (so moving the mouse onto the pane no longer spins the avatar / re-aims).
+      if (uiStore.getState().activePanel === 'none') {
+        const hit = aim.worldPoint(camera);
+        if (hit) {
+          const pp = runtime.player();
+          runtime.aim(hit.x - pp.x, hit.z - pp.z);
+        }
       }
       runtime.update(stepDt);
     }
@@ -171,14 +178,22 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // BlockScene.syncFrame), the blob CorpseField stops drawing (empty list → count 0) so the two never double-draw;
     // before that it is the no-gap fallback, toppling each body by tick age (T122).
     corpseField.update(scene.riggedCorpsesActive() ? EMPTY_CORPSES : runtime.corpses.list, runtime.absoluteTick);
-    // T60/V29: glow the NEAREST interactable in reach (hidden when none). Pulse is damped to a steady glow
-    // when reduce-flashes / reduce-motion is set. The runtime gives the placed + sized box; the view only
-    // positions/scales/colours it (V1/V2 — never reads world state back).
-    highlightView.update(
-      runtime.nearestInteractableHighlight(),
-      dt,
-      access.feedback.reduceFlashes || access.feedback.reduceMotion,
-    );
+    // T136: while a UI panel is open the mouse drives the UI — FREEZE the world pointer (the active interactable
+    // selection HOLDS at its last value, so the loot/wheel target can't drift while you operate the pane) and
+    // hide the world reticle (the OS cursor handles the UI). Otherwise publish the pointer ground point so the
+    // runtime HOVER-picks WHICH in-reach interactable is active (the mouse chooses among adjacent targets).
+    const uiCaptures = uiStore.getState().activePanel !== 'none';
+    const pointerHit = uiCaptures ? null : aim.worldPoint(camera);
+    const pointer = pointerHit ? { x: pointerHit.x, z: pointerHit.z } : null;
+    if (!uiCaptures) runtime.setPointerWorld(pointer); // panel open → skip → the runtime holds its last selection
+    // T60/V29: glow the ACTIVE interactable in reach (hidden when none) — the one under the cursor, else nearest.
+    // Pulse is damped to a steady glow when reduce-flashes / reduce-motion is set. The runtime gives the placed +
+    // sized box; the view only positions/scales/colours it (V1/V2 — never reads world state back).
+    const highlight = runtime.nearestInteractableHighlight();
+    highlightView.update(highlight, dt, access.feedback.reduceFlashes || access.feedback.reduceMotion);
+    // T136: the world cursor follows the pointer ground point (hidden while a panel owns the mouse); GREEN when an
+    // interactable is selected (highlight present) so the player sees "ready to interact" right at the cursor.
+    cursorView.update(uiCaptures ? null : pointer, highlight !== null);
 
     // Item A: a loot panel opened on a world container is proximity-gated — auto-close it the moment the
     // player walks out of interaction range of THAT container (or turns to a different one). A manually-opened
@@ -240,6 +255,12 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // Feed the drained audible set + live nearby horde count to the procedural audio output (silent
     // until a gesture resumes its context). Group bed + occasional groans scale with the count (V28).
     gameAudio.frame({ playerX: p.x, audible, hordeCount: runtime.nearbyHordeCount(hordeProximityRadiusMeters), dtSeconds: dt });
+    // Player pain grunt on a fresh damage hit (one per hit — gated on the sim's last-damage tick advancing).
+    const dmgTick = runtime.playerLastDamageTick();
+    if (dmgTick > lastGruntDamageTick) {
+      lastGruntDamageTick = dmgTick;
+      gameAudio.grunt();
+    }
     // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
     host.setToneMapping(scene.toneMappingMode, scene.currentExposure);
     // Assemble per-instance crowd transforms + advance animation phase on the GPU (V2) before the

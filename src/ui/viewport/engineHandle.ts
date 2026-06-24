@@ -5,6 +5,7 @@
 
 import type { CameraRig } from '../../render/engine';
 import type { BlockScene } from '../../render/scene';
+import type { GameAudio } from '../../audio-out';
 import type { GameRuntime } from '../../game/runtime';
 import type { PersistenceAdapter } from '../../game/persistence';
 import type { QualityTier } from '../../config/types';
@@ -67,6 +68,8 @@ export interface CreateEngineHandleArgs {
   readonly adapter: PersistenceAdapter;
   readonly camera: CameraRig;
   readonly scene: BlockScene;
+  /** Audio output — door / container interaction sounds fire from the command results here (V1 boundary). */
+  readonly gameAudio: GameAudio;
   /** The viewport canvas — its client rect maps NDC → CSS px for the world-anchored prompt (T113). */
   readonly canvas: HTMLCanvasElement;
   /** Resolved world-anchored prompt layout tunables (T113, from `uiConfig`). */
@@ -80,7 +83,7 @@ export interface CreateEngineHandleArgs {
 }
 
 export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
-  const { tier, adapter, camera, scene, canvas, getRuntime, setRuntime, publishInventory } = args;
+  const { tier, adapter, camera, scene, gameAudio, canvas, getRuntime, setRuntime, publishInventory } = args;
   const promptLayout: PromptLayout = Object.freeze({ ...args.promptLayout });
   let cmdSeq = 1;
   const nextCmd = (): CommandId => cmdSeq++ as unknown as CommandId;
@@ -102,7 +105,11 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       runtime.dispatch({ kind: 'modifyStructure', id: nextCmd(), module: runtime.scene.moduleId as ModuleId, cell: runtime.defaultBreachCell(), op: 'board' });
     },
     ignite: () => getRuntime().igniteRoute(getRuntime().defaultBreachCell()),
-    toggleNearestDoor: () => { getRuntime().toggleNearestDoor(); },
+    toggleNearestDoor: () => {
+      const access = getRuntime().toggleNearestDoor(); // 'open' | 'closed' | 'locked' | null
+      if (access === 'open') gameAudio.doorOpen();
+      else if (access === 'closed') gameAudio.doorClose();
+    },
     // T108 window verbs. Board-up consumes planks + a tool; pry returns the planks — re-publish the
     // inventory so the HUD plank count updates immediately (V1). Climb VAULTS the player to the far side of
     // an opening (V70) — a player-only move; the window cell stays a blocked wall in nav (V68), never cleared.
@@ -118,6 +125,7 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       // No fallback: if no container is in reach there is nothing to loot — do nothing.
       const t = getRuntime().nearestInteractableTarget();
       if (t?.kind !== 'container') return;
+      gameAudio.containerOpen(); // cardboard-box open sound on the loot action
       inventoryViewStore.getState().setOpenContainer(t.label);
       // Anchor the panel to THIS world container so the render loop auto-closes it when the player walks out
       // of interaction range (item A — the loot panel is proximity-gated, unlike a manual `I` inventory).
