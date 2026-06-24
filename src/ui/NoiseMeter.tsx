@@ -23,6 +23,8 @@ export function NoiseMeter() {
       // Pulse only when the PLAYER is being loud (an actionable "the horde can hear you" alert), not on steady
       // ambient — a nearby horde keeps ambient maxed, and a permanent strobe reads as noise, not signal.
       className={`hbn-noise${self > 0.5 ? ' is-loud' : ''}`}
+      // Lift clear of the bottom-left HP/vitals panel (which sits in the same corner) so the two don't overlap.
+      style={{ bottom: '88px' }}
       aria-label={`Surrounding noise ${Math.round(ambient * 100)} percent`}
     >
       <svg viewBox="0 0 64 64" className="hbn-noise__svg" role="img">

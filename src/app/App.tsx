@@ -8,6 +8,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { GameViewport, type EngineHandle } from '../ui/GameViewport';
 import { Hud } from '../ui/Hud';
 import { NoiseMeter } from '../ui/NoiseMeter';
+import { DamageVignette } from '../ui/DamageVignette';
 import { Controls } from '../ui/Controls';
 import { SettingsPanel } from '../ui/SettingsPanel';
 import { PauseMenu } from '../ui/PauseMenu';
@@ -33,6 +34,7 @@ export function App() {
           <GameViewport onReady={onReady} onError={onError} />
           <Hud />
           <NoiseMeter />
+          <DamageVignette />
           <Controls handle={handle} />
           <SettingsPanel />
           <PauseMenu />
