@@ -64,8 +64,9 @@ describe('BlockScene (T38 render integration)', () => {
     const registry = new ResourceRegistry();
     const scene = new BlockScene({ runtime, tier: TIER, registry });
     const buildingCount = buildingsOf(district.block).length;
-    // at least one fade surface (roof) per building.
-    expect(scene.debugInfo.fadeSurfaces).toBeGreaterThanOrEqual(buildingCount);
+    // each building contributes a roof + upper-wall sides AND its interior partition edges (Item D: every interior
+    // partition is its own fade surface), so a templated district has strictly MORE than one surface per building.
+    expect(scene.debugInfo.fadeSurfaces).toBeGreaterThan(buildingCount);
 
     const camera = new CameraRig(resolveCameraSettings(TIER), 1).camera;
     expect(Math.min(...scene.debugFadeOpacity)).toBeCloseTo(1, 5); // all opaque before the cutaway runs

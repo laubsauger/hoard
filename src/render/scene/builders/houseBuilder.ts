@@ -2,8 +2,8 @@
 // horizontal clapboard siding, shaped roof + chimney + decay holes, front porch, and the shared instanced ivy
 // + debris dressing for the whole district. Returns HouseHandles (fade surfaces + section meshes) the cutaway
 // and breach systems consume per-frame. Pure static construction. Extracted from BlockScene
-// (docs/REFACTOR-godfiles.md). The fade-surface PUSH ORDER (per building: upper-wall sides → clapboard sides →
-// roof) is load-bearing — blockScene.test asserts the surface indices/counts.
+// (docs/REFACTOR-godfiles.md). The fade-surface PUSH ORDER (per building: upper-wall sides → roof → interior
+// partition walls) is load-bearing — blockScene.test asserts the surface indices/counts.
 
 import {
   BoxGeometry,
@@ -415,8 +415,10 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       }
     }
 
-    buildInteriorWalls(bi, style, wallH);
     buildRoofAssembly(b, bi, wallH, style, roofOffset);
+    // interior partitions push AFTER this building's exterior upper-wall sides + roof, so the per-building
+    // fade-surface order stays deterministic: [upper-wall sides…] → [roof] → [interior partition edges…].
+    buildInteriorWalls(bi, style, wallH);
     buildPorch(b, bi, style);
     collectIvy(b, style, grid, ivyMatrices);
     collectDebris(b, style, debrisMatrices, debrisColors);
@@ -432,8 +434,15 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
    * doors + windows already render from the blocked perimeter ring (the placed house's exterior, 1:1); this
    * adds the room dividers so the cutaway reveals a MULTI-ROOM interior instead of one open box. Each interior
    * wallEdge is a solid full-height panel centred on the shared cell face; an edge a DOOR opens is omitted
-   * (the doorway gap). Solid + opaque (NOT a fade surface) so partitions stay readable once the roof fades —
-   * they are the room dividers the player should see. Districts without templates (cityBlock) skip this.
+   * (the doorway gap). Districts without templates (cityBlock) skip this.
+   *
+   * ITEM D — each partition is its OWN fade surface (kind 'upperWall') so the X-RAY BUBBLE (V74) fades ONLY the
+   * partition(s) genuinely BETWEEN the player and the camera, leaving the rest solid (the rooms still read) — the
+   * fix for "the player vanishes behind an interior wall indoors". PER-EDGE granularity is required on BOTH the
+   * geometry (its own AABB for the segment-vs-box occlusion test) AND the material (Three opacity is per-material,
+   * so a shared material would fade every partition at once → no granularity); hence one transparent mesh + one
+   * transparent material per edge, mirroring the exterior upper-wall fade-surface push. The CutawaySystem drives
+   * opacity/depthWrite/visible uniformly over every fade surface, so partitions inherit V20/V60/V65/V29 for free.
    */
   function buildInteriorWalls(bi: number, style: HouseStyle, wallH: number): void {
     const house = ts.placedHouses?.[bi];
@@ -442,27 +451,37 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     // doorway gaps: the interior edges a door opens are left out (open passage between rooms).
     const doorEdgeKeys = new Set<string>();
     for (const door of house.doors) if (!door.exterior) doorEdgeKeys.add(door.edge.key);
-    const boxes: BoxGeometry[] = [];
+    // plaster-ish interior divider tint, derived from the house tint so it sits with the building (V59).
+    const tint = interiorWallColor(style.wallColor);
+    let edgeIdx = 0; // deterministic per-edge key (geometry/material) in house.wallEdges order
     for (const edge of house.wallEdges) {
       if (edge.kind !== 'interior') continue; // exterior shell already rendered from the ring
       if (doorEdgeKeys.has(edge.key)) continue; // doorway gap
       if (edge.outerCx === null || edge.outerCy === null) continue;
-      // world centre of the shared face = midpoint of the two adjacent cell centres.
+      // world centre of the shared face = midpoint of the two adjacent cell centres (the fade-surface AABB centre).
       const cxw = ((edge.innerCx + edge.outerCx + 1) / 2) * cs;
       const czw = ((edge.innerCy + edge.outerCy + 1) / 2) * cs;
       // 'z' run (cells differ in cx) → thin in X, full span in Z; 'x' run → thin in Z, full span in X.
-      const box = edge.along === 'z' ? new BoxGeometry(th, wallH, cs) : new BoxGeometry(cs, wallH, th);
-      box.translate(cxw, wallH / 2, czw);
-      boxes.push(box);
+      const alongZ = edge.along === 'z';
+      const geo = res.geo(`wallInterior.geo.${bi}.${edgeIdx}`, alongZ ? new BoxGeometry(th, wallH, cs) : new BoxGeometry(cs, wallH, th));
+      // transparent-capable per-edge material (opacity driven per-frame by the cutaway), one mesh per edge.
+      const mat = res.mat(`wallInterior.${bi}.${edgeIdx}`, { color: tint, roughness: 0.95, transparent: true, opacity: 1 });
+      const mesh = new Mesh(geo, mat);
+      mesh.position.set(cxw, wallH / 2, czw);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      wallsGroup.add(mesh);
+      // Per-edge X-RAY fade surface. kind 'upperWall' → the cutaway treats it as a WALL (segment-vs-AABB), NOT a
+      // roof. outwardNormal MUST be NON-NULL: surfaceInXrayField reads a null normal as a ROOF (always occludes
+      // within radius), which would fade EVERY nearby partition; the wall test is normal-FREE, so the value is
+      // irrelevant — only its presence selects the segment-vs-box test. AABB = the edge footprint: thin on the
+      // run-normal axis (th/2), full cell span on the run axis (cs/2).
+      const halfX = alongZ ? th / 2 : cs / 2;
+      const halfZ = alongZ ? cs / 2 : th / 2;
+      const outwardNormal: VecXZ = alongZ ? { x: 1, z: 0 } : { x: 0, z: 1 };
+      fadeSurfaces.push({ object: mesh, material: mat, kind: 'upperWall', outwardNormal, heightMeters: wallH, buildingIndex: bi, centerX: cxw, centerZ: czw, halfX, halfZ, opacity: 1 });
+      edgeIdx++;
     }
-    const merged = res.mergeBoxes(`wallInterior.geo.${bi}`, boxes);
-    if (!merged) return;
-    // plaster-ish interior divider tint, derived from the house tint so it sits with the building (V59).
-    const mat = res.mat(`wallInterior.${bi}`, { color: interiorWallColor(style.wallColor), roughness: 0.95 });
-    const mesh = new Mesh(merged, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    wallsGroup.add(mesh);
   }
 
   /** Shaped roof (gable / hip / flat) + chimney + decay holes, grouped so the whole assembly is the building's

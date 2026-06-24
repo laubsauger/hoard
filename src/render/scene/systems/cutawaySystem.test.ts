@@ -58,6 +58,26 @@ function southWall(czCenter: number, buildingIndex: number): FadeSurface {
   };
 }
 
+// An INTERIOR partition (Item D): a thin, full-height fade surface tagged kind 'upperWall' with a NON-NULL
+// normal so the cutaway runs the WALL segment-vs-AABB test (a null normal would read as a roof → always fade).
+// Footprint: an X-run partition is wide in x (halfX=1), thin in z (halfZ=0.1); its plane sits at z=czCenter.
+function interiorWall(czCenter: number): FadeSurface {
+  const material = new MeshStandardMaterial({ transparent: true });
+  return {
+    object: new Mesh(undefined, material),
+    material,
+    kind: 'upperWall',
+    outwardNormal: { x: 0, z: 1 },
+    heightMeters: 3,
+    buildingIndex: 0,
+    centerX: 5,
+    centerZ: czCenter,
+    halfX: 1,
+    halfZ: 0.1,
+    opacity: 1,
+  };
+}
+
 // camera looking down at the player from +z+y so the player→camera direction is non-degenerate.
 const camera = (() => {
   const c = new PerspectiveCamera();
@@ -125,6 +145,28 @@ describe('CutawaySystem (X-ray bubble V74)', () => {
     for (let i = 0; i < 30; i++) sys.update(fakeRuntime(), camera, 1 / 30, false);
     expect(wall.opacity).toBeGreaterThan(0.95);
     expect(wall.material.depthWrite).toBe(true);
+  });
+
+  it('Item D: fades an INTERIOR partition that lies BETWEEN the player and the camera (see your character indoors)', () => {
+    // Player at (5,5), camera at (5,40,30); a partition plane at z=8 is between them within the bubble. As its
+    // own fade surface it now dissolves so the player is no longer hidden behind an interior wall.
+    const wall = interiorWall(8);
+    const sys = new CutawaySystem([wall], cfg());
+    for (let i = 0; i < 30; i++) sys.update(fakeRuntime(), camera, 1 / 30, false);
+    expect(wall.opacity).toBeLessThan(0.5);
+    expect(wall.material.depthWrite).toBe(false); // V20: faded → stops occluding the floor/units below
+    expect(wall.object.visible).toBe(true); // V60: still casts shadows
+  });
+
+  it('Item D: keeps an interior partition OFF TO THE SIDE solid (only the occluding wall fades, rooms still read)', () => {
+    // A partition at z=2 is BEHIND the player relative to the camera (player z=5 → camera z=30 heads +z, never
+    // crossing z=2): within the radius but NOT on the sightline → the segment test keeps it solid. This proves
+    // the fade is occlusion-DIRECTIONAL per edge, not merely radius-proximate, so non-occluding partitions read.
+    const wall = interiorWall(2);
+    const sys = new CutawaySystem([wall], cfg());
+    for (let i = 0; i < 30; i++) sys.update(fakeRuntime(), camera, 1 / 30, false);
+    expect(wall.opacity).toBeGreaterThan(0.95);
+    expect(wall.material.depthWrite).toBe(true); // opaque → occludes normally
   });
 
   it('snaps to the opaque target at the construction prime (dt<=0, no camera)', () => {
