@@ -117,3 +117,19 @@ sound; (P3d) render stacking + per-level cutaway + stairs mesh; (P3e) cityDistri
 8. **Collapsed-roof sag clamp.** `style.collapsed` tilts `buildRoofAssembly`'s roof (rotation.z) too far on one
    side — the low edge dips BELOW the wall top so the walls poke through above the roof. Clamp the sag so the
    roof's lowest point stays at/above the wall plate, or reduce the collapse tilt + raise the ridge to compensate.
+
+## Gameplay/render feedback batch (do after tree consolidates)
+A. **Container inventory panel UX.** Opening a container (F) shows the inventory smack-center with a backdrop.
+   Reposition it (off-center), remove the backdrop, keep the world visible + interactable behind it, and
+   AUTO-CLOSE when the player walks out of range.
+B. **Zombie investigate persistence.** A startled zombie that loses the stimulus (e.g. door closed) freezes on
+   the spot instead of continuing to investigate the last-known origin. It should keep moving to investigate
+   what startled it (the V14 investigateTicks already exists — wire it so a lost stimulus → investigate, not stop).
+C. **Zombies see through windows** with the SAME edge-window LOS logic as the player (the edge-window LOS exists
+   now — make zombie perception use it, so a zombie can spot the player through a window).
+D. **X-ray cull DIRECTION wrong.** Interior walls BEHIND the player (between camera and player, occluding) are
+   NOT being faded → can't see indoors; walls BEHIND the character (away from camera) ARE being faded. Only
+   geometry roughly IN FRONT of the character along the camera→player view (occluders between camera and player)
+   should fade. Fix the cull to use the camera→player direction, not a blanket/with reversed sense.
+E. **Flashlight not lighting walls.** The wall faces aren't illuminated by the player flashlight (image). Possibly
+   tied to the wall-offset-from-floor / rim issue. Make the flashlight actually light interior wall surfaces.
