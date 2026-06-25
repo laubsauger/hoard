@@ -16,6 +16,7 @@ import { highlightFields } from './rendering/highlight';
 import { gibFields } from './rendering/gib';
 import { combatFeedbackFields } from './rendering/combatFeedback';
 import { houseFields } from './rendering/house';
+import { ragdollFields } from './rendering/ragdoll';
 
 export const renderingConfig = registerDomain('rendering', {
   ...bloodFields,
@@ -26,6 +27,7 @@ export const renderingConfig = registerDomain('rendering', {
   ...gibFields,
   ...combatFeedbackFields,
   ...houseFields,
+  ...ragdollFields,
 });
 
 // Non-field exports relocated to ./rendering/crowd; re-exported here so existing
