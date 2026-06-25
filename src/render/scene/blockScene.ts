@@ -55,6 +55,7 @@ import { buildContainers } from './builders/containersBuilder';
 import { buildFurniture } from './builders/furnitureBuilder';
 import { buildPlayer } from './builders/playerBuilder';
 import type { PlayerAvatar } from '../player';
+import { FloorPileView } from './floorPileView';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
@@ -76,6 +77,7 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
 import { resolveHouseVariation } from '../../game/scene';
+import { ITEM } from '../../game/inventory';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
 const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
@@ -155,6 +157,8 @@ export class BlockScene {
   private lastPlayerDamageTick = -1;
   /** Cheap contact-AO / grounding disc that follows the player (T45/V36) — soft dark radial gradient. */
   private aoContact: Mesh | null = null;
+  /** T85: markers for dropped floor piles, synced from `runtime.floorPileMarkers()` each frame. */
+  private readonly floorPiles: FloorPileView;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -405,6 +409,10 @@ export class BlockScene {
     this.crowd.mesh.receiveShadow = true;
     this.scene.add(this.crowd.mesh);
 
+    // T85: dropped-item floor markers (pooled boxes, tracked for V24).
+    this.floorPiles = new FloorPileView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.floorPiles.group);
+
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
     const combatSettings = resolveCombatFeedbackSettings(this.tier);
     this.combat = new CombatFeedbackSystem(combatSettings);
@@ -571,11 +579,20 @@ export class BlockScene {
     // B8/V41/T127: single-source the aim heading. playerAim() is atan2(dz,dx); the avatar bakes its own
     // mesh-forward offset (the Ranger bind pose faces +Z) so the face tracks the aim/flashlight-nose direction.
     this.playerAvatar.faceAim(this.runtime.playerAim());
+    // T141: show the active equipment slot's weapon in the avatar's hand (V102 — the slot is the source of truth);
+    // null = unarmed → no mesh. Cheap no-op when unchanged; defers to GLB load if the avatar isn't rigged yet.
+    this.playerAvatar.setWeapon(this.runtime.equippedItem());
+    // T85: position the dropped-item markers on the local ground (same height basis as the avatar).
+    this.floorPiles.sync(this.runtime.floorPileMarkers(), groundY);
 
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);
     this.windows.sync(this.runtime);
-    this.flashlightSys.update(this.runtime, sceneBrightness, this.flashlightOn);
+    // T98/T141: the beam (and its off-hand prop) require a CARRIED flashlight item — no free light. The avatar
+    // holds the lit flashlight in its OFF hand (left), so the right hand keeps the weapon (a "second hand").
+    const flashlightLit = this.flashlightOn && this.runtime.playerCarries(ITEM.Flashlight);
+    this.flashlightSys.update(this.runtime, sceneBrightness, flashlightLit);
+    this.playerAvatar.setOffhandLight(flashlightLit);
     this.cutaway.update(this.runtime, camera, dtSeconds, this.accessibility.feedback.reduceMotion);
     // T109/V73: recompute the fog-of-war visible set (cone ∪ passive disc, LOS-gated) + age the ground overlay.
     // A pure VIEW — never mutates the sim/nav (V2/V63). Runs every frame so exploration accrues regardless of dev

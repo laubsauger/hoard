@@ -16,10 +16,19 @@ import {
   type AnimationAction,
   type Mesh,
   type MeshStandardMaterial,
+  type Object3D,
+  type SkinnedMesh,
   type Texture,
 } from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Disposable, ResourceKind } from '../engine/resources';
+import { buildWeaponMeshes, buildFlashlightMesh, weaponVisualForItem, type WeaponVisual } from './weaponMesh';
+
+/** Held-weapon seat in the RIGHT-HAND bone, in WORLD meters (counter-scaled by the bone's world scale on attach,
+ *  so a meter-built mesh renders at meter size regardless of the rig's internal scale). Reasonable defaults — the
+ *  exact palm seat / aim alignment may want a small visual tweak against the ranger rig (T141). */
+const WEAPON_HOLD_OFFSET = { x: 0.0, y: -0.02, z: 0.0 };
+const WEAPON_HOLD_EULER = { x: 0, y: 0, z: 0 };
 
 /** The Ranger clips this avatar drives (a subset of the 9 in `ranger.glb`). */
 export type RangerClip =
@@ -143,6 +152,17 @@ export class PlayerAvatar {
   private loaded = false;
   private readonly heightMeters: number;
 
+  // T141 — held weapon: the right-hand bone, prebuilt per-visual meshes (one parented at a time), and the
+  // counter-scale that cancels the rig's world scale so a meter-built weapon renders at meter size.
+  private handBone: Object3D | null = null;
+  private invHandScale = 1;
+  private weaponMeshes: Record<WeaponVisual, Object3D> | null = null;
+  private currentWeaponVisual: WeaponVisual | null = null;
+  private desiredWeaponItem: number | null = null;
+  // T141 — off-hand (left) flashlight prop: parented to the left-hand bone, shown only while the beam is lit.
+  private offHandLightMesh: Object3D | null = null;
+  private offhandLightOn = false;
+
   constructor(opts: PlayerAvatarOptions) {
     this.heightMeters = opts.heightMeters;
     this.root.name = 'player.avatar';
@@ -216,7 +236,79 @@ export class PlayerAvatar {
       this.actions.set(clip.name as RangerClip, action);
     }
     this.mixer.addEventListener('finished', this.onActionFinished);
+
+    // T141: resolve the right-hand bone + prebuild the held-weapon meshes (tracked for V24), then seat whatever
+    // weapon was requested before the GLB resolved.
+    this.setupWeaponRig(model, track);
     this.loaded = true;
+    this.applyWeapon();
+  }
+
+  /** Find the RIGHT-HAND bone, capture the inverse of its world scale (to render meter-built weapons at size),
+   *  and build the per-visual weapon meshes (detached until `applyWeapon` parents the active one). */
+  private setupWeaponRig(model: Object3D, track: TrackFn): void {
+    let skinned: SkinnedMesh | undefined;
+    model.traverse((o) => {
+      if (!skinned && (o as SkinnedMesh).isSkinnedMesh) skinned = o as SkinnedMesh;
+    });
+    const bones = skinned?.skeleton.bones ?? [];
+    this.handBone = bones.find((b) => b.name === 'RightHand') ?? null;
+    model.updateWorldMatrix(true, true);
+    if (this.handBone) {
+      const s = this.handBone.getWorldScale(new Vector3());
+      this.invHandScale = s.x > 0 ? 1 / s.x : 1;
+    }
+    this.weaponMeshes = buildWeaponMeshes(track);
+
+    // T141: off-hand flashlight prop — parent to the LEFT-hand bone (counter-scaled), hidden until lit.
+    const offBone = bones.find((b) => b.name === 'LeftHand') ?? null;
+    if (offBone) {
+      const inv = offBone.getWorldScale(new Vector3());
+      const invScale = inv.x > 0 ? 1 / inv.x : 1;
+      const mesh = buildFlashlightMesh(track);
+      mesh.scale.setScalar(invScale);
+      mesh.position.set(WEAPON_HOLD_OFFSET.x * invScale, WEAPON_HOLD_OFFSET.y * invScale, WEAPON_HOLD_OFFSET.z * invScale);
+      mesh.visible = this.offhandLightOn; // apply any request made before the GLB attached
+      offBone.add(mesh);
+      this.offHandLightMesh = mesh;
+    }
+  }
+
+  /** T141: show/hide the off-hand flashlight prop (the SpotLight beam itself lives in the scene's FlashlightSystem).
+   *  Toggling a MESH's visibility is cheap (no pipeline recompile — unlike toggling a light, cf. the freeze fix). */
+  setOffhandLight(on: boolean): void {
+    this.offhandLightOn = on;
+    if (this.offHandLightMesh) this.offHandLightMesh.visible = on;
+  }
+
+  /**
+   * T141: show the equipped item's weapon mesh in the avatar's hand — `item` is the runtime's `equippedItem()`
+   * (null = unarmed → no mesh). Cheap no-op when the visual is unchanged; if called before the GLB attaches it
+   * records the request + applies on load. Drives off the SLOT/active-weapon source of truth (V102).
+   */
+  setWeapon(item: number | null): void {
+    this.desiredWeaponItem = item;
+    this.applyWeapon();
+  }
+
+  /** Parent the desired weapon visual to the hand bone (swapping out any previous), counter-scaled + seated. */
+  private applyWeapon(): void {
+    if (!this.handBone || !this.weaponMeshes) return; // rig not attached yet — re-applied from attachGltf
+    const visual = this.desiredWeaponItem !== null ? weaponVisualForItem(this.desiredWeaponItem) : null;
+    if (visual === this.currentWeaponVisual) return;
+    if (this.currentWeaponVisual) this.handBone.remove(this.weaponMeshes[this.currentWeaponVisual]);
+    if (visual) {
+      const mesh = this.weaponMeshes[visual];
+      mesh.scale.setScalar(this.invHandScale);
+      mesh.position.set(
+        WEAPON_HOLD_OFFSET.x * this.invHandScale,
+        WEAPON_HOLD_OFFSET.y * this.invHandScale,
+        WEAPON_HOLD_OFFSET.z * this.invHandScale,
+      );
+      mesh.rotation.set(WEAPON_HOLD_EULER.x, WEAPON_HOLD_EULER.y, WEAPON_HOLD_EULER.z);
+      this.handBone.add(mesh);
+    }
+    this.currentWeaponVisual = visual;
   }
 
   /** Trigger the push-up emote (a single one-shot; returns to locomotion when it finishes). */
@@ -265,6 +357,11 @@ export class PlayerAvatar {
     this.actions.clear();
     this.currentClip = null;
     this.loaded = false;
+    // T141: drop weapon refs (the GPU resources are registry-owned → freed on host dispose, V24).
+    this.handBone = null;
+    this.weaponMeshes = null;
+    this.currentWeaponVisual = null;
+    this.offHandLightMesh = null;
   }
 
   /** Crossfade from the current action to `clip` (or restart it if re-firing the same one-shot). */

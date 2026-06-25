@@ -27,11 +27,12 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // Two HTML entries: the main game + the isolated ragdoll-test harness (a reduced WebGPU scene with ONE
-      // killable zombie, served at /ragdoll-test.html in dev; included in `npm run build`).
+      // HTML entries: the main game + two isolated WebGPU test harnesses (the single-zombie ragdoll-test and the
+      // dense crowd-test, served at /ragdoll-test.html and /crowd-test.html in dev; included in `npm run build`).
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         ragdollTest: fileURLToPath(new URL('./ragdoll-test.html', import.meta.url)),
+        crowdTest: fileURLToPath(new URL('./crowd-test.html', import.meta.url)),
       },
     },
   },

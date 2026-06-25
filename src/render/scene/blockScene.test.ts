@@ -32,10 +32,15 @@ describe('BlockScene (T38 render integration)', () => {
     expect(registry.size).toBeGreaterThan(0); // resources tracked for disposal (V24)
   });
 
-  it('packs the live crowd into the InstancedMesh from the SoA', () => {
+  it('wires the live crowd under the scene root via the two LOD lanes (box path removed, T140)', () => {
     const { runtime, scene } = makeScene(24);
-    expect(scene.crowd.mesh.count).toBe(runtime.aliveCount);
-    expect(scene.crowd.mesh.count).toBe(24);
+    expect(runtime.aliveCount).toBe(24);
+    // The crowd scene-graph root is parented into the rendered scene...
+    expect(scene.crowd.mesh.parent).toBe(scene.scene);
+    // ...and the box horde mesh is gone — the crowd renders through the rigged (near) + impostor (far) lanes,
+    // which partition every alive zombie by distance (the SoA→draw split is unit-tested in packing.test).
+    expect(scene.crowd.rigged).toBeDefined();
+    expect(scene.crowd.impostor).toBeDefined();
   });
 
   it('hides exactly the breached section footprint', () => {

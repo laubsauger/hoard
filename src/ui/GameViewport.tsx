@@ -277,6 +277,7 @@ export function GameViewport({ onReady, onError }: GameViewportProps) {
           getRuntime: () => runtime,
           getAccess: () => access,
           bumpSelfNoise: () => { selfNoise.value = 1; },
+          publishInventory,
         }),
       );
 

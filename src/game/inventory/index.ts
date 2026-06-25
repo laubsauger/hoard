@@ -6,6 +6,15 @@ export { rollLoot, LOOT_SOURCES, type LootSource, type LootStack, type LootEntry
 export { consumeEffect, isConsumable, type ConsumeEffect } from './consume';
 export { weaponClassForItem, type WeaponClassName } from './weaponItems';
 export {
+  type EquipSlot,
+  STORAGE_SLOTS,
+  SLOT_LABELS,
+  isEquippable,
+  slotsForItem,
+  slotAccepts,
+  homeSlotForItem,
+} from './equipSlots';
+export {
   InventorySystem,
   type ContainerType,
   type ContainerDef,

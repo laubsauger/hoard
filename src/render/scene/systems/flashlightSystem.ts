@@ -28,10 +28,17 @@ export class FlashlightSystem {
 
   update(runtime: GameRuntime, sceneBrightness: number, on: boolean): void {
     const f = this.flashlight;
+    // PERF (the multi-second freeze on every toggle): NEVER flip `f.visible`. Toggling a shadow-casting light's
+    // visibility changes the renderer's active-light set, which forces the WebGPU backend to RECOMPILE every
+    // node-material pipeline in the scene — a ~3s stall on each flick. Keep the light permanently present and
+    // drive the beam by INTENSITY (0 = off); pausing its shadow auto-update while off means a 0-intensity light
+    // costs nothing per frame and triggers no recompile. (`f.visible` stays at its constructed `true`.)
     if (!on) {
-      f.visible = false;
+      f.intensity = 0;
+      f.shadow.autoUpdate = false;
       return;
     }
+    f.shadow.autoUpdate = true;
     const p = runtime.player();
     const aim = runtime.playerAim();
     const cos = Math.cos(aim);
@@ -58,6 +65,5 @@ export class FlashlightSystem {
     const dayScale = this.cfg.dayIntensityScale;
     const brightness = Math.min(1, Math.max(0, sceneBrightness));
     f.intensity = this.cfg.intensity * (dayScale + (1 - dayScale) * (1 - brightness));
-    f.visible = f.intensity > 0;
   }
 }

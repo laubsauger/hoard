@@ -63,8 +63,9 @@ import type { QualityTier } from '../../config/types';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { CrowdSettings } from './crowd';
-import { variationHash01, variationScale, variationSeed } from './packing';
+import { BAND_RIGGED, variationHash01, variationScale, variationSeed } from './packing';
 import { visionCullFade, type VisionCull } from './visionCull';
+import type { CrowdImpostors } from './impostor';
 import {
   Ragdoll,
   buildRagdollSpec,
@@ -98,8 +99,9 @@ import {
 const BAKE_FPS = 30;
 /** 4 RGBA-float texels per bone = the 4 columns of the bone's affine mat4. */
 const TEXELS_PER_BONE = 4;
-/** Rigged crowd standing height (m) — matches the player avatar (T127) so scale reads consistently. */
-const RIGGED_HEIGHT_METERS = 1.8;
+/** Rigged crowd standing height (m) — matches the player avatar (T127) so scale reads consistently. The impostor
+ *  lane fits its baked silhouette to the SAME height so the LOD swap reads at a consistent size (T140). */
+export const RIGGED_HEIGHT_METERS = 1.8;
 /** Fallback flesh tint if a GLB ships no albedo map (should not happen — Meshy bakes one into emissive). */
 const RIGGED_FALLBACK_COLOR = 0x6e6a52;
 /** T133 — per-instance render data is INTERLEAVED into ONE instanced vertex buffer (1 slot, 3 attributes) instead
@@ -675,18 +677,20 @@ function buildCorpseLayer(
 }
 
 /**
- * The rigged near-band crowd: per-archetype InstancedMeshes drawn from a baked bone texture (GPU skinning). It
- * REPLACES the procedural CrowdLimbs once all archetype GLBs have loaded (until then `isReady` is false and the
- * Crowd keeps drawing the limbed figures, so there is never a visible gap). It consumes the SAME limbed-band
- * partition (simTier <= maxSimTier, first `budget` ranks) as packCrowdInputs/packLimbInputs, so the box horde
- * keeps drawing exactly the far + overflow members — every alive zombie is drawn by exactly one path.
- * Construction is GPU-free; only `attach` (bake) + frame submission touch real buffers/textures.
+ * The rigged near/mid-band crowd: per-archetype InstancedMeshes drawn from a baked bone texture (GPU skinning).
+ * It draws every alive zombie the shared DISTANCE mask marks `BAND_RIGGED` (within the rigged distance); the far
+ * band is drawn by the billboard impostor lane (CrowdImpostors), so every alive zombie is drawn by exactly one
+ * lane (§B). There is NO count budget — the per-archetype InstancedMesh capacity (= the crowd instance capacity =
+ * the sim zombie cap) is the only cap. Until every archetype GLB has baked, `isReady` is false and the Crowd draws
+ * nothing (no boxes during the ~1s gap; the blob CorpseField covers corpses). Construction is GPU-free; only
+ * `attach` (bake bone texture + impostor atlas) + frame submission touch real buffers/textures.
  */
 export class RiggedCrowd {
   private readonly slots = new Map<ArchetypeKey, ArchetypeSlot>();
   private readonly settings: CrowdSettings;
+  /** Per-archetype InstancedMesh capacity = the crowd instance capacity (the sim zombie cap). NO count budget —
+   *  every in-view, alive, near-band zombie is drawn as a rigged figure; the total is bounded only by capacity. */
   private readonly budget: number;
-  private readonly maxSimTier: number;
   private readonly variationCount: number;
   private readonly scaleMin: number;
   private readonly scaleMax: number;
@@ -710,10 +714,9 @@ export class RiggedCrowd {
   private slotFromRow: Float32Array | null = null;
   private slotLastRow: Float32Array | null = null;
 
-  constructor(settings: CrowdSettings, private readonly parent: Object3D) {
+  constructor(settings: CrowdSettings, private readonly parent: Object3D, private readonly impostors?: CrowdImpostors) {
     this.settings = settings;
-    this.budget = settings.limbedBudget;
-    this.maxSimTier = settings.limbedMaxSimTier;
+    this.budget = settings.capacity;
     this.variationCount = settings.variationCount;
     this.scaleMin = settings.scaleMin;
     this.scaleMax = settings.scaleMax;
@@ -738,6 +741,9 @@ export class RiggedCrowd {
     this.slots.set(key, slot);
     this.parent.add(slot.mesh);
     this.parent.add(slot.corpseMesh);
+    // Bake this archetype's FAR-band billboard impostor from the SAME GLB (T140). Optional: the isolated
+    // ragdoll-test harness constructs a RiggedCrowd with no impostor lane (single zombie, no far band).
+    this.impostors?.bakeArchetype(key, gltf, track);
   }
 
   /** DEV/test-only (the ragdoll-test harness): the live ragdoll for a dead entity id, or undefined. Read-only —
@@ -746,7 +752,7 @@ export class RiggedCrowd {
     return this.ragdolls.get(entity);
   }
 
-  /** Hide every rigged mesh (draw 0 instances) — used while the limbed fallback owns the near band. */
+  /** Hide every rigged mesh (draw 0 instances) — used during the pre-bake gap (no boxes; nothing drawn). */
   hide(): void {
     for (const slot of this.slots.values()) slot.mesh.count = 0;
   }
@@ -874,23 +880,17 @@ export class RiggedCrowd {
     const alive = requireView<Uint8Array>(views, 'alive');
     const position = requireView<Float32Array>(views, 'position');
     const heading = requireView<Float32Array>(views, 'heading');
-    const simTier = requireView<Uint8Array>(views, 'simTier');
     const state = requireView<Uint8Array>(views, 'state');
     const archetype = requireView<Uint16Array>(views, 'archetype');
     const velocity = requireView<Float32Array>(views, 'velocity');
 
-    // `rank` counts limbed-eligible alive slots in slot order, IDENTICALLY to packCrowdInputs' figureRank /
-    // packLimbInputs' rank, so the box path draws exactly the far + over-budget members (no double-draw, no gap).
-    let rank = 0;
+    // The near band: every alive slot the shared distance mask marks BAND_RIGGED (the far band is drawn by the
+    // impostor lane). When NO mask is supplied (the isolated ragdoll-test single-zombie path), every alive
+    // in-view zombie is rigged. NO count budget — the per-archetype capacity is the only cap (§B: each alive
+    // zombie is drawn by exactly one lane).
     for (let s = 0; s < count; s++) {
       if (alive[s] === 0) continue;
-      if (figureMask) {
-        // Distance-ranked partition — draw only the shared mask's near figures (identical to the box + limb passes).
-        if (figureMask[s] !== 1) continue;
-      } else {
-        if (simTier[s]! > this.maxSimTier) continue; // not near-band → drawn as a box
-        if (rank++ >= this.budget) continue; // beyond the pool cap → the box path draws this overflow figure
-      }
+      if (figureMask && figureMask[s] !== BAND_RIGGED) continue; // far band → impostor lane draws it
 
       // Vision-cone fog-of-war (T96) + perception v2 (V62): read the precomputed per-slot reveal, else the cone fade.
       let fade = 1;
@@ -900,7 +900,7 @@ export class RiggedCrowd {
       }
 
       const slot = this.slots.get(archetypeKeyForIndex(archetype[s]!))!;
-      if (slot.live >= this.budget) continue; // per-archetype mesh capacity guard (== total budget)
+      if (slot.live >= this.budget) continue; // per-archetype mesh capacity guard (== crowd instance capacity)
 
       const st = state[s]!;
       const clipName = clipForState(CLIP_MAPS[slot.key], st);

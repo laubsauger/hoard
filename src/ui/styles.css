@@ -631,6 +631,62 @@ body,
 .hbn-char__num { width: 26px; text-align: right; font: 10px ui-monospace, Menlo; color: #9fb0cc; }
 .hbn-char__hint { margin: 14px 0 0; font: 10px ui-monospace, Menlo; color: #7e8da9; text-align: center; }
 
+/* ---- T140: inventory "equip ▾" attach picker ---- */
+.hbn-inv__use.is-open { background: #5aa0ff; color: #06101f; }
+/* T85: drop button — muted (not the green "use") so it doesn't read as a beneficial action. */
+.hbn-inv__drop { background: #6b7280; color: #0a0f17; }
+.hbn-inv__drop:hover { background: #8b95a5; }
+.hbn-inv__attach {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0 2px 6px;
+}
+.hbn-inv__attach-slot {
+  padding: 5px 9px; border: 1px solid rgba(130,160,210,0.3); border-radius: 6px; cursor: pointer;
+  font: 600 10px ui-monospace, Menlo; letter-spacing: 0.06em; color: #cdd8ee; background: rgba(120,150,210,0.12);
+}
+.hbn-inv__attach-slot:hover { background: rgba(120,150,210,0.28); color: #fff; }
+
+/* ---- T140: equipment paper-doll (CharacterPanel) ---- */
+.hbn-equip { margin-bottom: 4px; }
+.hbn-equip__hands {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 10px; margin-bottom: 8px;
+  background: rgba(90,160,255,0.1); border: 1px solid rgba(90,160,255,0.3); border-radius: 8px;
+}
+.hbn-equip__slots { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.hbn-equip__slot { display: flex; align-items: stretch; gap: 2px; }
+.hbn-equip__draw {
+  flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 7px 9px;
+  background: rgba(120,140,175,0.08); border: 1px solid rgba(130,160,210,0.18); border-radius: 7px;
+  text-align: left; cursor: pointer; transition: background 0.12s ease, border-color 0.12s ease;
+}
+.hbn-equip__draw:hover:not(:disabled) { background: rgba(120,150,210,0.2); }
+.hbn-equip__draw:disabled { cursor: default; opacity: 0.55; }
+.hbn-equip__slot.is-active .hbn-equip__draw {
+  border-color: #5aa0ff; background: rgba(90,160,255,0.16); box-shadow: 0 0 0 1px rgba(90,160,255,0.4) inset;
+}
+.hbn-equip__label { font: 9px ui-monospace, Menlo; letter-spacing: 0.12em; text-transform: uppercase; color: #6b7a99; }
+.hbn-equip__item { font: 12px ui-sans-serif, system-ui; color: #e8eefb; }
+.hbn-equip__hands .hbn-equip__item { color: #9cc7ff; font-weight: 600; }
+.hbn-equip__unequip {
+  flex: 0 0 auto; width: 22px; border: 1px solid rgba(130,160,210,0.18); border-radius: 6px; cursor: pointer;
+  font: 11px ui-monospace, Menlo; color: #8fa1c2; background: rgba(120,140,175,0.08);
+}
+.hbn-equip__unequip:hover { color: #ff6b6b; border-color: rgba(255,107,107,0.4); background: rgba(255,107,107,0.12); }
+
+/* ---- T140: HUD hotbar strip ---- */
+.hbn-hotbar {
+  position: absolute; left: 50%; bottom: calc(16px * var(--hbn-ui-scale)); transform: translateX(-50%);
+  display: flex; gap: 6px; pointer-events: none;
+}
+.hbn-hotbar__cell {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 64px; padding: 6px 8px;
+  background: var(--hbn-panel); border: 1px solid rgba(130,160,210,0.2); border-radius: 8px;
+  backdrop-filter: blur(4px);
+}
+.hbn-hotbar__cell.is-active { border-color: #5aa0ff; background: rgba(90,160,255,0.18); box-shadow: 0 0 12px rgba(90,160,255,0.35); }
+.hbn-hotbar__cell.is-empty { opacity: 0.5; }
+.hbn-hotbar__key { font: 600 10px ui-monospace, Menlo; color: #5aa0ff; }
+.hbn-hotbar__item { font: 10px ui-sans-serif, system-ui; color: #d7e0f2; white-space: nowrap; }
+
 /* ---- InteractionWheel: context verbs (E) ---- */
 .hbn-wheel { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 45; pointer-events: none; }
 .hbn-wheel__panel {

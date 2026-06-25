@@ -48,10 +48,17 @@ describe('FlashlightSystem (B44)', () => {
     expect(day.intensity).toBeCloseTo(CFG.intensity * CFG.dayIntensityScale, 6); // subtle at noon
   });
 
-  it('hides cleanly when off', () => {
+  it('turns off via INTENSITY (never toggles visible) so no pipeline recompile / freeze', () => {
     const light = new SpotLight();
     const sys = new FlashlightSystem(light, CFG);
-    sys.update(fakeRuntime(), 0, false);
-    expect(light.visible).toBe(false);
+    sys.update(fakeRuntime(), 0, true); // on
+    expect(light.intensity).toBeGreaterThan(0);
+    sys.update(fakeRuntime(), 0, false); // off
+    expect(light.intensity).toBe(0); // contributes no light
+    expect(light.visible).toBe(true); // ...but stays in the render set — toggling visible is what froze the game
+    expect(light.shadow.autoUpdate).toBe(false); // shadow re-render paused while off (no per-frame cost)
+    sys.update(fakeRuntime(), 0, true); // back on
+    expect(light.shadow.autoUpdate).toBe(true);
+    expect(light.intensity).toBeGreaterThan(0);
   });
 });

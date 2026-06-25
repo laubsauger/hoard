@@ -37,11 +37,21 @@ export interface RegisterInputArgs {
   readonly getAccess: () => RenderAccessibility;
   /** Bump the player-produced noise to max (a gunshot is the loudest thing the player makes). */
   readonly bumpSelfNoise: () => void;
+  /** T140: re-publish the inventory view after an equip/draw/swap so the hotbar + paper-doll highlight update. */
+  readonly publishInventory: () => void;
 }
 
 /** Wire the viewport input listeners; returns a single cleanup that removes all of them. */
 export function registerInput(args: RegisterInputArgs): () => void {
-  const { canvas, camera, aim, keys, gameAudio, scene, impactView, surfaceProjector, firearmRangeMeters, getRuntime, getAccess, bumpSelfNoise } = args;
+  const { canvas, camera, aim, keys, gameAudio, scene, impactView, surfaceProjector, firearmRangeMeters, getRuntime, getAccess, bumpSelfNoise, publishInventory } = args;
+
+  // T140: number keys 1..4 draw an equipment slot to hands (holster / back / belt L / belt R), in hotbar order.
+  const HOTBAR_KEYS: Record<string, 'holster' | 'back' | 'beltL' | 'beltR'> = {
+    Digit1: 'holster',
+    Digit2: 'back',
+    Digit3: 'beltL',
+    Digit4: 'beltR',
+  };
 
   // ---- input: WASD move, mouse aim, click fire, Q/E rotate, +/- zoom, B breach, R board ----
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -63,8 +73,11 @@ export function registerInput(args: RegisterInputArgs): () => void {
     }
     // T74: reload (R) + cycle weapon ([ / ]). Direct keys for the prototype (rebindable bindings later).
     if (e.code === 'KeyR') getRuntime().reloadWeapon(); // reload sample plays from the render loop's reload-start edge (manual + auto)
-    if (e.code === 'BracketRight') getRuntime().cycleWeapon(1);
-    if (e.code === 'BracketLeft') getRuntime().cycleWeapon(-1);
+    // T140: weapon swap ([ / ]) + hotbar draw (1..4) both change the ACTIVE equipment slot → re-publish the
+    // inventory so the hotbar + paper-doll in-hands highlight tracks the new active weapon (V11).
+    if (e.code === 'BracketRight') { getRuntime().cycleWeapon(1); publishInventory(); }
+    if (e.code === 'BracketLeft') { getRuntime().cycleWeapon(-1); publishInventory(); }
+    if (e.code in HOTBAR_KEYS && !e.repeat) { getRuntime().drawSlot(HOTBAR_KEYS[e.code]!); publishInventory(); }
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
     // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
     if (e.code === 'KeyL') debugViewStore.getState().toggleFlag('flashlight');

@@ -136,4 +136,25 @@ describe('inventory — equip + encumbrance', () => {
     expect(e).toBeGreaterThan(0);
     expect(e).toBeLessThan(1);
   });
+
+  // T140: an equipment slot is a single-item container (maxStacks 1) — a SECOND distinct item is rejected.
+  it('a maxStacks:1 slot rejects a second distinct item (slot-full)', () => {
+    const { inv, backpack, can, pistol } = setup();
+    const slot: ContainerRef = { entity: PLAYER, container: 'beltL' };
+    inv.addContainer(slot, { type: 'clothing', capacityKg: 8, allowedCategories: ['weapon', 'food'], maxStacks: 1 });
+    inv.seed(backpack, can, 1);
+    inv.seed(backpack, pistol, 1);
+    expect(inv.apply(moveCmd(can, backpack, slot, 1)).result.ok).toBe(true);
+    const second = inv.apply(moveCmd(pistol, backpack, slot, 1));
+    expect(second.result.ok).toBe(false);
+    if (!second.result.ok) expect(second.result.reason).toBe('slot-full');
+    // first item still there, second never moved.
+    expect(inv.count(slot, can)).toBe(1);
+    expect(inv.count(slot, pistol)).toBe(0);
+  });
+
+  it('rejects a container created with maxStacks < 1', () => {
+    const { inv } = setup();
+    expect(() => inv.addContainer({ entity: PLAYER, container: 'bad' }, { type: 'clothing', maxStacks: 0 })).toThrow();
+  });
 });

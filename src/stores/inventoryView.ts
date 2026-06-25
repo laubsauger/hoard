@@ -14,6 +14,11 @@ export interface ContainerView {
   readonly capacity: number;
   readonly weight: number;
   readonly slots: readonly InventorySlotView[];
+  /** T140: this container is one of the player's equipment slots (holster/back/belt L/belt R) — drives the
+   *  paper-doll + hotbar UI, and keeps the slots out of the dual-pane loot view. */
+  readonly equipSlot?: boolean;
+  /** T140: the equipment slot is currently ACTIVE ("in hands") — the weapon that `fire` resolves against. */
+  readonly active?: boolean;
 }
 
 export interface InventoryViewState {

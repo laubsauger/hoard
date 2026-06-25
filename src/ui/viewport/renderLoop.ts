@@ -276,10 +276,8 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     playerWasDead = dead;
     // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
     host.setToneMapping(scene.toneMappingMode, scene.currentExposure);
-    // Assemble per-instance crowd transforms + advance animation phase on the GPU (V2) before the
-    // render reads them via the crowd material's positionNode. computeAsync is deprecated (r181);
-    // the renderer is initialized, so host.compute() runs synchronously.
-    host.compute(scene.crowd.computeNode);
+    // T140: the crowd renders through the rigged + impostor lanes (skinning reads the baked bone texture in the
+    // material positionNode) — no per-frame crowd compute pass. The old box transform-assembly compute is gone.
     host.render(scene.scene, camera.camera);
 
     stats?.end();

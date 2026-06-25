@@ -223,8 +223,8 @@ export const lightingConfig = registerDomain('lighting', {
   flashlightConeHalfAngleDegrees: num({
     owner: 'lighting',
     unit: 'degrees',
-    doc: 'Flashlight SpotLight cone HALF-angle — its OWN value, decoupled from the (wide) player vision FOV. Widened (B44) from a tight torch so the cone\'s lower edge reaches the GROUND close to the player (kills the dark ring at the feet) while the axis still throws forward.',
-    default: 24,
+    doc: 'Flashlight SpotLight cone HALF-angle — its OWN value, decoupled from the (wide) player vision FOV. Widened (B44) from a tight torch so the cone\'s lower edge reaches the GROUND close to the player (kills the dark ring at the feet) while the axis still throws forward. Nudged 24→28 for a slightly broader spill.',
+    default: 28,
     min: 4,
     max: 80,
   }),

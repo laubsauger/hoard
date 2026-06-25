@@ -1,18 +1,17 @@
-// T9 — crowd barrel.
+// T9 / T140 — crowd barrel.
 
 export {
-  packCrowdInputs,
+  computeDistanceBand,
   variationSeed,
   variationScale,
   variationHash01,
   variationTint,
-  FLOATS_PER_POSE,
-  FLOATS_PER_META,
-  type PackOptions,
-  type PackResult,
+  BAND_RIGGED,
+  BAND_IMPOSTOR,
 } from './packing';
-export { Crowd, CrowdLimbs, resolveCrowdSettings, type CrowdSettings } from './crowd';
-export { RiggedCrowd, type TrackFn } from './rigged';
+export { Crowd, resolveCrowdSettings, type CrowdSettings } from './crowd';
+export { RiggedCrowd, RIGGED_HEIGHT_METERS, resolveRagdollConfig, type TrackFn } from './rigged';
+export { CrowdImpostors, bakeImpostorAtlas, nearestImpostorTile, type ImpostorAtlas, type BakeImpostorOptions } from './impostor';
 export {
   ARCHETYPE_KEYS,
   CLIP_MAPS,
@@ -31,22 +30,6 @@ export {
 } from './riggedAnim';
 export { visionCullFade, type VisionCull } from './visionCull';
 export { instantaneousReveal, PerceptionMemory, type RevealParams } from './perceptionMemory';
-export {
-  packLimbInputs,
-  composeLimbMatrix,
-  walkSwing,
-  walkBob,
-  limbGait,
-  gaitPhaseRateHz,
-  stateReachTarget,
-  FLOATS_PER_LIMB_POSE,
-  FLOATS_PER_MAT4,
-  type LimbPackOptions,
-  type LimbPackResult,
-  type LimbPartPlacement,
-  type LimbGait,
-  type LimbGaitConfig,
-} from './limbs';
 export {
   RENDER_PATHS,
   MATERIAL_FAMILIES,

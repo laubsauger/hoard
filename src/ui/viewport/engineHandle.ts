@@ -10,6 +10,7 @@ import type { GameRuntime } from '../../game/runtime';
 import type { PersistenceAdapter } from '../../game/persistence';
 import type { QualityTier } from '../../config/types';
 import type { CommandId, EntityId, ModuleId } from '../../game/core/contracts';
+import type { EquipSlot } from '../../game/inventory';
 import type { InteractionPrompt, InteractionTargetWorld } from '../../game/interaction';
 import type { WeatherProfile } from '../../config/domains/weather';
 import { inputStore, formatKeyCode } from '../../stores/input';
@@ -57,6 +58,16 @@ export interface EngineHandle {
   unequipBackpack(): void;
   /** T139: whether a backpack is currently worn (drives the inventory equip/remove toggle). */
   isBackpackEquipped(): boolean;
+  /** T140: stow a carried item into an equipment slot (holster/back/belt L/belt R) — validated by weapon class. */
+  equipItem(item: number, slot: EquipSlot): void;
+  /** T140: take the item out of an equipment slot back into the pack (drops to unarmed if it was active). */
+  unequipSlot(slot: EquipSlot): void;
+  /** T140: draw an equipment slot to hands (make it the active weapon), or re-holster if already active. */
+  drawSlot(slot: EquipSlot): void;
+  /** T140: the equipment slots an item may be stowed in (drives the inventory attach picker). */
+  equippableSlots(item: number): EquipSlot[];
+  /** T85: drop an item from the pack onto the floor at the player's feet (a lootable pile, no container needed). */
+  drop(item: number): void;
   /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
    *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
   worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
@@ -159,6 +170,31 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
       }
     },
     isBackpackEquipped: () => getRuntime().isBackpackEquipped(),
+    // T140: equipment-slot intents. Each mutates the sim's containers + active-weapon pointer, then re-surfaces
+    // the inventory so the paper-doll + hotbar + HUD reflect the new loadout immediately (mirrors equipBackpack).
+    equipItem: (item, slot) => {
+      if (getRuntime().equipItem(item, slot)) {
+        gameAudio.containerOpen();
+        publishInventory();
+      }
+    },
+    unequipSlot: (slot) => {
+      if (getRuntime().unequipSlot(slot)) {
+        gameAudio.containerOpen();
+        publishInventory();
+      }
+    },
+    drawSlot: (slot) => {
+      getRuntime().drawSlot(slot);
+      publishInventory(); // active-slot highlight + active weapon changed
+    },
+    equippableSlots: (item) => getRuntime().equippableSlots(item),
+    drop: (item) => {
+      if (getRuntime().dropItem(item)) {
+        gameAudio.containerOpen(); // a soft thud-ish confirmation (reuses the cardboard sfx)
+        publishInventory();
+      }
+    },
     worldToScreen: (x, y, z) => {
       const rect = canvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return null;

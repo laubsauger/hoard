@@ -2,8 +2,27 @@
 // over a published *ViewSnapshot. The HUD NEVER subscribes to a per-frame world array (no zombie
 // positions, no instance buffers) — only throttled snapshot fields the engine deliberately published.
 
-import { usePlayerView, useMapView, useUi, useTimeOfDay } from '../stores/react';
+import { usePlayerView, useMapView, useUi, useTimeOfDay, useInventoryView } from '../stores/react';
 import { dayPhaseOf, formatTimeOfDay, type DayPhase } from '../render/scene/sky';
+import { equipSlotViews, itemName } from './equipment';
+
+/** T140: the hotbar strip — the four equipment slots in key order (1..4). The active ("in hands") slot is
+ *  highlighted. Read-only readout (the number keys 1..4 in the viewport draw a slot); reads the live inventory
+ *  view (V11). */
+function Hotbar() {
+  const containers = useInventoryView((s) => s.containers);
+  const slots = equipSlotViews(containers);
+  return (
+    <div className="hbn-hotbar" aria-label="hotbar">
+      {slots.map((s, i) => (
+        <div key={s.slot} className={`hbn-hotbar__cell${s.active ? ' is-active' : ''}${s.item === null ? ' is-empty' : ''}`} title={s.label}>
+          <span className="hbn-hotbar__key">{i + 1}</span>
+          <span className="hbn-hotbar__item">{s.item === null ? '—' : itemName(s.item)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function Vital({ label, value }: { label: string; value: number | null }) {
   return (
@@ -86,6 +105,7 @@ export function Hud() {
         <Vital label="District live" value={liveDistrictPop} />
         <Vital label="District abstract" value={abstractDistrictPop} />
       </div>
+      <Hotbar />
       {directive && (
         <div className="hbn-hud__objective" aria-label="objective">
           <span className="hbn-hud__directive">{directive}</span>

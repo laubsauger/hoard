@@ -47,7 +47,18 @@ import {
   type PersistenceAdapter,
 } from '@/game/persistence';
 import { RuntimePersistence } from './runtimePersistence';
-import { InventorySystem, buildDefaultCatalog, ITEM, rollLoot, consumeEffect, weaponClassForItem } from '@/game/inventory';
+import {
+  InventorySystem,
+  buildDefaultCatalog,
+  ITEM,
+  rollLoot,
+  consumeEffect,
+  weaponClassForItem,
+  type EquipSlot,
+  STORAGE_SLOTS,
+  slotsForItem,
+  slotAccepts,
+} from '@/game/inventory';
 import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
 import type { ContainerView } from '@/stores/inventoryView';
 import { resolveDomain } from '@/config/registry';
@@ -120,6 +131,14 @@ const REFERENCE_TIER: QualityTier = 'desktop-high';
  *  Generous (~1.5 cells) so hovering near an object picks it; beyond it the last selection is HELD (so moving
  *  the cursor to the action menu / loot pane over empty floor never drops focus). */
 const INTERACTION_HOVER_RADIUS_METERS = 1.4;
+/** T140: weight cap of an equipment slot — comfortably above the heaviest single weapon (the 3.9kg rifle); the
+ *  single-item `maxStacks: 1` is what enforces "one thing per slot", this just guarantees any one weapon fits. */
+const EQUIP_SLOT_CAPACITY_KG = 8;
+/** T85: weight cap of a dropped floor pile — effectively unbounded (the ground holds whatever you drop on it). */
+const FLOOR_PILE_CAPACITY_KG = 9999;
+/** T85: synthetic-entity offset for DROPPED floor piles, past the authored world-container slots (which start at
+ *  WORLD_CONTAINER_ENTITY+0 and number in the dozens) so a dropped pile never collides with an authored container. */
+const FLOOR_PILE_ENTITY_BASE = 0x4000;
 /** Synthetic entity id for world loot containers — a high fixed space that never collides with minted
  *  entity ids, so seeding world loot does not perturb the IdFactory counters (determinism/replay, V26). */
 const WORLD_CONTAINER_ENTITY = 0x7fff_0001;
@@ -208,9 +227,18 @@ export class GameRuntime {
   readonly inventory: InventorySystem;
   /** Display-name -> ContainerRef for the named containers the inventory UI surfaces. */
   private readonly namedContainers = new Map<string, ContainerRef>();
+  /** T140: which equipment slot is ACTIVE ("in hands") — its item drives the combat weapon class. null = unarmed
+   *  (bare-hands melee). The weapon stays physically in its belt slot; this pointer is the single source of truth
+   *  for what `fire` resolves against (kept in sync with `combat.equippedId` via `syncCombatToActiveSlot`). */
+  private activeEquipSlot: EquipSlot | null = null;
   /** FIXED world positions of the lootable world containers (the kitchen cupboard) — anchored at a stable
    *  scene cell (NOT the player cell), so a container is interactable only within reach of THAT spot (V4). */
   private readonly worldContainers: { readonly x: number; readonly z: number; readonly label: string }[] = [];
+  /** T85: dynamic floor piles the player DROPPED, keyed by nav-cell `cx,cy`. Each is a real `floorPile` container
+   *  + a world interactable (loot it to pick the item back up); pruned when fully looted. NOT persisted — world
+   *  container contents aren't (consistent with the authored cupboards). */
+  private readonly floorPiles = new Map<string, { readonly ref: ContainerRef; readonly label: string }>();
+  private floorPileSeq = 0;
   /** M2 medium-term objective state machine (find parts -> repair radio -> evacuate). */
   readonly objective: ObjectiveSystem;
   /** M2 decisive horde event shaped by the player's structural mods (§G central promise). */
@@ -590,12 +618,27 @@ export class GameRuntime {
     this.inventory.addContainer(playerRef, { type: 'backpack' });
     this.basePlayerCapacityKg = this.inventory.capacityOf(playerRef); // T139: base carry cap, before any worn pack
     this.namedContainers.set('player', playerRef);
-    // T108/T138: starter loadout — a knife (melee) + a PISTOL (so the equipped pistol is a weapon the player
-    // actually CARRIES, and weapon-swap has two classes to cycle out of the box), a hammer + planks for window
-    // board-up (the hammer doubles as a breaching tool, V43), plus a bandage + water. Adjust later.
-    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6]] as const) {
+    // T140: the four equipment slots (holster/back/belt L/belt R). Quick-access (fast to draw) single-item slots
+    // (maxStacks 1) on the PLAYER entity — so an equipped weapon's weight still counts toward carry (carriedWeight
+    // sums every container the entity owns) and equipping never changes total load, it just relocates the item.
+    for (const slot of STORAGE_SLOTS) {
+      const ref: ContainerRef = { entity: this.playerEntity, container: slot };
+      this.inventory.addContainer(ref, { type: 'clothing', capacityKg: EQUIP_SLOT_CAPACITY_KG, allowedCategories: ['weapon', 'tool'], maxStacks: 1 });
+      this.namedContainers.set(slot, ref);
+    }
+    // T108/T138: starter loadout — a knife (melee) + a PISTOL + a SHOTGUN (so weapon-swap has classes to cycle
+    // out of the box), a hammer + planks for window board-up (the hammer doubles as a breaching tool, V43), plus
+    // a bandage + water. Adjust later.
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6], [ITEM.Flashlight, 1]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
+    // T140: stow the starter weapons on the belt + draw the pistol (the default active weapon — matches the
+    // combat system's GATE-0 pistol default), so the player starts already holstered and the equipment UI is
+    // populated from the first frame instead of empty.
+    this.equipItem(ITEM.Pistol, 'holster');
+    this.equipItem(ITEM.Shotgun, 'back');
+    this.equipItem(ITEM.KitchenKnife, 'beltL');
+    this.drawSlot('holster');
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
     // never perturbs the IdFactory counters or the spawn-scatter rng that determinism/replay depend on (V26).
     // Each container is anchored at a FIXED authored cell (lootableContainerCells) — a corner of the player's
@@ -635,12 +678,20 @@ export class GameRuntime {
     this.registerSystems();
   }
 
-  /** Snapshot the player + nearby containers for the inventory view store (T62/T85). */
+  /** Snapshot the player + nearby containers for the inventory view store (T62/T85). Equipment slots (T140) are
+   *  tagged so the paper-doll + hotbar can pick them out, and the ACTIVE slot is flagged for the in-hands highlight. */
   inventorySnapshot(): ContainerView[] {
     const out: ContainerView[] = [];
     for (const [name, ref] of this.namedContainers) {
       const slots = this.inventory.contents(ref).map((s) => ({ item: s.item as number, count: s.count }));
-      out.push({ container: name, capacity: this.inventory.capacityOf(ref), weight: this.inventory.containerWeight(ref), slots });
+      const equipSlot = (STORAGE_SLOTS as readonly string[]).includes(name);
+      out.push({
+        container: name,
+        capacity: this.inventory.capacityOf(ref),
+        weight: this.inventory.containerWeight(ref),
+        slots,
+        ...(equipSlot ? { equipSlot: true, active: name === this.activeEquipSlot } : {}),
+      });
     }
     return out;
   }
@@ -692,14 +743,79 @@ export class GameRuntime {
     return this.equippedBackpack;
   }
 
-  /** Transfer a whole item stack between two named containers (T85). Returns true on success. */
+  /** Transfer a whole item stack between two named containers (T85). Returns true on success. A pickup that
+   *  empties a dropped floor pile prunes it (the pile stops surfacing as an interactable). */
   transferItem(fromName: string, toName: string, item: number): boolean {
     const from = this.namedContainers.get(fromName);
     const to = this.namedContainers.get(toName);
     if (!from || !to) return false;
     const count = this.inventory.count(from, item as ItemId);
     if (count <= 0) return false;
-    return this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, count).result.ok;
+    const ok = this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, count).result.ok;
+    if (ok) this.pruneEmptyFloorPiles();
+    return ok;
+  }
+
+  /**
+   * T85: DROP an item from the player's pack onto the floor at their feet — no container needed. Creates (or
+   * reuses) a floor pile at the player's current nav-cell — a real world container the player can loot to pick
+   * the item back up. Drops the WHOLE carried stack by default. Returns false (no change) when the item isn't
+   * carried in the pack. Equipped weapons live in the belt slots (not the pack) — unequip first, then drop.
+   */
+  dropItem(item: number, count?: number): boolean {
+    const playerRef = this.namedContainers.get('player');
+    if (!playerRef) return false;
+    const have = this.inventory.count(playerRef, item as ItemId);
+    if (have <= 0) return false;
+    const n = count !== undefined ? Math.min(count, have) : have;
+    if (n <= 0) return false;
+    const pile = this.floorPileAtPlayerCell();
+    const ok = this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, playerRef, pile.ref, n).result.ok;
+    if (!ok) this.pruneEmptyFloorPiles(); // a freshly-created pile shouldn't linger empty if the drop was rejected
+    return ok;
+  }
+
+  /** Find the floor pile at the player's current nav-cell, creating + registering one (container + interactable)
+   *  if none exists there. Dropping again on the same cell ACCUMULATES into the one pile (PZ ground-tile model). */
+  private floorPileAtPlayerCell(): { readonly ref: ContainerRef; readonly label: string } {
+    const grid = this.scene.navGrid;
+    const { cx, cy } = grid.worldToCell(this.playerPos.x, this.playerPos.z);
+    const cellKey = `${cx},${cy}`;
+    const existing = this.floorPiles.get(cellKey);
+    if (existing) return existing;
+    const id = ++this.floorPileSeq;
+    const label = id === 1 ? 'Floor' : `Floor ${id}`;
+    const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + FLOOR_PILE_ENTITY_BASE + id) as EntityId, container: label };
+    this.inventory.addContainer(ref, { type: 'floorPile', capacityKg: FLOOR_PILE_CAPACITY_KG });
+    this.namedContainers.set(label, ref);
+    const center = this.scene.cellCenter({ cx, cy });
+    this.worldContainers.push({ x: center.x, z: center.z, label });
+    const pile = { ref, label };
+    this.floorPiles.set(cellKey, pile);
+    return pile;
+  }
+
+  /** Remove any floor pile that is now empty (fully looted, or a rejected drop) — drop it from the interactables
+   *  + named containers so it stops surfacing. The inert inventory container is left as-is (no removeContainer
+   *  API; harmless once unreferenced). */
+  private pruneEmptyFloorPiles(): void {
+    for (const [cellKey, pile] of this.floorPiles) {
+      if (this.inventory.contents(pile.ref).length > 0) continue;
+      this.floorPiles.delete(cellKey);
+      this.namedContainers.delete(pile.label);
+      const idx = this.worldContainers.findIndex((c) => c.label === pile.label);
+      if (idx >= 0) this.worldContainers.splice(idx, 1);
+    }
+  }
+
+  /** T85: world positions of the active dropped floor piles — the render lane draws a marker at each (read-only). */
+  floorPileMarkers(): { readonly x: number; readonly z: number }[] {
+    const out: { x: number; z: number }[] = [];
+    for (const pile of this.floorPiles.values()) {
+      const c = this.worldContainers.find((w) => w.label === pile.label);
+      if (c) out.push({ x: c.x, z: c.z });
+    }
+    return out;
   }
 
   /** Absolute tick (survives reload via tickOffset) — the basis for objective + event timing. */
@@ -1108,10 +1224,19 @@ export class GameRuntime {
     this.audio.hearEvent('glass', wx, wz, this.clock.tick);
   }
 
-  /** True iff the player's pack holds at least one of `item`. */
+  /** True iff the player CARRIES at least one of `item` — across the pack AND the equipment slots (T140), so a
+   *  tool stowed on the belt (e.g. the hammer, or a flashlight) still counts for tool-gated actions. */
+  playerCarries(item: number): boolean {
+    for (const name of ['player', ...STORAGE_SLOTS] as const) {
+      const ref = this.namedContainers.get(name);
+      if (ref && this.inventory.count(ref, item as ItemId) > 0) return true;
+    }
+    return false;
+  }
+
+  /** @deprecated internal alias — use {@link playerCarries}. Kept for the existing tool-gate call sites. */
   private playerHas(item: number): boolean {
-    const ref = this.namedContainers.get('player');
-    return ref ? this.inventory.count(ref, item as ItemId) > 0 : false;
+    return this.playerCarries(item);
   }
 
   /** Smash the intact pane of the NEAREST window in reach (the "smash glass" verb). On a real smash the
@@ -1583,22 +1708,134 @@ export class GameRuntime {
     return this.combat.reload();
   }
 
-  /** The weapon CLASSES the player can swap between — the distinct classes of every weapon ITEM in their
-   *  inventory, in stable registry order, with `melee` always available (bare hands / a knife). T138 — swap is
+  /** The weapon CLASSES the player can swap between — the distinct classes of every weapon ITEM they carry
+   *  (pack + equipment slots), in stable registry order, with `melee` always available (bare hands). T138/T140 —
    *  gated to what they CARRY, so finding a shotgun adds it and you never cycle to a weapon you don't have. */
   carriedWeaponClasses(): WeaponId[] {
-    const ref: ContainerRef = { entity: this.playerEntity, container: 'player' };
     const set = new Set<WeaponId>(['melee']); // always have your hands/knife
-    for (const s of this.inventory.contents(ref)) {
-      const cls = weaponClassForItem(s.item);
-      if (cls) set.add(cls);
+    for (const name of ['player', ...STORAGE_SLOTS] as const) {
+      const ref = this.namedContainers.get(name);
+      if (!ref) continue;
+      for (const s of this.inventory.contents(ref)) {
+        const cls = weaponClassForItem(s.item);
+        if (cls) set.add(cls);
+      }
     }
     return WEAPON_IDS.filter((id) => set.has(id));
   }
 
-  /** Cycle the equipped weapon among the CARRIED classes only (T74/T138). */
+  // ---- T140: equipment slots + active-weapon (in-hands) pointer ----
+
+  /** The single item in an equipment slot, or null when empty. */
+  equipSlotItem(slot: EquipSlot): number | null {
+    const ref = this.namedContainers.get(slot);
+    if (!ref) return null;
+    const c = this.inventory.contents(ref);
+    return c.length > 0 ? (c[0]!.item as number) : null;
+  }
+
+  /** The ACTIVE ("in hands") equipment slot, or null when unarmed. */
+  activeSlot(): EquipSlot | null {
+    return this.activeEquipSlot;
+  }
+
+  /** The item currently in hands (the active slot's item), or null when unarmed. */
+  equippedItem(): number | null {
+    return this.activeEquipSlot ? this.equipSlotItem(this.activeEquipSlot) : null;
+  }
+
+  /** The equipment slots an item may be stowed in (drives the inventory attach picker). Empty = not equippable. */
+  equippableSlots(item: number): EquipSlot[] {
+    return slotsForItem(item);
+  }
+
+  /** The equipped storage slots that hold a WEAPON, in hotbar order — the ring `cycleWeapon` walks. */
+  private equippedWeaponSlots(): EquipSlot[] {
+    return STORAGE_SLOTS.filter((slot) => {
+      const item = this.equipSlotItem(slot);
+      return item !== null && weaponClassForItem(item) !== null;
+    });
+  }
+
+  /** Point `combat` at the active slot's weapon class (or `melee` when unarmed / the slot holds a tool). The
+   *  active slot is the single source of truth for what `fire` resolves against (T140). */
+  private syncCombatToActiveSlot(): void {
+    const item = this.equippedItem();
+    const cls: WeaponId = item !== null ? (weaponClassForItem(item) ?? 'melee') : 'melee';
+    this.combat.setWeapon(cls);
+  }
+
+  /** Make `slot` active (or unarmed when null/empty) and resync the combat weapon class. */
+  private setActiveSlot(slot: EquipSlot | null): void {
+    this.activeEquipSlot = slot !== null && this.equipSlotItem(slot) !== null ? slot : null;
+    this.syncCombatToActiveSlot();
+  }
+
+  /** Which player container (pack or a slot) currently holds `item`, or null. */
+  private findPlayerHolding(item: number): string | null {
+    for (const name of ['player', ...STORAGE_SLOTS] as const) {
+      const ref = this.namedContainers.get(name);
+      if (ref && this.inventory.count(ref, item as ItemId) > 0) return name;
+    }
+    return null;
+  }
+
+  /** Move ONE unit of `item` between two named containers (validated). */
+  private moveItemBetween(fromName: string, toName: string, item: number): boolean {
+    const from = this.namedContainers.get(fromName);
+    const to = this.namedContainers.get(toName);
+    if (!from || !to) return false;
+    return this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, 1).result.ok;
+  }
+
+  /**
+   * T140: stow `item` into equipment `slot` (validated by class/category — pistol→holster, long-gun→back,
+   * melee/tool→belt). Taken from wherever the player holds it (pack or another slot); an occupied destination's
+   * item is pushed back to the pack first. Returns false (no change) when the item isn't carried, the slot
+   * rejects it, or the pack can't hold a displaced item (no silent drop). Resyncs combat if the active slot changed.
+   */
+  equipItem(item: number, slot: EquipSlot): boolean {
+    if (!slotAccepts(slot, item)) return false;
+    const srcName = this.findPlayerHolding(item);
+    if (srcName === null) return false;
+    if (srcName === slot) return true; // already stowed here
+    const occupant = this.equipSlotItem(slot);
+    if (occupant !== null && !this.moveItemBetween(slot, 'player', occupant)) return false;
+    if (!this.moveItemBetween(srcName, slot, item)) return false;
+    if (slot === this.activeEquipSlot) this.syncCombatToActiveSlot();
+    return true;
+  }
+
+  /** T140: take an item out of an equipment slot back into the pack (refused if the pack can't hold it). If the
+   *  slot was active the player drops to unarmed. Returns false when the slot is empty or the pack is full. */
+  unequipSlot(slot: EquipSlot): boolean {
+    const item = this.equipSlotItem(slot);
+    if (item === null) return false;
+    if (!this.moveItemBetween(slot, 'player', item)) return false;
+    if (slot === this.activeEquipSlot) this.setActiveSlot(null);
+    return true;
+  }
+
+  /** T140: draw a slot to hands (make it active), or RE-HOLSTER it if already active (toggle → unarmed). No-op
+   *  for an empty slot that isn't the active one. The number keys 1..4 + the hotbar map here. Returns the now-active
+   *  slot (null = unarmed). */
+  drawSlot(slot: EquipSlot): EquipSlot | null {
+    if (this.activeEquipSlot === slot) this.setActiveSlot(null); // toggle off → bare hands
+    else if (this.equipSlotItem(slot) !== null) this.setActiveSlot(slot);
+    return this.activeEquipSlot;
+  }
+
+  /** Cycle the active weapon among the EQUIPPED weapon slots (holster/back/belt), in hotbar order (T74/T138/T140). */
   cycleWeapon(dir: 1 | -1): void {
-    this.combat.cycleWeapon(dir, this.carriedWeaponClasses());
+    const ring = this.equippedWeaponSlots();
+    if (ring.length === 0) {
+      this.setActiveSlot(null);
+      return;
+    }
+    const cur = this.activeEquipSlot;
+    const idx = cur ? ring.indexOf(cur) : -1;
+    const nextIdx = idx < 0 ? (dir === 1 ? 0 : ring.length - 1) : (idx + dir + ring.length) % ring.length;
+    this.setActiveSlot(ring[nextIdx]!);
   }
 
   /** Current ammo + weapon for the HUD (T74). */

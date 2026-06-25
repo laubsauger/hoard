@@ -29,10 +29,11 @@ describe('runtime.useItem (T138 consumables)', () => {
     expect(rt.inventory.count(ref, ITEM.WaterBottle as ItemId)).toBe(0);
     expect(rt.useItem(ITEM.WaterBottle)).toBe(false); // none left → refused
 
-    // a weapon is not a consumable → refused, count untouched.
-    expect(rt.inventory.count(ref, ITEM.KitchenKnife as ItemId)).toBe(1);
-    expect(rt.useItem(ITEM.KitchenKnife)).toBe(false);
-    expect(rt.inventory.count(ref, ITEM.KitchenKnife as ItemId)).toBe(1);
+    // a tool is not a consumable → refused, count untouched. (The starter weapons are auto-equipped onto the
+    // belt now (T140), so use the hammer — a non-consumable that stays loose in the pack.)
+    expect(rt.inventory.count(ref, ITEM.Hammer as ItemId)).toBe(1);
+    expect(rt.useItem(ITEM.Hammer)).toBe(false);
+    expect(rt.inventory.count(ref, ITEM.Hammer as ItemId)).toBe(1);
   });
 
   it('using a bandage consumes one of the two seeded', () => {

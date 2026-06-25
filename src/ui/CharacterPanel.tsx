@@ -5,10 +5,50 @@
 // the ui store's modal stack (no dedicated PanelId). Skills are a stub until the survival sim publishes them.
 
 import { useEffect } from 'react';
-import { usePlayerView, useUi } from '../stores/react';
+import { usePlayerView, useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
+import { equipSlotViews, activeEquippedItem, itemName } from './equipment';
+import type { EngineHandle } from './viewport/engineHandle';
 
 const CHAR_MODAL = 'character';
+
+/** T140: the equipment paper-doll — Hands (the active weapon, derived) over the four belt slots. Click a slot to
+ *  draw it to hands (toggle), or the ✕ to stow it back in the pack. Reads the live inventory view (V11). */
+function Equipment({ handle }: { handle: EngineHandle | null }) {
+  const containers = useInventoryView((s) => s.containers);
+  const slots = equipSlotViews(containers);
+  const active = activeEquippedItem(containers);
+  return (
+    <div className="hbn-equip">
+      <div className="hbn-char__group">Equipment</div>
+      <div className="hbn-equip__hands">
+        <span className="hbn-equip__label">Hands</span>
+        <span className="hbn-equip__item">{active === null ? 'Unarmed' : itemName(active)}</span>
+      </div>
+      <ul className="hbn-equip__slots">
+        {slots.map((s) => (
+          <li key={s.slot} className={`hbn-equip__slot${s.active ? ' is-active' : ''}`}>
+            <button
+              type="button"
+              className="hbn-equip__draw"
+              disabled={s.item === null}
+              onClick={() => handle?.drawSlot(s.slot)}
+              title={s.item === null ? 'empty' : s.active ? 'in hands — click to holster' : 'draw to hands'}
+            >
+              <span className="hbn-equip__label">{s.label}</span>
+              <span className="hbn-equip__item">{s.item === null ? '—' : itemName(s.item)}</span>
+            </button>
+            {s.item !== null && (
+              <button type="button" className="hbn-equip__unequip" onClick={() => handle?.unequipSlot(s.slot)} title="stow in pack">
+                ✕
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /** A 0..100 stat bar. `badHigh` = red as the value rises (hunger/pain); else red as it falls (health). */
 function StatBar({ label, value, badHigh = true }: { label: string; value: number | null; badHigh?: boolean }) {
@@ -27,7 +67,7 @@ function StatBar({ label, value, badHigh = true }: { label: string; value: numbe
   );
 }
 
-export function CharacterPanel() {
+export function CharacterPanel({ handle }: { handle: EngineHandle | null }) {
   const visible = useUi((s) => s.modalStack.includes(CHAR_MODAL));
   const health = usePlayerView((s) => s.snapshot?.health ?? null);
   const bleeding = usePlayerView((s) => s.snapshot?.bleeding ?? null);
@@ -58,7 +98,9 @@ export function CharacterPanel() {
   return (
     <div className="hbn-char" role="dialog" aria-label="Character">
       <div className="hbn-char__frame">
-        <h2 className="hbn-char__title">Condition</h2>
+        <h2 className="hbn-char__title">Character</h2>
+        <Equipment handle={handle} />
+        <div className="hbn-char__group">Condition</div>
         <StatBar label="Health" value={health} badHigh={false} />
         <div className="hbn-char__group">Injuries</div>
         <StatBar label="Bleeding" value={bleeding} />
