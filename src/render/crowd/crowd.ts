@@ -12,13 +12,10 @@
 // band degrades to the impostor lane instead of boxes.
 
 import { Group } from 'three';
-import type { ComputeNode, StorageBufferNode } from 'three/webgpu';
-import { Fn, float, instanceIndex, instancedArray } from 'three/tsl';
 import type { FieldViews } from '../../game/core/contracts/soa';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
-import type { ResourceRegistry } from '../engine/resources';
 import { computeDistanceBand, variationScale, variationSeed } from './packing';
 import type { VisionCull } from './visionCull';
 import { RiggedCrowd, RIGGED_HEIGHT_METERS } from './rigged';
@@ -66,12 +63,6 @@ export class Crowd {
    *  box InstancedMesh; now a plain Group (no BoxGeometry crowd anywhere). */
   readonly mesh: Group;
   readonly settings: CrowdSettings;
-  /**
-   * Compat shim (T140): the render loop still calls `host.compute(crowd.computeNode)` each frame (it drove the old
-   * box transform-assembly compute). The rigged + impostor lanes need no compute pass, so this is a 1-thread no-op
-   * kept ONLY so the out-of-scope render-loop call stays valid; it can be dropped once the loop stops calling it.
-   */
-  readonly computeNode: ComputeNode;
   /** RIGGED, animated near/mid-band crowd (T128): GPU-skinned InstancedMesh per archetype, baked from a bone
    *  texture. Until every archetype GLB has baked + attached it draws nothing (no boxes during the ~1s gap). */
   readonly rigged: RiggedCrowd;
@@ -80,9 +71,8 @@ export class Crowd {
 
   /** Reused scratch for the per-frame distance band mask (avoids a per-frame allocation). */
   private maskScratch?: Uint8Array;
-  private readonly noopBuffer: StorageBufferNode<'float'>;
 
-  constructor(settings: CrowdSettings, registry: ResourceRegistry) {
+  constructor(settings: CrowdSettings) {
     this.settings = settings;
     this.mesh = new Group();
     this.mesh.name = 'crowd.root';
@@ -94,12 +84,6 @@ export class Crowd {
       heightMeters: RIGGED_HEIGHT_METERS,
     });
     this.rigged = new RiggedCrowd(settings, this.mesh, this.impostor);
-
-    // No-op compute (see computeNode doc) — a 1-element storage write so `host.compute(computeNode)` is valid.
-    this.noopBuffer = registry.track(instancedArray(new Float32Array(1), 'float'), 'buffer', 'crowd.noopCompute');
-    this.computeNode = Fn(() => {
-      this.noopBuffer.element(instanceIndex).assign(float(0));
-    })().compute(1);
   }
 
   /**

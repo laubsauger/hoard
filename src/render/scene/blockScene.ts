@@ -404,9 +404,9 @@ export class BlockScene {
     this.playerAvatar = playerHandles.avatar;
     this.aoContact = playerHandles.aoContact;
 
-    this.crowd = new Crowd(resolveCrowdSettings(this.tier), this.registry);
-    this.crowd.mesh.castShadow = true; // B13: the horde casts shadows too (was unset → zombies floated shadowless)
-    this.crowd.mesh.receiveShadow = true;
+    this.crowd = new Crowd(resolveCrowdSettings(this.tier));
+    // T140: crowd.mesh is the Group ROOT; the rigged lane meshes set their own castShadow (B13). The far impostor
+    // billboards do not cast (a flat quad shadow reads wrong). So no shadow flags on the root.
     this.scene.add(this.crowd.mesh);
 
     // T85: dropped-item floor markers (pooled boxes, tracked for V24).

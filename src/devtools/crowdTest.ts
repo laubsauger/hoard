@@ -129,9 +129,7 @@ async function main(): Promise<void> {
   const settings = resolveCrowdSettings(TIER);
   const ragdollConfig = resolveRagdollConfig(TIER);
   const corpseCapacity = resolveCorpseFieldSettings(TIER).capacity;
-  const crowd = new Crowd(settings, host.resources);
-  crowd.mesh.castShadow = true;
-  crowd.mesh.receiveShadow = true;
+  const crowd = new Crowd(settings);
   scene.add(crowd.mesh);
 
   const loader = new GLTFLoader();
@@ -257,7 +255,6 @@ async function main(): Promise<void> {
     last = now;
     const t0 = performance.now();
     crowd.update(views, liveCount, dt, camera.position.x, camera.position.z);
-    host.compute(crowd.computeNode); // no-op compat node (mirrors the game render loop)
     host.render(scene, camera);
     lastFrameMs = performance.now() - t0;
     if (!drewOnce) {
