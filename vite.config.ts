@@ -25,4 +25,14 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  build: {
+    rollupOptions: {
+      // Two HTML entries: the main game + the isolated ragdoll-test harness (a reduced WebGPU scene with ONE
+      // killable zombie, served at /ragdoll-test.html in dev; included in `npm run build`).
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        ragdollTest: fileURLToPath(new URL('./ragdoll-test.html', import.meta.url)),
+      },
+    },
+  },
 });

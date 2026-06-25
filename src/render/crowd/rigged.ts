@@ -28,6 +28,7 @@ import {
   InterleavedBufferAttribute,
   Matrix4,
   NearestFilter,
+  Quaternion,
   RGBAFormat,
   SRGBColorSpace,
   Vector3,
@@ -70,12 +71,11 @@ import {
   mulberry32,
   RAGDOLL_PARTICLE_BONES,
   RAGDOLL_PARTICLE_COUNT,
-  RAGDOLL_SEGMENT_BONES,
-  RAGDOLL_LINKS,
-  RAGDOLL_CONES,
+  RAGDOLL_BODIES,
+  RAGDOLL_JOINTS,
   type RagdollConfig,
   type RagdollSpec,
-  type RagdollSegment,
+  type RagdollBodyTopology,
 } from '../corpse/ragdoll';
 import {
   ARCHETYPE_KEYS,
@@ -153,6 +153,7 @@ export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
     settleEnergyThreshold: resolve(renderingConfig.ragdollSettleEnergyThreshold, tier),
     jointConeRadians: resolve(renderingConfig.ragdollJointConeRadians, tier),
     groundRadiusMeters: resolve(renderingConfig.ragdollGroundRadiusMeters, tier),
+    capsuleRadiusMeters: resolve(renderingConfig.ragdollCapsuleRadiusMeters, tier),
   };
 }
 
@@ -236,14 +237,22 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
   const leftConst = new Matrix4().copy(fitWorld).multiply(mesh.bindMatrixInverse);
   const bindMatrix = mesh.bindMatrix;
 
-  // T134 — seed-pose capture: the LIVE corpse ragdoll starts from the FROZEN idle pose. Capture each ragdoll
-  // joint particle's output-local position at idle frame 0 (filled in the bake loop below) + the bone name→index
-  // map for the segment→bone resolve.
+  // T134/V2 — seed-pose capture: the LIVE corpse ragdoll (oriented rigid bodies) starts from the FROZEN idle
+  // pose. At idle frame 0 we capture (a) each ragdoll JOINT-PARTICLE output-local position (seeds the capsule ends
+  // + joint anchors), and (b) each rigid BODY's REST TRANSFORM = its anchor bone's output-local world matrix
+  // (`fitWorld · bone.matrixWorld`, decomposed to rigid pos+quat — scale dropped, it lives in M0). Both are filled
+  // in the bake loop below. Plus the bone name→index map for the body→bone resolve.
   const boneByName = new Map<string, number>();
   for (let b = 0; b < boneCount; b++) boneByName.set(skeleton.bones[b]!.name, b);
   const ragSeed = new Float32Array(RAGDOLL_PARTICLE_COUNT * 3);
+  const bodyRestPos = new Float32Array(RAGDOLL_BODIES.length * 3);
+  const bodyRestQuat = new Float32Array(RAGDOLL_BODIES.length * 4);
   const frozenClipName = CLIP_MAPS[key][CORPSE_FROZEN_CLIP];
   const _seedPos = new Vector3();
+  const _restMat = new Matrix4();
+  const _restPos = new Vector3();
+  const _restQuat = new Quaternion();
+  const _restScale = new Vector3();
 
   // ---- Bake every needed clip at BAKE_FPS into the bone texture (rows = global frame index across clips). ----
   const clipNames = bakeClipNames(key);
@@ -309,15 +318,33 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
         M.copy(leftConstFrame).multiply(boneMat).multiply(bindMatrix);
         data.set(M.elements, rowBase + b * TEXELS_PER_BONE * 4); // 16 floats = 4 RGBA texels = 4 columns
       }
-      // T134 — capture the ragdoll's SEED joint positions at the frozen idle frame 0 (output-local = F · boneWorld).
+      // T134/V2 — capture the ragdoll's SEED joint positions + per-body REST TRANSFORMS at frozen idle frame 0
+      // (output-local = fitWorld · boneWorld).
       if (name === frozenClipName && f === 0) {
+        // NB: the bone `matrixWorld` is ALREADY in output-local meters (feet ≈ y=0, ~RIGGED_HEIGHT tall) — the
+        // GLB's armature is in metres while its GEOMETRY is in large units, so `fitWorld` (which seats + scales the
+        // GEOMETRY into output space for M0) must NOT be applied here, or it collapses every bone to the origin.
         for (let p = 0; p < RAGDOLL_PARTICLE_COUNT; p++) {
           const bi = boneByName.get(RAGDOLL_PARTICLE_BONES[p]!);
           if (bi === undefined) throw new Error(`rigged '${key}' missing ragdoll bone '${RAGDOLL_PARTICLE_BONES[p]}'`);
-          _seedPos.setFromMatrixPosition(skeleton.bones[bi]!.matrixWorld).applyMatrix4(fitWorld);
+          _seedPos.setFromMatrixPosition(skeleton.bones[bi]!.matrixWorld);
           ragSeed[p * 3] = _seedPos.x;
           ragSeed[p * 3 + 1] = _seedPos.y;
           ragSeed[p * 3 + 2] = _seedPos.z;
+        }
+        for (let bd = 0; bd < RAGDOLL_BODIES.length; bd++) {
+          const anchorName = RAGDOLL_BODIES[bd]!.anchorBone;
+          const bi = boneByName.get(anchorName);
+          if (bi === undefined) throw new Error(`rigged '${key}' missing ragdoll body anchor bone '${anchorName}'`);
+          _restMat.copy(skeleton.bones[bi]!.matrixWorld);
+          _restMat.decompose(_restPos, _restQuat, _restScale); // drop scale — it lives in M0
+          bodyRestPos[bd * 3] = _restPos.x;
+          bodyRestPos[bd * 3 + 1] = _restPos.y;
+          bodyRestPos[bd * 3 + 2] = _restPos.z;
+          bodyRestQuat[bd * 4] = _restQuat.x;
+          bodyRestQuat[bd * 4 + 1] = _restQuat.y;
+          bodyRestQuat[bd * 4 + 2] = _restQuat.z;
+          bodyRestQuat[bd * 4 + 3] = _restQuat.w;
         }
       }
     }
@@ -456,19 +483,21 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
   // LIVE per-corpse bone-matrix texture the corpse shader skins from. ----
   const frozenRow = table.entries.get(frozenClipName)!.startRow;
   const m0 = data.slice(frozenRow * width * 4, frozenRow * width * 4 + boneCount * 16); // one row = 24 bones × 16
-  const segments: RagdollSegment[] = RAGDOLL_SEGMENT_BONES.map((s) => ({
-    anchor: s.anchor,
-    dirFrom: s.dirFrom,
-    dirTo: s.dirTo,
-    bones: s.bones.map((bn) => {
+  // V2 — resolve each rigid body's carried bone NAMES → skeleton indices + attach its captured rest transform.
+  const bodies: RagdollBodyTopology[] = RAGDOLL_BODIES.map((bd, i) => ({
+    bones: bd.bones.map((bn) => {
       const bi = boneByName.get(bn);
-      if (bi === undefined) throw new Error(`rigged '${key}' ragdoll segment missing bone '${bn}'`);
+      if (bi === undefined) throw new Error(`rigged '${key}' ragdoll body missing bone '${bn}'`);
       return bi;
     }),
+    capStart: bd.capStart,
+    capEnd: bd.capEnd,
+    restPos: [bodyRestPos[i * 3]!, bodyRestPos[i * 3 + 1]!, bodyRestPos[i * 3 + 2]!] as const,
+    restQuat: [bodyRestQuat[i * 4]!, bodyRestQuat[i * 4 + 1]!, bodyRestQuat[i * 4 + 2]!, bodyRestQuat[i * 4 + 3]!] as const,
   }));
   const ragSpec = buildRagdollSpec(
-    { particleCount: RAGDOLL_PARTICLE_COUNT, boneCount, seed: ragSeed, m0, links: RAGDOLL_LINKS, coneTriples: RAGDOLL_CONES, segments },
-    ragdollConfig.jointConeRadians,
+    { boneCount, seed: ragSeed, m0, bodies, joints: RAGDOLL_JOINTS },
+    ragdollConfig,
   );
 
   // LIVE per-corpse bone texture: rows = corpse slots, cols = boneCount×4 texels (the 4 mat4 columns), RGBA float.
@@ -700,6 +729,12 @@ export class RiggedCrowd {
     this.slots.set(key, slot);
     this.parent.add(slot.mesh);
     this.parent.add(slot.corpseMesh);
+  }
+
+  /** DEV/test-only (the ragdoll-test harness): the live ragdoll for a dead entity id, or undefined. Read-only —
+   *  exposes the oriented-body sim state (`settled`, per-body `c/q`, emitted `bones`) for headless assertions. */
+  debugRagdoll(entity: number): Ragdoll | undefined {
+    return this.ragdolls.get(entity);
   }
 
   /** Hide every rigged mesh (draw 0 instances) — used while the limbed fallback owns the near band. */
