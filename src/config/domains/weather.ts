@@ -105,6 +105,46 @@ export const weatherConfig = registerDomain('weather', {
   rainColorR: num({ owner: 'weather', unit: 'ratio', doc: 'Rain streak tint red (linear).', default: 0.62, min: 0, max: 1 }),
   rainColorG: num({ owner: 'weather', unit: 'ratio', doc: 'Rain streak tint green (linear).', default: 0.70, min: 0, max: 1 }),
   rainColorB: num({ owner: 'weather', unit: 'ratio', doc: 'Rain streak tint blue (linear).', default: 0.82, min: 0, max: 1 }),
+
+  // --- Per-profile atmosphere GRADING (lighting lane). Each weather has its OWN light vibe ON TOP of the
+  //     severity-driven fog distance: a key/ambient intensity SCALE + a key/ambient/fog colour TINT. The
+  //     LightingSystem eases (approach()) between profiles on a weather change so the vibe never snaps. Hex
+  //     tints are authored sRGB (decoded by Three's setHex). V4: every value typed, never a literal in the engine.
+
+  /** How fast the per-weather grade (key/ambient scale + tints + fog colour) eases toward the active profile,
+   *  per second. Mirrors fogDistanceSmoothingPerSecond so a weather change EASES, never snaps. */
+  gradeSmoothingPerSecond: num({ owner: 'weather', unit: 'ratio', doc: 'Per-second exponential approach rate for the per-weather light/fog grade toward the active profile (so a weather change eases, never snaps).', default: 2, min: 0.1, max: 60 }),
+  /** Night dimming applied to the (daytime-authored) fog/atmosphere colour so a foggy NIGHT reads as a dim
+   *  luminous haze rather than the full daytime whiteout. */
+  fogNightColorScale: num({ owner: 'weather', unit: 'ratio', doc: 'Multiplier on the per-weather fog/atmosphere colour at night (dims the daytime-authored haze for the night path).', default: 0.32, min: 0, max: 1 }),
+
+  // CLEAR: bright, crisp, warm-white sun, faint cool-blue distance. High key, normal ambient.
+  gradeKeyScaleClear: num({ owner: 'weather', unit: 'ratio', doc: 'Key-light intensity scale for the clear profile (full, crisp daylight).', default: 1, min: 0, max: 3 }),
+  gradeAmbientScaleClear: num({ owner: 'weather', unit: 'ratio', doc: 'Ambient fill scale for the clear profile.', default: 1, min: 0, max: 4 }),
+  gradeKeyTintClear: num({ owner: 'weather', unit: 'ratio', doc: 'Clear sun tint (warm white), packed 0xRRGGBB sRGB.', default: 0xfff4e0, min: 0, max: 0xffffff, integer: true }),
+  gradeAmbientTintClear: num({ owner: 'weather', unit: 'ratio', doc: 'Clear ambient/sky tint (cool blue), packed 0xRRGGBB sRGB.', default: 0xbcd4f2, min: 0, max: 0xffffff, integer: true }),
+  gradeFogColorClear: num({ owner: 'weather', unit: 'ratio', doc: 'Clear atmosphere/background colour (bright cool blue, fog far away), packed 0xRRGGBB sRGB.', default: 0x9dbce0, min: 0, max: 0xffffff, integer: true }),
+
+  // RAIN: dimmer, cool desaturated blue-grey, overcast — low key contrast, lifted ambient (soft flat shadows).
+  gradeKeyScaleRain: num({ owner: 'weather', unit: 'ratio', doc: 'Key-light intensity scale for the rain profile (overcast, low contrast).', default: 0.5, min: 0, max: 3 }),
+  gradeAmbientScaleRain: num({ owner: 'weather', unit: 'ratio', doc: 'Ambient fill scale for the rain profile (lifted so shadows go soft/flat, but kept below fog so rain reads dimmer than the fog whiteout).', default: 1.1, min: 0, max: 4 }),
+  gradeKeyTintRain: num({ owner: 'weather', unit: 'ratio', doc: 'Rain sun tint (cool blue-grey), packed 0xRRGGBB sRGB.', default: 0xa6b8cc, min: 0, max: 0xffffff, integer: true }),
+  gradeAmbientTintRain: num({ owner: 'weather', unit: 'ratio', doc: 'Rain ambient/sky tint (grey-blue overcast), packed 0xRRGGBB sRGB.', default: 0x8ea2b8, min: 0, max: 0xffffff, integer: true }),
+  gradeFogColorRain: num({ owner: 'weather', unit: 'ratio', doc: 'Rain atmosphere/background colour (dim cool desaturated blue-grey — clearly darker than the bright fog whiteout so the two read distinct), packed 0xRRGGBB sRGB.', default: 0x49535f, min: 0, max: 0xffffff, integer: true }),
+
+  // FOG: bright but FLAT — near-white/grey whiteout, very low key contrast, very high ambient. Luminous, not dark.
+  gradeKeyScaleFog: num({ owner: 'weather', unit: 'ratio', doc: 'Key-light intensity scale for the fog profile (very low — flat diffuse whiteout).', default: 0.4, min: 0, max: 3 }),
+  gradeAmbientScaleFog: num({ owner: 'weather', unit: 'ratio', doc: 'Ambient fill scale for the fog profile (high — luminous diffuse whiteout).', default: 1.85, min: 0, max: 4 }),
+  gradeKeyTintFog: num({ owner: 'weather', unit: 'ratio', doc: 'Fog sun tint (neutral cool white), packed 0xRRGGBB sRGB.', default: 0xdfe6ec, min: 0, max: 0xffffff, integer: true }),
+  gradeAmbientTintFog: num({ owner: 'weather', unit: 'ratio', doc: 'Fog ambient/sky tint (near-white), packed 0xRRGGBB sRGB.', default: 0xe2e8ee, min: 0, max: 0xffffff, integer: true }),
+  gradeFogColorFog: num({ owner: 'weather', unit: 'ratio', doc: 'Fog atmosphere/background colour (bright near-white grey whiteout), packed 0xRRGGBB sRGB.', default: 0xc8cdd0, min: 0, max: 0xffffff, integer: true }),
+
+  // SMOKE: murky ORANGE-BROWN, dim warm key, low ambient — an acrid sooty haze.
+  gradeKeyScaleSmoke: num({ owner: 'weather', unit: 'ratio', doc: 'Key-light intensity scale for the smoke profile (dim warm key).', default: 0.65, min: 0, max: 3 }),
+  gradeAmbientScaleSmoke: num({ owner: 'weather', unit: 'ratio', doc: 'Ambient fill scale for the smoke profile (low — murky).', default: 0.85, min: 0, max: 4 }),
+  gradeKeyTintSmoke: num({ owner: 'weather', unit: 'ratio', doc: 'Smoke sun tint (warm orange), packed 0xRRGGBB sRGB.', default: 0xffae66, min: 0, max: 0xffffff, integer: true }),
+  gradeAmbientTintSmoke: num({ owner: 'weather', unit: 'ratio', doc: 'Smoke ambient/sky tint (warm brown-orange), packed 0xRRGGBB sRGB.', default: 0xc28a52, min: 0, max: 0xffffff, integer: true }),
+  gradeFogColorSmoke: num({ owner: 'weather', unit: 'ratio', doc: 'Smoke atmosphere/background colour (murky orange-brown), packed 0xRRGGBB sRGB.', default: 0x6b4a2e, min: 0, max: 0xffffff, integer: true }),
 });
 
 /** Resolved per-profile precipitation intensity target (0..1) the WeatherView ramps toward. clear/fog gate
@@ -136,5 +176,38 @@ export function weatherSeverity(
     case 'rain': return resolved.severityRain;
     case 'fog': return resolved.severityFog;
     case 'smoke': return resolved.severitySmoke;
+  }
+}
+
+/** Per-weather atmosphere grade: key/ambient intensity SCALE + key/ambient/fog colour TINT (hex sRGB). The
+ *  LightingSystem eases between these on a weather change so the vibe never snaps. Fog DISTANCE is separate
+ *  (severity-driven, resolveFogDistances). */
+export interface WeatherGrade {
+  /** Multiplier on the daytime key (sun/moon) intensity — high = crisp, low = flat overcast/whiteout. */
+  readonly keyScale: number;
+  /** Multiplier on the ambient/hemisphere fill — high lifts shadows soft/flat (overcast/whiteout). */
+  readonly ambientScale: number;
+  /** Sun/key light tint, packed 0xRRGGBB sRGB. */
+  readonly keyTint: number;
+  /** Ambient + hemisphere-sky tint, packed 0xRRGGBB sRGB. */
+  readonly ambientTint: number;
+  /** Atmosphere/background fog colour (daytime), packed 0xRRGGBB sRGB. Night-dimmed by fogNightColorScale. */
+  readonly fogColor: number;
+}
+
+interface WeatherGradeResolved {
+  gradeKeyScaleClear: number; gradeAmbientScaleClear: number; gradeKeyTintClear: number; gradeAmbientTintClear: number; gradeFogColorClear: number;
+  gradeKeyScaleRain: number; gradeAmbientScaleRain: number; gradeKeyTintRain: number; gradeAmbientTintRain: number; gradeFogColorRain: number;
+  gradeKeyScaleFog: number; gradeAmbientScaleFog: number; gradeKeyTintFog: number; gradeAmbientTintFog: number; gradeFogColorFog: number;
+  gradeKeyScaleSmoke: number; gradeAmbientScaleSmoke: number; gradeKeyTintSmoke: number; gradeAmbientTintSmoke: number; gradeFogColorSmoke: number;
+}
+
+/** Select the resolved per-weather atmosphere grade for a profile (the lighting lane eases between profiles). */
+export function weatherGrade(resolved: WeatherGradeResolved, profile: WeatherProfile): WeatherGrade {
+  switch (profile) {
+    case 'clear': return { keyScale: resolved.gradeKeyScaleClear, ambientScale: resolved.gradeAmbientScaleClear, keyTint: resolved.gradeKeyTintClear, ambientTint: resolved.gradeAmbientTintClear, fogColor: resolved.gradeFogColorClear };
+    case 'rain': return { keyScale: resolved.gradeKeyScaleRain, ambientScale: resolved.gradeAmbientScaleRain, keyTint: resolved.gradeKeyTintRain, ambientTint: resolved.gradeAmbientTintRain, fogColor: resolved.gradeFogColorRain };
+    case 'fog': return { keyScale: resolved.gradeKeyScaleFog, ambientScale: resolved.gradeAmbientScaleFog, keyTint: resolved.gradeKeyTintFog, ambientTint: resolved.gradeAmbientTintFog, fogColor: resolved.gradeFogColorFog };
+    case 'smoke': return { keyScale: resolved.gradeKeyScaleSmoke, ambientScale: resolved.gradeAmbientScaleSmoke, keyTint: resolved.gradeKeyTintSmoke, ambientTint: resolved.gradeAmbientTintSmoke, fogColor: resolved.gradeFogColorSmoke };
   }
 }

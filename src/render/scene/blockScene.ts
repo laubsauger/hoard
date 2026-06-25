@@ -26,7 +26,7 @@ import { worldConfig } from '../../config/domains/world';
 import { structuresConfig } from '../../config/domains/structures';
 import { playerConfig } from '../../config/domains/player';
 import { lightingConfig } from '../../config/domains/lighting';
-import { weatherConfig } from '../../config/domains/weather';
+import { weatherConfig, weatherGrade, WEATHER_PROFILES, type WeatherGrade, type WeatherProfile } from '../../config/domains/weather';
 import { renderingConfig } from '../../config/domains/rendering';
 import { perceptionConfig } from '../../config/domains/perception';
 import { postFXConfig } from '../../config/domains/postFX';
@@ -350,6 +350,15 @@ export class BlockScene {
           moonElevationMaxDegrees: this.weatherCfg.moonElevationMaxDegrees,
           sunAzimuthDegrees: this.weatherCfg.sunAzimuthDegrees,
         },
+        // Per-weather atmosphere grade table (one resolved grade per profile) — the LightingSystem eases
+        // between these on a weather change. Built once from the resolved weather config.
+        weatherGrades: WEATHER_PROFILES.reduce(
+          (acc, p) => { acc[p] = weatherGrade(this.weatherCfg, p); return acc; },
+          {} as Record<WeatherProfile, WeatherGrade>,
+        ),
+        gradeSmoothingPerSecond: this.weatherCfg.gradeSmoothingPerSecond,
+        fogNightColorScale: this.weatherCfg.fogNightColorScale,
+        moonColor: this.lighting.moonColor,
       },
     );
     this.flashlightSys = new FlashlightSystem(this.flashlight, {

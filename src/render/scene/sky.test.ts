@@ -4,15 +4,20 @@
 import { describe, it, expect } from 'vitest';
 import { resolveDomain } from '../../config/registry';
 import { lightingConfig } from '../../config/domains/lighting';
-import { weatherConfig } from '../../config/domains/weather';
+import { weatherConfig, weatherGrade } from '../../config/domains/weather';
 import { computeSkyState, dayPhaseOf, formatTimeOfDay } from './sky';
 
 const L = resolveDomain(lightingConfig, 'desktop-high');
 const W = resolveDomain(weatherConfig, 'desktop-high');
+const FULL = { keyScale: 1, ambientScale: 1 }; // a neutral "full" grade (clear)
+const clearGrade = weatherGrade(W, 'clear');
+const rainGrade = weatherGrade(W, 'rain');
+const fogGrade = weatherGrade(W, 'fog');
+const smokeGrade = weatherGrade(W, 'smoke');
 
 describe('computeSkyState (T38 day/night)', () => {
   it('is bright daylight at noon with the key light pointing down', () => {
-    const s = computeSkyState(0.5, L, W, 0);
+    const s = computeSkyState(0.5, L, W, FULL);
     expect(s.isDay).toBe(true);
     expect(s.elevation01).toBeGreaterThan(0.9);
     expect(s.direction.y).toBeLessThan(0); // light travels downward from a high sun
@@ -21,21 +26,34 @@ describe('computeSkyState (T38 day/night)', () => {
   });
 
   it('falls to moonlight at midnight', () => {
-    const s = computeSkyState(0, L, W, 0);
+    const s = computeSkyState(0, L, W, FULL);
     expect(s.isDay).toBe(false);
     expect(s.keyIntensity).toBeCloseTo(L.moonIntensity, 2);
   });
 
-  it('darkens the ambient fill as weather severity rises', () => {
-    const clear = computeSkyState(0.5, L, W, 0);
-    const heavy = computeSkyState(0.5, L, W, 1);
-    expect(heavy.ambientIntensity).toBeLessThan(clear.ambientIntensity);
-    expect(heavy.keyIntensity).toBeLessThan(clear.keyIntensity);
+  it('grades the key + ambient per weather: clear has the highest key, fog the highest ambient fraction', () => {
+    const clear = computeSkyState(0.5, L, W, { keyScale: clearGrade.keyScale, ambientScale: clearGrade.ambientScale });
+    const rain = computeSkyState(0.5, L, W, { keyScale: rainGrade.keyScale, ambientScale: rainGrade.ambientScale });
+    const fog = computeSkyState(0.5, L, W, { keyScale: fogGrade.keyScale, ambientScale: fogGrade.ambientScale });
+    const smoke = computeSkyState(0.5, L, W, { keyScale: smokeGrade.keyScale, ambientScale: smokeGrade.ambientScale });
+    // CLEAR is the brightest, crispest key — higher than every overcast/hazy profile.
+    expect(clear.keyIntensity).toBeGreaterThan(rain.keyIntensity);
+    expect(clear.keyIntensity).toBeGreaterThan(fog.keyIntensity);
+    expect(clear.keyIntensity).toBeGreaterThan(smoke.keyIntensity);
+    // FOG is the flattest whiteout: the LOWEST key but the HIGHEST ambient fill of all profiles.
+    expect(fog.keyIntensity).toBeLessThan(rain.keyIntensity);
+    expect(fog.keyIntensity).toBeLessThan(smoke.keyIntensity);
+    expect(fog.ambientIntensity).toBeGreaterThan(clear.ambientIntensity);
+    expect(fog.ambientIntensity).toBeGreaterThan(rain.ambientIntensity);
+    expect(fog.ambientIntensity).toBeGreaterThan(smoke.ambientIntensity);
+    // SMOKE is murky: ambient below clear (low fill).
+    expect(smoke.ambientIntensity).toBeLessThan(clear.ambientIntensity);
   });
 
   it('rejects out-of-range inputs (no silent clamp, V4)', () => {
-    expect(() => computeSkyState(1.5, L, W, 0)).toThrow();
-    expect(() => computeSkyState(0.5, L, W, -0.1)).toThrow();
+    expect(() => computeSkyState(1.5, L, W, FULL)).toThrow();
+    expect(() => computeSkyState(0.5, L, W, { keyScale: -0.1, ambientScale: 1 })).toThrow();
+    expect(() => computeSkyState(0.5, L, W, { keyScale: 1, ambientScale: -0.1 })).toThrow();
   });
 });
 
@@ -50,7 +68,7 @@ describe('day phase + clock readout (T126)', () => {
   it('agrees with computeSkyState about whether it is day', () => {
     for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
       const phase = dayPhaseOf(t);
-      const isDay = computeSkyState(t, L, W, 0).isDay;
+      const isDay = computeSkyState(t, L, W, FULL).isDay;
       // 'day'/'dawn'(rising before noon, still above? no) — the only hard guarantee: a 'day' label ⇒ sun up,
       // a 'night' label ⇒ sun down. Twilight straddles the horizon so it is not asserted against isDay.
       if (phase === 'day') expect(isDay).toBe(true);

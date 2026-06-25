@@ -19,6 +19,16 @@ export interface SkyWeatherInput {
   readonly sunAzimuthDegrees: number;
 }
 
+/** Per-weather intensity grade the sky math consumes (the SMOOTHED key/ambient scales the LightingSystem eases
+ *  between profiles). Replaces the old single `weatherDim` scalar so each weather gets its own key + fill vibe
+ *  (e.g. fog = low key, high ambient = flat luminous whiteout; rain = lower key, lifted ambient = soft overcast). */
+export interface SkyGrade {
+  /** Multiplier on the key (sun/moon) intensity. */
+  readonly keyScale: number;
+  /** Multiplier on the ambient fill. */
+  readonly ambientScale: number;
+}
+
 export interface SkyState {
   /** Normalized direction the key light TRAVELS (from the sky body toward the ground). y < 0 by day. */
   readonly direction: { readonly x: number; readonly y: number; readonly z: number };
@@ -35,17 +45,19 @@ export interface SkyState {
 /**
  * Compute the sky state for a day fraction. The sun's elevation tracks sin(2π·(t−0.25)): horizon at dawn
  * (t=0.25) and dusk (t=0.75), zenith at noon (t=0.5), below the horizon at night. At night the moon takes
- * over (opposite phase). Azimuth sweeps with time around the configured diagonal anchor. Weather severity
- * 0..1 attenuates the key + ambient (overcast / smoke darkens the scene).
+ * over (opposite phase). Azimuth sweeps with time around the configured diagonal anchor. The per-weather
+ * `grade` scales the key + ambient independently so each profile has its own light vibe (overcast lifts the
+ * fill while dropping the key; a clear day keeps a high key + normal fill).
  */
 export function computeSkyState(
   timeOfDay: number,
   lighting: SkyLightingInput,
   weather: SkyWeatherInput,
-  weatherSeverity: number,
+  grade: SkyGrade,
 ): SkyState {
   if (timeOfDay < 0 || timeOfDay > 1) throw new Error(`timeOfDay must be in [0,1], got ${timeOfDay}`);
-  if (weatherSeverity < 0 || weatherSeverity > 1) throw new Error(`weatherSeverity must be in [0,1], got ${weatherSeverity}`);
+  if (grade.keyScale < 0) throw new Error(`grade.keyScale must be non-negative, got ${grade.keyScale}`);
+  if (grade.ambientScale < 0) throw new Error(`grade.ambientScale must be non-negative, got ${grade.ambientScale}`);
 
   const sunSin = Math.sin(TAU * (timeOfDay - 0.25)); // +1 noon, 0 dawn/dusk, -1 midnight
   const isDay = sunSin >= 0;
@@ -63,9 +75,8 @@ export function computeSkyState(
   const len = Math.hypot(px, py, pz) || 1;
   const direction = { x: -px / len, y: -py / len, z: -pz / len };
 
-  const weatherDim = 1 - 0.6 * weatherSeverity;
-  const keyIntensity = (lighting.moonIntensity + (lighting.sunIntensity - lighting.moonIntensity) * Math.max(0, sunSin)) * weatherDim;
-  const ambientIntensity = lighting.ambientIntensity * (0.35 + 0.65 * Math.max(0, sunSin)) * weatherDim;
+  const keyIntensity = (lighting.moonIntensity + (lighting.sunIntensity - lighting.moonIntensity) * Math.max(0, sunSin)) * grade.keyScale;
+  const ambientIntensity = lighting.ambientIntensity * (0.35 + 0.65 * Math.max(0, sunSin)) * grade.ambientScale;
 
   return { direction, keyIntensity, ambientIntensity, isDay, elevation01 };
 }

@@ -17,8 +17,8 @@ export const postFXConfig = registerDomain('postFX', {
   baseExposure: num({
     owner: 'postFX',
     unit: 'ratio',
-    doc: 'Base tone-mapping exposure multiplier before interior/night compensation (B6). At full daylight exterior this IS the exposure (interior/night boosts fade to 0), so it sets the daytime brightness through the AgX curve. Raised 1→1.3 so day reads bright enough outside AND inside (sun is roof-blocked indoors, so interiors ride this + ambient); night held ~constant by lowering nightExposureBoostStops in tandem.',
-    default: 1.3,
+    doc: 'Base tone-mapping exposure multiplier before interior/night compensation (B6). At full daylight exterior this IS the exposure (interior/night boosts fade to 0), so it sets the daytime brightness through the AgX curve. Raised 1.3→1.45 so a CLEAR day reads bright + crisp outside AND inside (sun is roof-blocked indoors, so interiors ride this + ambient); night held ~constant by lowering nightExposureBoostStops in tandem.',
+    default: 1.45,
     min: 0.05,
     max: 8,
   }),

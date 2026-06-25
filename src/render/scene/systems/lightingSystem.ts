@@ -8,14 +8,23 @@
 import { type AmbientLight, Color, type DirectionalLight, type Fog, type HemisphereLight, type Scene } from 'three';
 import type { QualityTier } from '../../../config/types';
 import type { GameRuntime } from '../../../game/runtime';
+import type { WeatherGrade, WeatherProfile } from '../../../config/domains/weather';
 import { approach, interiorExposureCompensation, resolveFogDistances, resolveToneExposure } from '../../lighting/lighting';
 import { computeSkyState, type SkyWeatherInput } from '../sky';
 import { isInside } from './playerLocation';
 
-// Authored cool-grey fog/atmosphere hue (relative channel weights); luminance is lifted off near-black to the
-// configured floor so the far plane never reads as a black void (B5). Slightly warmer/brighter by day.
-const FOG_HUE = { r: 0.62, g: 0.68, b: 0.78 } as const;
-const FOG_DAY_LUMINANCE_BONUS = 0.06;
+// Scratch colours reused each frame (no per-frame allocation, B24/V11).
+const _targetColor = new Color();
+
+/** Ease a live light Colour toward a hex sRGB target at `rate`/s (frame-rate-independent). dt<=0 snaps. So a
+ *  weather change EASES the tint, never snaps — mirrors the fog-distance approach() smoothing (B5). */
+function easeColor(live: Color, targetHex: number, rate: number, dtSeconds: number): void {
+  _targetColor.setHex(targetHex); // sRGB → linear working space
+  const a = dtSeconds <= 0 ? 1 : 1 - Math.exp(-rate * dtSeconds);
+  live.r += (_targetColor.r - live.r) * a;
+  live.g += (_targetColor.g - live.g) * a;
+  live.b += (_targetColor.b - live.b) * a;
+}
 
 /** GPU light/fog handles the LightingSystem drives each frame (created + tracked by the orchestrator, V24). */
 export interface LightingHandles {
@@ -41,6 +50,14 @@ export interface LightingSystemConfig {
   readonly fogFloorLuminance: number;
   readonly nightExposureBoostStops: number;
   readonly weather: SkyWeatherInput;
+  /** Per-weather atmosphere grade (key/ambient scale + key/ambient/fog tint) selected by the active profile. */
+  readonly weatherGrades: Record<WeatherProfile, WeatherGrade>;
+  /** Per-second ease rate for the grade scales + tints toward the active profile (so a weather change eases). */
+  readonly gradeSmoothingPerSecond: number;
+  /** Multiplier on the per-weather fog colour at night (dims the daytime haze for the night path). */
+  readonly fogNightColorScale: number;
+  /** Night key (moon) light tint, packed 0xRRGGBB sRGB. */
+  readonly moonColor: number;
 }
 
 export interface LightingResult {
@@ -57,6 +74,14 @@ export class LightingSystem {
   private interiorTransition = 0;
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame. */
   private exposure = 1;
+  /** Smoothed per-weather key/ambient intensity scales — eased toward the active profile so a weather change
+   *  never snaps the brightness (primed to the clear/full grade; the colours smooth on the live light objects). */
+  private gradeKeyScale = 1;
+  private gradeAmbientScale = 1;
+  /** Smoothed DAYTIME fog/atmosphere base colour — eased toward the active profile's fog hue. The applied
+   *  `fog.color` is this × the night dim × the luminance floor, so the night/floor scaling never corrupts the
+   *  smoothing accumulator (kept separate from the live fog object). */
+  private readonly fogBase = new Color(0x0b0d0a);
 
   constructor(
     private readonly handles: LightingHandles,
@@ -78,7 +103,18 @@ export class LightingSystem {
     const { scene, sun, ambient, hemi, fog } = this.handles;
     const severity = runtime.weatherSeverity;
     const timeOfDay = timeOfDayOverride ?? runtime.timeOfDay();
-    const sky = computeSkyState(timeOfDay, this.cfg, this.cfg.weather, severity);
+
+    // Per-weather grade: ease the key/ambient SCALES toward the active profile (mirrors the fog-distance
+    // approach() smoothing) so switching weather never snaps the brightness. The tints smooth on the live
+    // light/fog colour objects below.
+    const grade = this.cfg.weatherGrades[runtime.weather];
+    const gradeRate = this.cfg.gradeSmoothingPerSecond;
+    this.gradeKeyScale = approach(this.gradeKeyScale, grade.keyScale, gradeRate, dtSeconds);
+    this.gradeAmbientScale = approach(this.gradeAmbientScale, grade.ambientScale, gradeRate, dtSeconds);
+    const sky = computeSkyState(timeOfDay, this.cfg, this.cfg.weather, {
+      keyScale: this.gradeKeyScale,
+      ambientScale: this.gradeAmbientScale,
+    });
 
     const dist = this.cfg.shadowLightDistanceMeters;
     // B13: anchor the key + its shadow frustum to the player so cast shadows always cover the play area
@@ -89,11 +125,16 @@ export class LightingSystem {
     sun.target.position.set(pl.x, 0, pl.z);
     sun.target.updateMatrixWorld();
     sun.intensity = sky.keyIntensity;
-    sun.color.setHex(sky.isDay ? 0xfff2dc : 0xaebed8);
+    // Per-weather key TINT by day (warm-white clear, cool rain, neutral fog, orange smoke); the moon tint at
+    // night. Eased so a weather change (or the day↔night handover) never snaps the colour.
+    easeColor(sun.color, sky.isDay ? grade.keyTint : this.cfg.moonColor, gradeRate, dtSeconds);
     // B6: floor the ambient/hemisphere fill so a low-key night spawn never crushes unlit faces to black.
     const ambientLevel = Math.max(sky.ambientIntensity, this.cfg.minAmbientIntensity);
     ambient.intensity = ambientLevel;
     hemi.intensity = ambientLevel * 0.5;
+    // Per-weather ambient/sky TINT (cool overcast for rain, near-white for fog, warm for smoke), eased.
+    easeColor(ambient.color, grade.ambientTint, gradeRate, dtSeconds);
+    easeColor(hemi.color, grade.ambientTint, gradeRate, dtSeconds);
 
     // B5: analytic, clamped fog distances (no per-frame stepping-loop banding), smoothed toward target so a
     // weather change never sweeps the fog boundary across the near-ortho frame as bands.
@@ -102,10 +143,15 @@ export class LightingSystem {
     fog.far = approach(fog.far, target.far, rate, dtSeconds);
     fog.near = approach(fog.near, target.near, rate, dtSeconds);
 
-    // B5: lift the fog/background colour off near-black to the configured luminance floor (brighter by day)
-    // so distant geometry fades into atmosphere instead of a black void.
-    const lum = this.cfg.fogFloorLuminance + (sky.isDay ? FOG_DAY_LUMINANCE_BONUS : 0);
-    fog.color.setRGB(FOG_HUE.r * lum, FOG_HUE.g * lum, FOG_HUE.b * lum);
+    // Per-weather fog/atmosphere COLOUR: the authored daytime hue, dimmed at night (fogNightColorScale) so a
+    // foggy night reads as a dim luminous haze, not the daytime whiteout. Eased toward the target so a weather
+    // change never sweeps the background colour as a hard cut. B5: a luminance FLOOR keeps the far plane off
+    // near-black (never a black void) even for the murky/night-dimmed profiles.
+    easeColor(this.fogBase, grade.fogColor, gradeRate, dtSeconds);
+    fog.color.copy(this.fogBase);
+    if (!sky.isDay) fog.color.multiplyScalar(this.cfg.fogNightColorScale);
+    const fogLum = Math.max(fog.color.r, fog.color.g, fog.color.b);
+    if (fogLum > 0 && fogLum < this.cfg.fogFloorLuminance) fog.color.multiplyScalar(this.cfg.fogFloorLuminance / fogLum);
     (scene.background as Color).copy(fog.color);
 
     // B6: resolve the renderer tone-mapping exposure — interior compensation + a night floor so the scene

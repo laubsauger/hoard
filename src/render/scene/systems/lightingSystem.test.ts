@@ -6,6 +6,14 @@ import { describe, it, expect } from 'vitest';
 import { AmbientLight, Color, DirectionalLight, Fog, HemisphereLight, Scene } from 'three';
 import { LightingSystem, type LightingHandles, type LightingSystemConfig } from './lightingSystem';
 import type { GameRuntime } from '../../../game/runtime';
+import { resolveDomain } from '../../../config/registry';
+import { weatherConfig, weatherGrade, WEATHER_PROFILES, type WeatherGrade, type WeatherProfile } from '../../../config/domains/weather';
+
+const W = resolveDomain(weatherConfig, 'desktop-high');
+const GRADES = WEATHER_PROFILES.reduce(
+  (acc, p) => { acc[p] = weatherGrade(W, p); return acc; },
+  {} as Record<WeatherProfile, WeatherGrade>,
+);
 
 const CFG: LightingSystemConfig = {
   tier: 'desktop-high',
@@ -21,6 +29,10 @@ const CFG: LightingSystemConfig = {
   fogFloorLuminance: 0.1,
   nightExposureBoostStops: 2,
   weather: { sunElevationMaxDegrees: 60, moonElevationMaxDegrees: 40, sunAzimuthDegrees: 45 },
+  weatherGrades: GRADES,
+  gradeSmoothingPerSecond: 4,
+  fogNightColorScale: 0.32,
+  moonColor: 0xaebed8,
 };
 
 function makeHandles(): LightingHandles {
@@ -30,12 +42,14 @@ function makeHandles(): LightingHandles {
 }
 
 // inside: a building footprint covering cell (5,5); outside: bounds far away so the player cell misses.
-function fakeRuntime(inside: boolean, timeOfDay: number): GameRuntime {
+function fakeRuntime(inside: boolean, timeOfDay: number, weather: WeatherProfile = 'clear'): GameRuntime {
   const bounds = inside ? { minCx: 0, maxCx: 10, minCy: 0, maxCy: 10 } : { minCx: 100, maxCx: 110, minCy: 100, maxCy: 110 };
+  const severity = weather === 'clear' ? W.severityClear : weather === 'rain' ? W.severityRain : weather === 'fog' ? W.severityFog : W.severitySmoke;
   return {
     player: () => ({ x: 5, y: 0, z: 5 }),
     playerAim: () => 0,
-    weatherSeverity: 0,
+    weather,
+    weatherSeverity: severity,
     timeOfDay: () => timeOfDay,
     scene: { buildings: [{ bounds }] },
   } as unknown as GameRuntime;
@@ -102,5 +116,62 @@ describe('LightingSystem', () => {
     expect(res.exposure).toBeGreaterThan(dayExposure);
     // Null/undefined override falls through to the sim clock.
     expect(sys.update(1 / 30, noonRt).timeOfDay).toBe(0.5);
+  });
+
+  // Settle a system at noon under a weather profile and read its fog + light state.
+  function settle(weather: WeatherProfile) {
+    const h = makeHandles();
+    const sys = new LightingSystem(h, CFG);
+    for (let i = 0; i < 240; i++) sys.update(1 / 30, fakeRuntime(false, 0.5, weather), 0.5);
+    return { fogFar: h.fog.far, fogColor: h.fog.color.clone(), sun: h.sun.intensity, ambient: h.ambient.intensity, sunColor: h.sun.color.clone() };
+  }
+
+  it('grades fog DISTANCE per weather: fog has the shortest far, clear the longest', () => {
+    const clear = settle('clear');
+    const rain = settle('rain');
+    const fog = settle('fog');
+    const smoke = settle('smoke');
+    expect(fog.fogFar).toBeLessThan(rain.fogFar);
+    expect(fog.fogFar).toBeLessThan(smoke.fogFar);
+    expect(fog.fogFar).toBeLessThan(clear.fogFar);
+    expect(clear.fogFar).toBeGreaterThan(rain.fogFar); // clear is the crispest (furthest fog)
+  });
+
+  it('resolves a DISTINCT fog/atmosphere colour for each weather profile', () => {
+    const colours = (['clear', 'rain', 'fog', 'smoke'] as const).map((p) => settle(p).fogColor);
+    for (let i = 0; i < colours.length; i++) {
+      for (let j = i + 1; j < colours.length; j++) {
+        const a = colours[i]!, b = colours[j]!;
+        const delta = Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+        expect(delta).toBeGreaterThan(0.05); // visibly different hue/brightness
+      }
+    }
+    // Smoke skews warm (red > blue); fog is near-neutral/cool (blue >= red, bright).
+    const smoke = settle('smoke').fogColor;
+    expect(smoke.r).toBeGreaterThan(smoke.b);
+    const fogC = settle('fog').fogColor;
+    expect(fogC.b).toBeGreaterThanOrEqual(fogC.r - 1e-3);
+  });
+
+  it('grades the key + ambient per weather: clear has the strongest key, fog the highest ambient', () => {
+    const clear = settle('clear');
+    const rain = settle('rain');
+    const fog = settle('fog');
+    const smoke = settle('smoke');
+    expect(clear.sun).toBeGreaterThan(rain.sun);
+    expect(clear.sun).toBeGreaterThan(fog.sun);
+    expect(clear.sun).toBeGreaterThan(smoke.sun);
+    expect(fog.ambient).toBeGreaterThan(clear.ambient);
+    expect(fog.ambient).toBeGreaterThan(rain.ambient);
+    expect(fog.ambient).toBeGreaterThan(smoke.ambient);
+  });
+
+  it('keeps a FOGGY NIGHT readable: fog never crushes below the luminance floor + ambient stays floored', () => {
+    const h = makeHandles();
+    const sys = new LightingSystem(h, CFG);
+    for (let i = 0; i < 240; i++) sys.update(1 / 30, fakeRuntime(false, 0.0, 'fog'), 0.0); // midnight, fog
+    const maxChannel = Math.max(h.fog.color.r, h.fog.color.g, h.fog.color.b);
+    expect(maxChannel).toBeGreaterThanOrEqual(CFG.fogFloorLuminance - 1e-6); // not a black void
+    expect(h.ambient.intensity).toBeGreaterThanOrEqual(CFG.minAmbientIntensity - 1e-6); // ambient floored
   });
 });
