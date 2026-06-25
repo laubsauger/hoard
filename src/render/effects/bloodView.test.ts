@@ -400,6 +400,32 @@ describe('BloodSim — zombie body-gore follows the body to the corpse (Bug A)',
     for (let i = 0; i < s.zombieGoreCount; i++) expect(s.zgWY[i]!).toBeLessThan(0.6);
   });
 
+  it('orients each splat to the body surface normal — radial-out upright, tilting +Y when toppled (T142)', () => {
+    const s = new BloodSim(settings);
+    let body: BodyAnchor | null = anchor({ x: 2, y: 0, z: 3, lying: 0 });
+    s.setBodyAnchors({ resolve: (e) => (e === 7 ? body : null) });
+    s.consume([hitReaction(1), bloodSpray(2, 0, 3)], ctx);
+    s.update(1 / 60);
+    expect(s.zombieGoreCount).toBeGreaterThan(0);
+    for (let i = 0; i < s.zombieGoreCount; i++) {
+      const nx = s.zgNX[i]!;
+      const ny = s.zgNY[i]!;
+      const nz = s.zgNZ[i]!;
+      expect(Math.hypot(nx, ny, nz)).toBeCloseTo(1, 5); // unit normal (drives the orientation quaternion)
+      expect(Math.abs(ny)).toBeLessThan(0.5); // upright → ~horizontal (faces radially out, not up)
+      const rx = s.zgWX[i]! - 2;
+      const rz = s.zgWZ[i]! - 3;
+      const rl = Math.hypot(rx, rz);
+      if (rl > 1e-3) expect((nx * rx + nz * rz) / rl).toBeGreaterThan(0.7); // points OUT from the body axis
+    }
+    // Toppled corpse → the coating lies flat-up, normals tilt toward +Y.
+    body = anchor({ x: 2, y: 0, z: 3, lying: 1, groundY: 0.2 });
+    s.update(1 / 60);
+    let anyUp = false;
+    for (let i = 0; i < s.zombieGoreCount; i++) if (s.zgNY[i]! > 0.8) anyUp = true;
+    expect(anyUp).toBe(true);
+  });
+
   it('keeps the gore at the body wherever it moves (re-projected each frame, not parented)', () => {
     const s = new BloodSim(settings);
     let body = anchor({ x: 0, y: 0, z: 0 });

@@ -336,6 +336,12 @@ export class BloodSim {
   readonly zgWX: Float32Array; // re-projected world X (read by the view)
   readonly zgWY: Float32Array; // re-projected world Y
   readonly zgWZ: Float32Array; // re-projected world Z
+  // Per-splat SURFACE NORMAL (world) — the flattened blob's thin axis aligns to this so the splat lies TANGENT to
+  // the body (painted onto the contour), not a fat blob facing world-Z. Radial-out when upright, tilts to +Y as
+  // the body topples. (The zombie gore previously rendered with identity rotation → chunky pokes on the torso.)
+  readonly zgNX: Float32Array;
+  readonly zgNY: Float32Array;
+  readonly zgNZ: Float32Array;
   readonly zgSize: Float32Array;
   readonly zgVis: Float32Array; // 0..1 visibility/shrink (1 fresh → 0 dried/gone), recomputed each update
   readonly zgReveal: Float32Array; // V90: body's crowd reveal (0..1) this frame — multiplies render opacity so gore fades with a culled zombie
@@ -423,6 +429,9 @@ export class BloodSim {
     this.zgWX = new Float32Array(Z);
     this.zgWY = new Float32Array(Z);
     this.zgWZ = new Float32Array(Z);
+    this.zgNX = new Float32Array(Z);
+    this.zgNY = new Float32Array(Z).fill(1); // default +Y until reprojected
+    this.zgNZ = new Float32Array(Z);
     this.zgSize = new Float32Array(Z);
     this.zgVis = new Float32Array(Z);
     this.zgReveal = new Float32Array(Z).fill(1); // V90: default fully visible until a body anchor reports its reveal
@@ -792,6 +801,23 @@ export class BloodSim {
     this.zgWX[i] = ux + (tx - ux) * t;
     this.zgWY[i] = uy + (ty - uy) * t;
     this.zgWZ[i] = uz + (tz - uz) * t;
+    // Surface normal so the splat hugs the body contour: UPRIGHT it points radially OUT from the body axis
+    // (normalize the around-body offset; a top/head splat with ~0 radius defaults +Y), tilting toward +Y as the
+    // body TOPPLES (the gore lies flat-up on the prone corpse). The render aligns the blob's thin axis to it.
+    const rl = Math.hypot(lx, lz);
+    const upX = rl > 1e-4 ? lx / rl : 0;
+    const upZ = rl > 1e-4 ? lz / rl : 0;
+    const upY = rl > 1e-4 ? 0 : 1;
+    let nx = upX * (1 - t);
+    let ny = upY * (1 - t) + t; // → +Y when fully toppled
+    let nz = upZ * (1 - t);
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    this.zgNX[i] = nx;
+    this.zgNY[i] = ny;
+    this.zgNZ[i] = nz;
   }
 
   /** Stamp a settled, directional decal (lobed teardrop, elongated along travel) onto a surface (floor or
@@ -1007,10 +1033,13 @@ function makeBlobGeometry(): CircleGeometry {
 const DECAL_DEFAULT_NORMAL = new Vector3(0, 0, 1); // CircleGeometry faces +Z before orientation
 const DECAL_SURFACE_OFFSET = 0.02; // m — lift the decal a hair off the surface along its normal (no z-fight)
 const DROPLET_LONG_AXIS = new Vector3(1, 0, 0); // the sphere's +X is stretched ALONG the droplet velocity (streak)
-// Player-body gore is slapped flat AGAINST the body surface: spread it tangentially and thin it radially so a
-// splat hugs the body instead of poking out as a ball (mirrors the reference body-coating look, T79).
+// Body gore is slapped flat AGAINST the body surface: spread it tangentially and thin it radially (along the
+// surface normal) so a splat hugs the body like paint instead of poking out as a ball (T79). Thinned 0.32→0.16
+// so it reads as a coating, not a chunky lens — a little thickness, not a blob.
 const PLAYER_GORE_SPREAD = 1.15;
-const PLAYER_GORE_RADIAL_FLATTEN = 0.32;
+const PLAYER_GORE_RADIAL_FLATTEN = 0.16;
+/** Reused scratch for a body-gore splat's surface normal (no per-instance allocation, V24). */
+const _goreNrm = new Vector3();
 
 /** Pure helper (T79): the instance scale of one airborne droplet — its long axis stretches ALONG velocity with
  *  speed (a motion streak) while the cross-section stays = size (a thin streak, never a ball). Unit-tested. */
@@ -1179,7 +1208,10 @@ export class BloodView {
       const vis = sim.zgVis[i]! * sim.zgReveal[i]!; // V90: × the body's crowd reveal → fades with a culled zombie
       const sc = sim.zgSize[i]! * vis;
       this.dummy.position.set(sim.zgWX[i]!, sim.zgWY[i]!, sim.zgWZ[i]!);
-      this.dummy.quaternion.identity();
+      // Align the disc's thin axis (geometry +Z) to the body surface normal so it lies TANGENT to the contour
+      // (painted on), not a fat blob facing world-Z — the chunky/poking bug.
+      _goreNrm.set(sim.zgNX[i]!, sim.zgNY[i]!, sim.zgNZ[i]!);
+      this.dummy.quaternion.setFromUnitVectors(DECAL_DEFAULT_NORMAL, _goreNrm);
       this.dummy.scale.set(sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_SPREAD, sc * PLAYER_GORE_RADIAL_FLATTEN);
       this.dummy.updateMatrix();
       this.zgMesh.setMatrixAt(i, this.dummy.matrix);
