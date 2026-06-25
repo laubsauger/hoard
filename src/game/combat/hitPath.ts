@@ -714,7 +714,12 @@ export class CombatSystem {
       // topples in the push direction — front shot onto its back, behind onto its face, side sideways. The `force`
       // is the equipped weapon's KNOCKBACK energy (a pistol topples, a shotgun launches), NOT raw damage —
       // decoupled so each weapon has its own kinetic signature and a high-damage pistol doesn't mangle the body.
-      this.deps.onEntityDied(slot, { dirX: ndx, dirZ: ndz, force: this.currentWeapon().knockback });
+      // V109: scale the ragdoll knockback by hit CLOSENESS — point-blank LAUNCHES the body, a far kill keeps only
+      // a floor fraction (it topples). `travel`/range is the hit distance; the grenade's own radial impulse is
+      // separate (it scales by blast proximity in the runtime).
+      const w = this.currentWeapon();
+      const closeness = Math.max(this.deps.combat.knockbackClosenessFloor, 1 - travel / Math.max(1, w.rangeMeters));
+      this.deps.onEntityDied(slot, { dirX: ndx, dirZ: ndz, force: w.knockback * closeness });
     }
 
     return {

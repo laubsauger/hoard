@@ -58,6 +58,7 @@ import {
   STORAGE_SLOTS,
   slotsForItem,
   slotAccepts,
+  isThrowable,
 } from '@/game/inventory';
 import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
 import type { ContainerView } from '@/stores/inventoryView';
@@ -270,6 +271,14 @@ export class GameRuntime {
   /** Reference horde mass for the event's pressure normalization (the district's starting total). */
   private readonly referenceHordeSize: number;
   private readonly pendingShots: { origin: Vec3; dirX: number; dirZ: number; region: AnatomyRegion }[] = [];
+  /** T142: thrown grenades in flight — the throw origin + blast TARGET + the tick it lands (ends the arc) + the
+   *  tick it detonates (fuse). The render polls `grenadeProjectiles()` to draw the arcing projectile until it blows. */
+  private readonly pendingDetonations: {
+    readonly sx: number; readonly sz: number; readonly tx: number; readonly tz: number;
+    readonly throwTick: number; readonly landTick: number; readonly detonateTick: number;
+  }[] = [];
+  /** T142: blast points the render lane polls (drainExplosions) to flash the explosion — one-shot, render-only. */
+  private readonly explosionFx: { readonly x: number; readonly z: number }[] = [];
   private targetSlot: ZombieSlot = -1;
 
   private readonly rand: () => number;
@@ -626,19 +635,21 @@ export class GameRuntime {
       this.inventory.addContainer(ref, { type: 'clothing', capacityKg: EQUIP_SLOT_CAPACITY_KG, allowedCategories: ['weapon', 'tool'], maxStacks: 1 });
       this.namedContainers.set(slot, ref);
     }
-    // T108/T138: starter loadout — a knife (melee) + a PISTOL + a SHOTGUN (so weapon-swap has classes to cycle
-    // out of the box), a hammer + planks for window board-up (the hammer doubles as a breaching tool, V43), plus
-    // a bandage + water. Adjust later.
-    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.WoodPlank, 6], [ITEM.Flashlight, 1]] as const) {
+    // T108/T138: starter loadout — a knife (melee) + a PISTOL + a SHOTGUN + an SMG (so weapon-swap has classes to
+    // cycle out of the box), a hammer + planks for window board-up (the hammer doubles as a breaching tool, V43),
+    // plus a bandage + water + flashlight. The weapons are seeded + EQUIPPED to belt slots BEFORE the bulky planks
+    // are seeded — equipping relocates their weight out of the pack (V103) so the whole kit fits the bag cap.
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.SMG, 1], [ITEM.Grenade, 3], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.Flashlight, 1]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
     // T140: stow the starter weapons on the belt + draw the pistol (the default active weapon — matches the
     // combat system's GATE-0 pistol default), so the player starts already holstered and the equipment UI is
-    // populated from the first frame instead of empty.
+    // populated from the first frame instead of empty. (Frees pack weight for the planks seeded next.)
     this.equipItem(ITEM.Pistol, 'holster');
     this.equipItem(ITEM.Shotgun, 'back');
     this.equipItem(ITEM.KitchenKnife, 'beltL');
     this.drawSlot('holster');
+    this.inventory.seed(playerRef, ITEM.WoodPlank as ItemId, 6); // bulky — seeded after the weapons moved to slots
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
     // never perturbs the IdFactory counters or the spawn-scatter rng that determinism/replay depend on (V26).
     // Each container is anchored at a FIXED authored cell (lootableContainerCells) — a corner of the player's
@@ -815,6 +826,125 @@ export class GameRuntime {
       const c = this.worldContainers.find((w) => w.label === pile.label);
       if (c) out.push({ x: c.x, z: c.z });
     }
+    return out;
+  }
+
+  // ---- T142: hand grenade — thrown AoE that LAUNCHES the ragdoll radially from the blast (reuses the death-impact seam) ----
+
+  /** Throw a hand grenade toward (dirX,dirZ — the CURSOR aim point): consume one (from the ACTIVE belt slot if it
+   *  holds grenades — counting the slot down — else anywhere carried) + launch an arcing projectile that LANDS at
+   *  the aim point (clamped to grenadeThrowRangeMeters), rests, then detonates. Returns false when none is carried. */
+  throwGrenade(dirX: number, dirZ: number): boolean {
+    const len = Math.hypot(dirX, dirZ);
+    if (len < 1e-4) return false;
+    // Prefer the active slot (so an equipped grenade stack counts down + empties to unarmed), else anywhere carried.
+    let srcName: string | null = null;
+    if (this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === ITEM.Grenade) srcName = this.activeEquipSlot;
+    else srcName = this.findPlayerHolding(ITEM.Grenade);
+    if (srcName === null) return false;
+    const srcRef = this.namedContainers.get(srcName);
+    if (!srcRef || this.inventory.count(srcRef, ITEM.Grenade as ItemId) < 1) return false;
+    this.inventory.take(srcRef, ITEM.Grenade as ItemId, 1);
+    // Threw the last grenade out of the active slot → drop to unarmed (the slot is now empty).
+    if (srcName === this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === null) this.setActiveSlot(null);
+    const dist = Math.min(this.weapons.grenadeThrowRangeMeters, len); // land at the cursor, capped at throw range
+    const tx = this.playerPos.x + (dirX / len) * dist;
+    const tz = this.playerPos.z + (dirZ / len) * dist;
+    const throwTick = this.absTick();
+    this.pendingDetonations.push({
+      sx: this.playerPos.x,
+      sz: this.playerPos.z,
+      tx,
+      tz,
+      throwTick,
+      landTick: throwTick + this.weapons.grenadeFlightTicks,
+      detonateTick: throwTick + this.weapons.grenadeFuseTicks,
+    });
+    return true;
+  }
+
+  /** Per-tick: detonate any grenade whose fuse has reached the current tick (registered as an everyTick system). */
+  private stepDetonations(): void {
+    if (this.pendingDetonations.length === 0) return;
+    const now = this.absTick();
+    for (let i = this.pendingDetonations.length - 1; i >= 0; i--) {
+      const d = this.pendingDetonations[i]!;
+      if (now < d.detonateTick) continue;
+      this.detonateGrenade(d.tx, d.tz);
+      this.pendingDetonations.splice(i, 1);
+    }
+  }
+
+  /** T142: the item the active slot holds if it is THROWN on left-click (a grenade), else null — input uses this
+   *  to throw-at-cursor instead of firing when a grenade is equipped + drawn. */
+  equippedThrowable(): number | null {
+    const item = this.equippedItem();
+    return item !== null && isThrowable(item) ? item : null;
+  }
+
+  /** T142: in-flight grenade projectile positions for the render lane — arcing from the throw origin to the target
+   *  over the flight window (parabolic height), then resting on the ground until detonation. Read-only (V2). */
+  grenadeProjectiles(): { readonly x: number; readonly y: number; readonly z: number }[] {
+    if (this.pendingDetonations.length === 0) return [];
+    const now = this.absTick();
+    const arc = this.weapons.grenadeArcHeightMeters;
+    const out: { x: number; y: number; z: number }[] = [];
+    for (const g of this.pendingDetonations) {
+      const flight = Math.max(1, g.landTick - g.throwTick);
+      const t = Math.min(1, Math.max(0, (now - g.throwTick) / flight));
+      const x = g.sx + (g.tx - g.sx) * t;
+      const z = g.sz + (g.tz - g.sz) * t;
+      const y = (t < 1 ? 4 * arc * t * (1 - t) : 0) + 0.15; // parabola in flight, rest on the floor after landing
+      out.push({ x, y, z });
+    }
+    return out;
+  }
+
+  /**
+   * Detonate a grenade at (x,z): every alive zombie within the blast radius takes linear-falloff damage; a killed
+   * one is routed through `killZombie` with a RADIAL death impulse (direction away from the blast, force scaled by
+   * proximity) so the corpse ragdoll LAUNCHES outward (T134/V99). The player takes scaled self-damage if caught in
+   * the radius (god-mode-aware). Emits the loud gunfire stimulus (draws the horde) + a render flash point.
+   */
+  detonateGrenade(x: number, z: number): void {
+    const radius = this.weapons.grenadeBlastRadiusMeters;
+    const centreDamage = this.weapons.grenadeBlastDamage;
+    const maxForce = this.weapons.grenadeKnockback;
+    const pos: [number, number, number] = [0, 0, 0];
+    // Gather targets FIRST (killZombie frees the slot — never mutate the SoA mid-iteration).
+    const hits: { slot: ZombieSlot; dx: number; dz: number; falloff: number }[] = [];
+    this.zombies.forEachAlive((slot) => {
+      this.zombies.getPosition(slot, pos);
+      const dx = pos[0] - x;
+      const dz = pos[2] - z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > radius) return;
+      hits.push({ slot, dx, dz, falloff: 1 - dist / radius });
+    });
+    for (const h of hits) {
+      const remaining = this.zombies.getHealth(h.slot) - centreDamage * h.falloff;
+      if (remaining > 0) {
+        this.zombies.setHealth(h.slot, remaining);
+        continue;
+      }
+      const len = Math.hypot(h.dx, h.dz) || 1; // radial launch away from the blast (a body ON the blast falls forward)
+      this.killZombie(h.slot, { dirX: h.dx / len, dirZ: h.dz / len, force: maxForce * h.falloff });
+    }
+    // Player self-damage if inside the radius (scaled; god-mode is honoured inside damagePlayer).
+    const pdist = Math.hypot(this.playerPos.x - x, this.playerPos.z - z);
+    if (pdist <= radius) {
+      const frac = (centreDamage * (1 - pdist / radius) * this.weapons.grenadeSelfDamageScale) / this.playerCfg.maxHealth;
+      if (frac > 0) this.damagePlayer(0 as ZombieSlot, frac);
+    }
+    this.emitGunfire(); // a blast is loud — draws the horde (reuses the gunfire sound stimulus)
+    this.explosionFx.push({ x, z });
+  }
+
+  /** T142: drain the blast points accumulated since the last call — the render lane flashes each (one-shot, V2). */
+  drainExplosions(): { readonly x: number; readonly z: number }[] {
+    if (this.explosionFx.length === 0) return [];
+    const out = this.explosionFx.slice();
+    this.explosionFx.length = 0;
     return out;
   }
 
@@ -1814,11 +1944,13 @@ export class GameRuntime {
   }
 
   /** Move ONE unit of `item` between two named containers (validated). */
-  private moveItemBetween(fromName: string, toName: string, item: number): boolean {
+  private moveItemBetween(fromName: string, toName: string, item: number, count?: number): boolean {
     const from = this.namedContainers.get(fromName);
     const to = this.namedContainers.get(toName);
     if (!from || !to) return false;
-    return this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, 1).result.ok;
+    const n = count ?? this.inventory.count(from, item as ItemId); // default: move the WHOLE stack (e.g. equip all grenades)
+    if (n <= 0) return false;
+    return this.inventory.transfer(this.ids.next<CommandId>('command'), item as ItemId, from, to, n).result.ok;
   }
 
   /**
@@ -1877,6 +2009,11 @@ export class GameRuntime {
   }
   currentWeaponId(): string {
     return this.combat.currentWeaponId();
+  }
+
+  /** True when the equipped weapon is AUTOMATIC (the SMG) — input holds-to-spray it; else one shot per click. */
+  currentWeaponAutomatic(): boolean {
+    return this.combat.currentWeapon().automatic;
   }
 
   /** T139: the equipped weapon's pellet fan — drives the render tracer SCATTER (one trail per pellet across the
@@ -2096,6 +2233,8 @@ export class GameRuntime {
     this.scheduler.register('movement', { bucket: 'everyTick' }, () => this.horde.stepMovement());
     // everyTick: resolve any queued auto-fire shots (combat resolution slot in the tick).
     this.scheduler.register('combat-resolve', { bucket: 'everyTick' }, () => this.stepQueuedShots());
+    // everyTick: detonate any grenade whose fuse has elapsed (T142).
+    this.scheduler.register('grenades', { bucket: 'everyTick' }, () => this.stepDetonations());
     // interval: stimulus-driven per-zombie perception + target selection (V14) — never omniscient player
     // coords. Retires decayed stimuli, then each zombie picks its own target (seen player / loudest heard
     // sound / idle). There is NO global sound lure: a localized sound only retargets zombies that hear it.

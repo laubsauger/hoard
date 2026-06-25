@@ -56,6 +56,9 @@ import { buildFurniture } from './builders/furnitureBuilder';
 import { buildPlayer } from './builders/playerBuilder';
 import type { PlayerAvatar } from '../player';
 import { FloorPileView } from './floorPileView';
+import { ExplosionView } from './explosionView';
+import { ScorchView } from './scorchView';
+import { GrenadeProjectileView } from './grenadeProjectileView';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
@@ -159,6 +162,12 @@ export class BlockScene {
   private aoContact: Mesh | null = null;
   /** T85: markers for dropped floor piles, synced from `runtime.floorPileMarkers()` each frame. */
   private readonly floorPiles: FloorPileView;
+  /** T142: one-shot grenade explosion flashes, popped from `runtime.drainExplosions()` each frame. */
+  private readonly explosions: ExplosionView;
+  /** T142: persistent charred scorch decals stamped where grenades detonated. */
+  private readonly scorches: ScorchView;
+  /** T142: in-flight thrown-grenade projectiles, synced from `runtime.grenadeProjectiles()` each frame. */
+  private readonly grenadeProjectiles: GrenadeProjectileView;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -412,6 +421,13 @@ export class BlockScene {
     // T85: dropped-item floor markers (pooled boxes, tracked for V24).
     this.floorPiles = new FloorPileView((resource, kind, label) => this.res.track(resource, kind, label));
     this.scene.add(this.floorPiles.group);
+    // T142: grenade explosion flashes + scorch decals + in-flight projectiles (pooled, tracked for V24).
+    this.explosions = new ExplosionView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.explosions.group);
+    this.scorches = new ScorchView((resource, kind, label) => this.res.track(resource, kind, label), 2.4);
+    this.scene.add(this.scorches.group);
+    this.grenadeProjectiles = new GrenadeProjectileView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.grenadeProjectiles.group);
 
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
     const combatSettings = resolveCombatFeedbackSettings(this.tier);
@@ -490,6 +506,14 @@ export class BlockScene {
   /** T127: fire the one-shot push-up emote on the player avatar (the "emote key"; returns to locomotion after). */
   triggerPlayerEmote(): void {
     this.playerAvatar.triggerEmote();
+  }
+
+  /** T142: pop a one-shot explosion flash at a world blast point (the render loop drains the sim's blasts here,
+   *  pairing the flash with the boom). Seated on the local ground (interior slab when inside, else the street). */
+  flashExplosion(x: number, z: number): void {
+    const groundY = this.isPlayerInsideBuilding() ? this.world.floorThicknessMeters : 0;
+    this.explosions.spawn(x, groundY + 1, z);
+    this.scorches.spawn(x, groundY, z); // leave a charred mark on the floor
   }
 
   /** Settings toggle: turn ALL fog off/on for the camera — the atmospheric distance Fog AND the fog-of-war
@@ -584,6 +608,10 @@ export class BlockScene {
     this.playerAvatar.setWeapon(this.runtime.equippedItem());
     // T85: position the dropped-item markers on the local ground (same height basis as the avatar).
     this.floorPiles.sync(this.runtime.floorPileMarkers(), groundY);
+    // T142: age the live grenade explosion flashes + sync the in-flight thrown-grenade projectiles. New blasts are
+    // popped via flashExplosion() (drained by the render loop so the boom + flash pair); a 0-dt rebuild must not drain.
+    this.explosions.update(dtSeconds);
+    this.grenadeProjectiles.sync(this.runtime.grenadeProjectiles());
 
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);

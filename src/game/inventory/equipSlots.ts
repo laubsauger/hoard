@@ -23,12 +23,19 @@ export const SLOT_LABELS: Readonly<Record<EquipSlot, string>> = {
   beltR: 'Belt R',
 };
 
-/** Hand tools that can be carried on the belt (non-weapons that still equip). */
+/** Hand tools + throwables that can be carried on the belt (non-weapon-class items that still equip). */
 const TOOL_ITEMS: ReadonlySet<number> = new Set<number>([ITEM.Hammer, ITEM.Saw, ITEM.Screwdriver, ITEM.Flashlight]);
+/** Throwables — equip to the belt + LEFT-CLICK throws them at the cursor (no ballistics class). */
+const THROWABLE_ITEMS: ReadonlySet<number> = new Set<number>([ITEM.Grenade]);
 
-/** True when the item can be equipped at all — a weapon (any class) or a hand tool. */
+/** True when the item can be equipped at all — a weapon (any class), a hand tool, or a throwable. */
 export function isEquippable(item: ItemId | number): boolean {
-  return weaponClassForItem(item) !== null || TOOL_ITEMS.has(item as number);
+  return weaponClassForItem(item) !== null || TOOL_ITEMS.has(item as number) || THROWABLE_ITEMS.has(item as number);
+}
+
+/** True when the item is THROWN on left-click (a grenade), rather than fired. Pure. */
+export function isThrowable(item: ItemId | number): boolean {
+  return THROWABLE_ITEMS.has(item as number);
 }
 
 /**
@@ -39,9 +46,9 @@ export function isEquippable(item: ItemId | number): boolean {
 export function slotsForItem(item: ItemId | number): EquipSlot[] {
   const cls = weaponClassForItem(item);
   if (cls === 'pistol') return ['holster'];
-  if (cls === 'shotgun' || cls === 'rifle') return ['back'];
+  if (cls === 'shotgun' || cls === 'rifle' || cls === 'smg') return ['back'];
   if (cls === 'melee') return ['beltL', 'beltR'];
-  if (TOOL_ITEMS.has(item as number)) return ['beltL', 'beltR'];
+  if (TOOL_ITEMS.has(item as number) || THROWABLE_ITEMS.has(item as number)) return ['beltL', 'beltR'];
   return [];
 }
 

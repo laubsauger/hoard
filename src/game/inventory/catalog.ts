@@ -17,6 +17,8 @@ export const ITEM = {
   Pistol: 10,
   Shotgun: 11,
   HuntingRifle: 12,
+  SMG: 13,
+  Grenade: 14,
   // ammo
   Ammo9mm: 20,
   ShotgunShells: 21,
@@ -61,6 +63,8 @@ const CONTENT: readonly ItemDefContent[] = [
   { id: ITEM.Pistol, name: 'Pistol', category: 'weapon', weightKg: 1.1, stackable: false },
   { id: ITEM.Shotgun, name: 'Shotgun', category: 'weapon', weightKg: 3.4, stackable: false },
   { id: ITEM.HuntingRifle, name: 'Hunting Rifle', category: 'weapon', weightKg: 3.9, stackable: false },
+  { id: ITEM.SMG, name: 'SMG', category: 'weapon', weightKg: 2.6, stackable: false },
+  { id: ITEM.Grenade, name: 'Hand Grenade', category: 'weapon', weightKg: 0.4, stackable: true, maxStack: 6 },
   // ammo
   { id: ITEM.Ammo9mm, name: '9mm Rounds', category: 'ammo', weightKg: 0.01, stackable: true, maxStack: 60 },
   { id: ITEM.ShotgunShells, name: 'Shotgun Shells', category: 'ammo', weightKg: 0.05, stackable: true, maxStack: 40 },

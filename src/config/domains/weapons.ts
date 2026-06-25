@@ -212,6 +212,16 @@ export const weaponsConfig = registerDomain('weapons', {
   pistolArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a pistol shot ignores (V50).', default: 0.5, min: 0, max: 1 }),
   pistolKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Pistol ragdoll knockback ENERGY on a kill (T134) — the corpse impulse, decoupled from damage so a pistol topples the body without mangling it. Sane impulse range ~0..15.', default: 4, min: 0, max: 100 }),
 
+  // smg — automatic: medium damage, medium range, a little spread + slight pierce, sprays fast (hold to fire).
+  smgDamage: num({ owner: 'weapons', unit: 'count', doc: 'SMG base damage per shot before region multiplier + armor (V50).', default: 26, min: 1, max: 100_000 }),
+  smgRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'SMG maximum ray travel (V50).', default: 45, min: 1, max: 1000 }),
+  smgStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'SMG penetration budget; a little over 1 so it occasionally clips a second body (V50).', default: 1.5, min: 0.1, max: 1000 }),
+  smgSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'SMG full angular spread (per-shot scatter on full-auto) (V50).', default: 5, min: 0, max: 90 }),
+  smgDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'SMG fraction of damage lost per meter (mild) (V50).', default: 0.01, min: 0, max: 1 }),
+  smgPellets: num({ owner: 'weapons', unit: 'count', doc: 'SMG projectiles per shot (1) (V50).', default: 1, min: 1, max: 64, integer: true }),
+  smgArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor an SMG round ignores (V50).', default: 0.4, min: 0, max: 1 }),
+  smgKnockback: num({ owner: 'weapons', unit: 'count', doc: 'SMG ragdoll knockback ENERGY on a kill (T134) — light per-round impulse. Sane range ~0..15.', default: 3, min: 0, max: 100 }),
+
   // rifle — high damage + long range, pierces SEVERAL bodies, slow distance falloff.
   rifleDamage: num({ owner: 'weapons', unit: 'count', doc: 'Rifle base damage per shot before region multiplier + armor (V50).', default: 85, min: 1, max: 100_000 }),
   rifleRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Rifle maximum ray travel (V50).', default: 120, min: 1, max: 1000 }),
@@ -223,14 +233,14 @@ export const weaponsConfig = registerDomain('weapons', {
   rifleKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Rifle ragdoll knockback ENERGY on a kill (T134) — a sharp high-velocity punch through the body. Sane impulse range ~0..15.', default: 7, min: 0, max: 100 }),
 
   // shotgun — many low-power pellets in a wide spread, short range, steep distance falloff.
-  shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50). Bumped 20→25 for a tad more close-range punch.', default: 25, min: 1, max: 100_000 }),
+  shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50). Point-blank DEVASTATION: 8 pellets × 42 = 336 at the muzzle, so even split across 2-3 bunched zombies each takes a lethal share; the steep falloff (below) bleeds it off with distance.', default: 42, min: 1, max: 100_000 }),
   shotgunRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Shotgun maximum ray travel (V50).', default: 25, min: 1, max: 1000 }),
   shotgunStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun PER-PELLET penetration budget; a pellet stops at one body (V50).', default: 1, min: 0.1, max: 1000 }),
   shotgunSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Shotgun full angular spread across the pellet cone (V50). Widened 14→18 for a slightly broader fan.', default: 18, min: 0, max: 90 }),
-  shotgunDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Shotgun fraction of damage lost per meter of travel (steep) (V50).', default: 0.03, min: 0, max: 1 }),
+  shotgunDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Shotgun fraction of damage lost per meter of travel (V50). Steepened 0.03→0.06 so the huge close damage bleeds off fast with range — devastating in your face, weak across the room.', default: 0.06, min: 0, max: 1 }),
   shotgunPellets: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun pellets per shot (the spread cone) (V50).', default: 8, min: 1, max: 64, integer: true }),
   shotgunArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a shotgun pellet ignores (V50).', default: 0.3, min: 0, max: 1 }),
-  shotgunKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun ragdoll knockback ENERGY on a kill (T134) — the heavy close-range blast that LAUNCHES the corpse back hardest. Sane impulse range ~0..15.', default: 13, min: 0, max: 100 }),
+  shotgunKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun ragdoll knockback ENERGY on a kill (T134) — the heavy close-range blast that LAUNCHES the corpse back hardest. Scaled by hit CLOSENESS (V109) so a point-blank blast throws the body, a far one just topples it. Bumped 13→20.', default: 20, min: 0, max: 100 }),
 
   // melee — close range, stops at the first body, mirrors the T18 melee damage/reach as a fire class.
   meleeClassDamage: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class base damage per strike before region multiplier + armor (V50).', default: 45, min: 1, max: 100_000 }),
@@ -264,6 +274,12 @@ export const weaponsConfig = registerDomain('weapons', {
   pistolReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a pistol reload takes; fire is blocked until it settles (T74).', default: 45, min: 1, max: 6000, integer: true }),
   pistolSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the pistol via cycleWeapon; fire is blocked until ready (T74).', default: 9, min: 0, max: 6000, integer: true }),
 
+  // smg ammo — big magazine, deep reserve, quick reload + swap (the spray-and-pray gun).
+  smgMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'SMG magazine capacity in rounds (T74).', default: 30, min: 1, max: 1000, integer: true }),
+  smgReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'SMG spare rounds held in reserve (T74).', default: 150, min: 0, max: 100_000, integer: true }),
+  smgReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks an SMG reload takes (T74).', default: 50, min: 1, max: 6000, integer: true }),
+  smgSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the SMG (T74).', default: 10, min: 0, max: 6000, integer: true }),
+
   // rifle ammo — large magazine, deep reserve, slower reload + slightly slower swap.
   rifleMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Rifle magazine capacity in rounds (T74).', default: 30, min: 1, max: 1000, integer: true }),
   rifleReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Rifle spare rounds held in reserve (T74).', default: 120, min: 0, max: 100_000, integer: true }),
@@ -271,9 +287,9 @@ export const weaponsConfig = registerDomain('weapons', {
   rifleSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the rifle (T74).', default: 12, min: 0, max: 6000, integer: true }),
 
   // shotgun ammo — small shell magazine, modest reserve, long reload + slow swap.
-  shotgunMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun magazine capacity in SHELLS; one fire spends one shell = its pellet pattern (T74).', default: 6, min: 1, max: 1000, integer: true }),
-  shotgunReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun spare shells held in reserve (T74).', default: 24, min: 0, max: 100_000, integer: true }),
-  shotgunReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a shotgun reload takes (T74).', default: 75, min: 1, max: 6000, integer: true }),
+  shotgunMagazineSize: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun magazine capacity in SHELLS; one fire spends one shell = its pellet pattern (T74). 8 shells before a reload.', default: 8, min: 1, max: 1000, integer: true }),
+  shotgunReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun spare shells held in reserve (T74). 64 reserve + 8 mag = 72 total.', default: 64, min: 0, max: 100_000, integer: true }),
+  shotgunReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a shotgun reload takes (T74) = the shotgun_reload.wav clip length (≈4.28 s @ 30 tickHz). Keep in sync with the clip.', default: 128, min: 1, max: 6000, integer: true }),
   shotgunSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the shotgun (T74).', default: 15, min: 0, max: 6000, integer: true }),
 
   // ---- Per-class FIRE RATE (refire cooldown between shots, fixed-clock ticks; 0 = uncapped = click cadence) ----
@@ -282,9 +298,20 @@ export const weaponsConfig = registerDomain('weapons', {
   // rifle stay 0 (semi-auto at click speed — unchanged). Baked as a deterministic config value (the headless sim
   // never reads the audio buffer — V1/V2); keep it in sync if the clip is replaced.
   pistolFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between pistol shots (0 = uncapped / click cadence).', default: 0, min: 0, max: 600, integer: true }),
+  smgFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between SMG shots on full-auto — 3 ticks @30Hz ≈ 600 rpm spray.', default: 3, min: 0, max: 600, integer: true }),
   rifleFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between rifle shots (0 = uncapped).', default: 0, min: 0, max: 600, integer: true }),
   shotgunFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between shotgun shots = the fire+eject sample length (≈1.64 s @ 30 tickHz). Pump cadence; keep in sync with shotgun_shot_eject.wav.', default: 49, min: 0, max: 600, integer: true }),
 
   // melee — unlimited; only a (short) swap ready delay applies.
   meleeClassSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the melee weapon; melee has no ammo/reload (T74).', default: 6, min: 0, max: 6000, integer: true }),
+
+  // ---- Hand GRENADE (thrown AoE; kills launch the ragdoll radially from the blast, T134/V99) ----
+  grenadeBlastRadiusMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Grenade blast radius — zombies within take damage with linear falloff to the edge.', default: 5, min: 0.5, max: 50 }),
+  grenadeBlastDamage: num({ owner: 'weapons', unit: 'count', doc: 'Grenade damage at the BLAST CENTRE before falloff (lethal point-blank); falls linearly to 0 at the radius.', default: 160, min: 1, max: 100_000 }),
+  grenadeKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Grenade ragdoll knockback ENERGY at the centre (T134) — a hard radial LAUNCH away from the blast; scaled by proximity. Sane range ~0..25 (above the shotgun so bodies fly).', default: 22, min: 0, max: 100 }),
+  grenadeFuseTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks from throw to DETONATION (≈1.3 s @ 30 tickHz). Must exceed grenadeFlightTicks so the grenade LANDS + rests briefly before it blows.', default: 40, min: 0, max: 600, integer: true }),
+  grenadeFlightTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks the thrown grenade is in the AIR (arcing to the target) before it lands; it then rests until grenadeFuseTicks. ≈0.6 s @ 30 tickHz.', default: 18, min: 1, max: 300, integer: true }),
+  grenadeArcHeightMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Peak height of the thrown grenade arc (purely the projectile render — the detonation is at ground level).', default: 2.5, min: 0, max: 20 }),
+  grenadeThrowRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Max distance the grenade travels — the aim point is clamped to this from the player.', default: 12, min: 1, max: 60 }),
+  grenadeSelfDamageScale: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of the blast damage the PLAYER takes if caught in the radius (cook your own grenade at your peril). 0 = player immune.', default: 0.6, min: 0, max: 1 }),
 });

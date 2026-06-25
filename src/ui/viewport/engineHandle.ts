@@ -70,6 +70,8 @@ export interface EngineHandle {
   equippableSlots(item: number): EquipSlot[];
   /** T85: drop an item from the pack onto the floor at the player's feet (a lootable pile, no container needed). */
   drop(item: number): void;
+  /** T142: throw a hand grenade toward the player's current facing (the V key throws toward the mouse instead). */
+  throwGrenade(): void;
   /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
    *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
   worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
@@ -197,6 +199,11 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
         gameAudio.containerOpen(); // a soft thud-ish confirmation (reuses the cardboard sfx)
         publishInventory();
       }
+    },
+    throwGrenade: () => {
+      const rt = getRuntime();
+      const aim = rt.playerAim();
+      if (rt.throwGrenade(Math.cos(aim), Math.sin(aim))) publishInventory(); // grenade left the pack
     },
     worldToScreen: (x, y, z) => {
       const rect = canvas.getBoundingClientRect();

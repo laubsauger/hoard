@@ -227,6 +227,12 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     // animation stays smooth; `moving`/`sprinting` are the gated intent signals above; crouch/death/hit are read
     // from the runtime inside (a fresh damage tick fires the one-shot hit reaction). No-op until the GLB attaches.
     scene.updatePlayerAvatar(dt, avatarMoving, avatarSprinting);
+    // T142: drain grenade detonations from the sim → flash + boom together (one per blast). The render loop owns
+    // this (it has both the scene + the audio); the sim just queued the blast points this tick.
+    for (const blast of runtime.drainExplosions()) {
+      scene.flashExplosion(blast.x, blast.z);
+      gameAudio.explosion();
+    }
     // Publish the effective day fraction the lighting used (override or sim clock) for the HUD clock, minute-gated.
     const todMinute = Math.floor(scene.currentTimeOfDay * 1440) % 1440;
     if (todMinute !== lastTodMinute) {
@@ -273,7 +279,7 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     }
     // Reload sample on the start of a reload (manual or automatic).
     const reloading = runtime.ammoStatus().reloading;
-    if (reloading && !lastReloading) gameAudio.reload();
+    if (reloading && !lastReloading) gameAudio.reload(runtime.currentWeaponId());
     lastReloading = reloading;
     // One death grunt on the alive→dead transition.
     const dead = runtime.isPlayerDead();

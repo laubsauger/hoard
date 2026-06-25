@@ -417,6 +417,14 @@ export const combatConfig = registerDomain('combat', {
     min: 0.01,
     max: 1000,
   }),
+  knockbackClosenessFloor: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Floor on the CLOSENESS scale applied to a kill\'s ragdoll knockback (V109): force = weapon.knockback × max(floor, 1 − travel/range). 1.0 at point-blank → the body LAUNCHES; a far kill keeps at least this fraction so it still topples (a shotgun in your face throws bodies, across the room it just drops them).',
+    default: 0.35,
+    min: 0,
+    max: 1,
+  }),
 
   // ---- T57 lethality + reactions: non-head hits wound/stagger, not instakill (V16/V17) ----
   /** Effective damage at/above which a non-lethal, non-head hit knocks the body into a brief stagger

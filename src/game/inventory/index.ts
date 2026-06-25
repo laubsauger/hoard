@@ -10,6 +10,7 @@ export {
   STORAGE_SLOTS,
   SLOT_LABELS,
   isEquippable,
+  isThrowable,
   slotsForItem,
   slotAccepts,
   homeSlotForItem,

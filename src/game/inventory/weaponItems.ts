@@ -7,13 +7,15 @@ import { ITEM } from './catalog';
 import type { ItemId } from '@/game/core/contracts';
 
 /** Combat weapon class an item arms (equal to the combat `WeaponId` string union). */
-export type WeaponClassName = 'pistol' | 'shotgun' | 'rifle' | 'melee';
+export type WeaponClassName = 'pistol' | 'smg' | 'shotgun' | 'rifle' | 'melee';
 
 /** The weapon CLASS a carried item arms, or null if the item is not a weapon. Pure + deterministic. */
 export function weaponClassForItem(item: ItemId | number): WeaponClassName | null {
   switch (item as number) {
     case ITEM.Pistol:
       return 'pistol';
+    case ITEM.SMG:
+      return 'smg';
     case ITEM.Shotgun:
       return 'shotgun';
     case ITEM.HuntingRifle:

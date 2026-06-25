@@ -79,6 +79,15 @@ export function registerInput(args: RegisterInputArgs): () => void {
     if (e.code === 'BracketRight') { getRuntime().cycleWeapon(1); publishInventory(); }
     if (e.code === 'BracketLeft') { getRuntime().cycleWeapon(-1); publishInventory(); }
     if (e.code in HOTBAR_KEYS && !e.repeat) { getRuntime().drawSlot(HOTBAR_KEYS[e.code]!); publishInventory(); }
+    // T142: V throws a hand grenade toward the MOUSE aim point (clamped to throw range), if one is carried.
+    if (e.code === 'KeyV' && !e.repeat) {
+      const rt = getRuntime();
+      const hp = aim.worldPoint(camera);
+      const pp = rt.player();
+      const gdx = hp ? hp.x - pp.x : Math.cos(rt.playerAim());
+      const gdz = hp ? hp.z - pp.z : Math.sin(rt.playerAim());
+      if (rt.throwGrenade(gdx, gdz)) publishInventory();
+    }
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
     // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
     if (e.code === 'KeyL') debugViewStore.getState().toggleFlag('flashlight');
@@ -92,21 +101,10 @@ export function registerInput(args: RegisterInputArgs): () => void {
   const onMouseMove = (e: MouseEvent): void => {
     aim.setFromPointer(e.clientX, e.clientY, canvas.getBoundingClientRect());
   };
-  const onClick = (): void => {
-    gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio (always, even a dry click).
-    // T136: a UI panel owns the mouse — a click in the world must NOT fire the gun while a pane is open (you're
-    // operating the UI, not shooting). The wheel/panes capture their OWN clicks, so a click that reaches the
-    // CANVAS landed on the background. For the inventory side-panel (no backdrop), that background click CLOSES it
-    // + re-arms the player ("click outside to dismiss"); the next click then acts. Other panels just suppress fire.
-    const panel = uiStore.getState().activePanel;
-    if (panel !== 'none') {
-      if (panel === 'inventory') {
-        inventoryViewStore.getState().setOpenContainer(null);
-        inventoryViewStore.getState().setLootAnchor(null);
-        uiStore.getState().closePanel();
-      }
-      return;
-    }
+  // Resolve ONE shot + its feedback (audio / muzzle / tracer / impact). Called on press, and again every frame
+  // while the mouse is held for an AUTOMATIC weapon (the SMG) — the combat fire-rate gate enforces the real
+  // cadence, so a too-soon call simply resolves no round (firedRounds 0) and this returns before any feedback.
+  const fireOnce = (): void => {
     const runtime = getRuntime();
     const access = getAccess();
     const hit = aim.worldPoint(camera);
@@ -170,6 +168,53 @@ export function registerInput(args: RegisterInputArgs): () => void {
       if (wh) impactView.structureImpact(wh.x, wh.y, wh.z, wh.nx, wh.ny, wh.nz, impactCtx);
     }
   };
+
+  // Auto-fire: holding the mouse on an AUTOMATIC weapon (the SMG) keeps firing via a rAF loop until release; the
+  // combat fire-rate gate paces the shots. A semi weapon fires once per press (no loop). The loop also stops if a
+  // UI panel grabs the mouse mid-burst.
+  let mouseHeld = false;
+  let autoRaf = 0;
+  const autoTick = (): void => {
+    autoRaf = 0;
+    if (!mouseHeld || uiStore.getState().activePanel !== 'none') return;
+    fireOnce();
+    autoRaf = requestAnimationFrame(autoTick);
+  };
+  const onPointerDown = (): void => {
+    gameAudio.resume(); // autoplay policy: a press is a valid gesture to start audio (even a dry click).
+    // A UI panel owns the mouse — a press reaching the CANVAS landed on the background. The inventory side-panel
+    // (no backdrop) CLOSES on that background press + re-arms the player; other panels just swallow it.
+    const panel = uiStore.getState().activePanel;
+    if (panel !== 'none') {
+      if (panel === 'inventory') {
+        inventoryViewStore.getState().setOpenContainer(null);
+        inventoryViewStore.getState().setLootAnchor(null);
+        uiStore.getState().closePanel();
+      }
+      return;
+    }
+    // T142: if a THROWABLE (grenade) is the active equipped item, left-click THROWS it at the CURSOR (one per
+    // click — not auto, not a gun shot) instead of firing.
+    const rt = getRuntime();
+    if (rt.equippedThrowable() !== null) {
+      const hp = aim.worldPoint(camera);
+      const pp = rt.player();
+      const gdx = hp ? hp.x - pp.x : Math.cos(rt.playerAim());
+      const gdz = hp ? hp.z - pp.z : Math.sin(rt.playerAim());
+      if (rt.throwGrenade(gdx, gdz)) publishInventory();
+      return;
+    }
+    mouseHeld = true;
+    fireOnce();
+    if (autoRaf === 0 && getRuntime().currentWeaponAutomatic()) autoRaf = requestAnimationFrame(autoTick);
+  };
+  const onMouseUp = (): void => {
+    mouseHeld = false;
+    if (autoRaf) {
+      cancelAnimationFrame(autoRaf);
+      autoRaf = 0;
+    }
+  };
   const onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     // Plain wheel ZOOMS (the default — hijacking it for selection broke zoom in the common case). SHIFT+wheel
@@ -184,13 +229,16 @@ export function registerInput(args: RegisterInputArgs): () => void {
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   canvas.addEventListener('mousemove', onMouseMove);
-  canvas.addEventListener('click', onClick);
+  canvas.addEventListener('mousedown', onPointerDown);
+  window.addEventListener('mouseup', onMouseUp); // window (not canvas) so releasing off-canvas still stops auto-fire
   canvas.addEventListener('wheel', onWheel, { passive: false });
   return () => {
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
     canvas.removeEventListener('mousemove', onMouseMove);
-    canvas.removeEventListener('click', onClick);
+    canvas.removeEventListener('mousedown', onPointerDown);
+    window.removeEventListener('mouseup', onMouseUp);
     canvas.removeEventListener('wheel', onWheel);
+    if (autoRaf) cancelAnimationFrame(autoRaf);
   };
 }

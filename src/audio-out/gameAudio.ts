@@ -205,9 +205,26 @@ export class GameAudio {
     this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', gain, 0, 0.03, /* counted */ false);
   }
 
-  /** Player weapon RELOAD — the authored reload sample (magazine swap). */
-  reload(): void {
-    this.playSample('pistolReload', 0.8, 0, 0.02);
+  /** Player weapon RELOAD — the authored reload sample. The SHOTGUN uses its own (longer) shell-by-shell clip
+   *  when present; everything else uses the pistol magazine-swap clip. `weapon` = the active weapon class.
+   *  EXEMPT from the voice cap (counted=false) — player-action feedback must always be audible over the horde. */
+  reload(weapon = 'pistol'): void {
+    if (weapon === 'shotgun' && this.samples.has('shotgunReload')) {
+      this.playSample('shotgunReload', 0.8, 0, 0.02, /* counted */ false);
+      return;
+    }
+    this.playSample('pistolReload', 0.8, 0, 0.02, /* counted */ false);
+  }
+
+  /** Melee / item SWING — the authored whoosh. EXEMPT from the voice cap (counted=false) so the swing is heard
+   *  even amid a wall of zombie voices + hit reactions (the player's own action is priority feedback). */
+  swing(): void {
+    this.playSample('itemSwing', 0.7, 0, 0.02, /* counted */ false);
+  }
+
+  /** Grenade EXPLOSION — the authored detonation boom (one per blast). Exempt from the voice cap (priority). */
+  explosion(): void {
+    this.playSample('explosion', 0.9, 0, 0.02, /* counted */ false);
   }
 
   /** Advance the live audio: bed level, occasional groans, and discrete world one-shots (V2 read-only). */

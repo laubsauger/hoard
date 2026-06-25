@@ -1,6 +1,8 @@
 // T134 — the corpse ragdoll impulse (`DeathImpact.force`) is the EQUIPPED weapon's knockback ENERGY, decoupled
-// from damage, so each weapon has its own kinetic signature (a pistol topples, a shotgun launches). A lethal
-// hit must surface exactly the firing weapon's configured knockback along the shot direction.
+// from damage, so each weapon has its own kinetic signature (a pistol topples, a shotgun launches). V109: the
+// impulse is scaled by hit CLOSENESS — `knockback × max(floor, 1 − travel/range)` — so a point-blank kill
+// LAUNCHES the body and a far one keeps only the floor fraction. These hits are at a known distance, so the
+// expected force is the configured knockback × that closeness factor.
 import { describe, it, expect } from 'vitest';
 import { CombatSystem, type CombatDeps, type DeathImpact } from '@/game/combat';
 import { SimulationZombies, SimTier, type ZombieSlot } from '@/game/simulation';
@@ -56,7 +58,7 @@ describe('T134 death impact carries the firing weapon knockback (not raw damage)
     expect(res.killed).toBe(true);
     expect(h.impacts).toHaveLength(1);
     const im = h.impacts[0]!;
-    expect(im.force).toBe(h.weapons.pistolKnockback); // weapon knockback, NOT effective damage
+    expect(im.force).toBeCloseTo(h.weapons.pistolKnockback * (1 - 5 / h.weapons.pistolRangeMeters), 1); // V109 closeness-scaled, NOT damage
     expect(im.dirX).toBeCloseTo(1, 2); // along the shot (a sub-degree accuracy spread perturbs it slightly)
     expect(im.dirZ).toBeCloseTo(0, 2);
   });
@@ -67,7 +69,7 @@ describe('T134 death impact carries the firing weapon knockback (not raw damage)
     h.sys.setWeapon('shotgun');
     const res = h.sys.fire(ORIGIN, 1, 0, 'head');
     expect(res.killed).toBe(true);
-    expect(h.impacts[0]!.force).toBe(h.weapons.shotgunKnockback);
+    expect(h.impacts[0]!.force).toBeCloseTo(h.weapons.shotgunKnockback * (1 - 5 / h.weapons.shotgunRangeMeters), 1);
     expect(h.weapons.shotgunKnockback).toBeGreaterThan(h.weapons.pistolKnockback); // shotgun knocks back hardest
   });
 

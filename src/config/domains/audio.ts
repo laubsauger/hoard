@@ -125,7 +125,7 @@ export const audioConfig = registerDomain('audio', {
   outFootstepGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a footstep one-shot before reach + master scaling.', default: 0.18, min: 0, max: 1 }),
   // ---- spatialization + voice budget ----
   outPanWidthMeters: num({ owner: 'audio', unit: 'meters', doc: 'World-x offset from the player mapped to full left/right stereo pan.', default: 18, min: 0.1, max: 1000 }),
-  outMaxVoices: num({ owner: 'audio', unit: 'count', doc: 'Hard cap on concurrent pooled world/groan one-shot voices (player gunshot is exempt).', default: 12, min: 1, max: 128, integer: true }),
+  outMaxVoices: num({ owner: 'audio', unit: 'count', doc: 'Hard cap on concurrent pooled world/groan one-shot voices. Player-action feedback (gunshot / swing / reload / explosion) is EXEMPT so it is always audible; this caps only world/groan voices. Raised 12→20 so more world sounds layer before eviction.', default: 20, min: 1, max: 128, integer: true }),
   // ---- procedural MUSIC bed (low, slow, evolving ambient/tension drone on the dedicated MUSIC bus) ----
   // One ever-present bed (a couple of detuned oscillators + a slow filter LFO); tension rises with the
   // nearby horde count — calmer when alone, denser/edgier when surrounded. Level + cutoff glide (no pops).

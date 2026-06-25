@@ -141,13 +141,14 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
           uiStore.getState().closePanel();
           return;
         }
-        // Opening (T62): detect the nearest CONTAINER in reach + LOS so the right pane shows it (open `I` beside a
-        // cupboard → loot it directly). Range+LOS-gated in the sim, so a far authored cupboard is NOT auto-grabbed
-        // (the old stale-grab bug). The anchor proximity-gates it like the loot verb (walk away → it closes); with
-        // no container nearby both are null → the panel is player-only and stays open until I/Esc.
-        const label = handle?.nearestContainer() ?? null;
-        inventoryViewStore.getState().setOpenContainer(label);
-        inventoryViewStore.getState().setLootAnchor(label);
+        // Opening (T62): show the nearest CONTAINER in reach + LOS in the right pane (open `I` beside a cupboard →
+        // loot it directly). Range+LOS-gated in the sim, so a far cupboard is NOT auto-grabbed. Manual `I` does NOT
+        // set lootAnchor — the render-loop proximity auto-close only fires for anchored (loot-verb) panels, so a
+        // manual inventory ALWAYS opens + stays open until I/Esc, even when a NON-container (door/window) is the
+        // nearest interactable (previously anchoring to the container made the door the nearest target → instant
+        // auto-close → "can't open inventory near an interactable"). null container nearby = player-only pane.
+        inventoryViewStore.getState().setOpenContainer(handle?.nearestContainer() ?? null);
+        inventoryViewStore.getState().setLootAnchor(null);
         uiStore.getState().openPanel('inventory');
       } else if (e.code === 'Escape' && uiStore.getState().activePanel === 'inventory') {
         inventoryViewStore.getState().setOpenContainer(null);
@@ -175,6 +176,7 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
           onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)}
           extraAction={(item) => {
             if (isConsumable(item)) return { label: 'use', onClick: () => handle?.useItem(item) };
+            if (item === ITEM.Grenade) return { label: 'throw', onClick: () => handle?.throwGrenade() };
             if (item === ITEM.Backpack) {
               const worn = handle?.isBackpackEquipped() ?? false;
               return { label: worn ? 'remove' : 'wear', onClick: () => (worn ? handle?.unequipBackpack() : handle?.equipBackpack()) };

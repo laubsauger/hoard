@@ -13,9 +13,9 @@ import type { weaponsConfig } from '@/config/domains/weapons';
 export type WeaponKind = 'firearm' | 'melee';
 
 /** Stable identifier for an equippable weapon class. */
-export type WeaponId = 'pistol' | 'rifle' | 'shotgun' | 'melee';
+export type WeaponId = 'pistol' | 'smg' | 'rifle' | 'shotgun' | 'melee';
 
-export const WEAPON_IDS: readonly WeaponId[] = ['pistol', 'rifle', 'shotgun', 'melee'];
+export const WEAPON_IDS: readonly WeaponId[] = ['pistol', 'smg', 'rifle', 'shotgun', 'melee'];
 
 /** A fully-resolved ballistic model for one weapon class (V50). */
 export interface WeaponClass {
@@ -42,6 +42,8 @@ export interface WeaponClass {
   /** Min fixed-clock ticks between consecutive shots (refire cooldown / fire rate). 0 = uncapped (click cadence).
    *  The shotgun's value = its fire+eject sample length so the cadence matches the pump sound (T74-adjacent). */
   readonly fireIntervalTicks: number;
+  /** Automatic fire — holding the trigger keeps firing at `fireIntervalTicks` (the SMG); else one shot per press. */
+  readonly automatic: boolean;
   // ---- T74 ammo / reload / swap ----
   /** Fixed-clock ready delay after switching TO this class via cycleWeapon; fire is blocked until ready. */
   readonly swapTicks: number;
@@ -70,10 +72,29 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       armorPenetration: w.pistolArmorPenetration,
       knockback: w.pistolKnockback,
       fireIntervalTicks: w.pistolFireIntervalTicks,
+      automatic: false,
       swapTicks: w.pistolSwapTicks,
       magazineSize: w.pistolMagazineSize,
       reserveAmmo: w.pistolReserveAmmo,
       reloadTicks: w.pistolReloadTicks,
+    }),
+    smg: Object.freeze({
+      id: 'smg',
+      kind: 'firearm',
+      damage: w.smgDamage,
+      rangeMeters: w.smgRangeMeters,
+      stoppingPower: w.smgStoppingPower,
+      spreadDegrees: w.smgSpreadDegrees,
+      damageFalloffPerMeter: w.smgDamageFalloffPerMeter,
+      pellets: w.smgPellets,
+      armorPenetration: w.smgArmorPenetration,
+      knockback: w.smgKnockback,
+      fireIntervalTicks: w.smgFireIntervalTicks,
+      automatic: true, // hold-to-spray
+      swapTicks: w.smgSwapTicks,
+      magazineSize: w.smgMagazineSize,
+      reserveAmmo: w.smgReserveAmmo,
+      reloadTicks: w.smgReloadTicks,
     }),
     rifle: Object.freeze({
       id: 'rifle',
@@ -87,6 +108,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       armorPenetration: w.rifleArmorPenetration,
       knockback: w.rifleKnockback,
       fireIntervalTicks: w.rifleFireIntervalTicks,
+      automatic: false,
       swapTicks: w.rifleSwapTicks,
       magazineSize: w.rifleMagazineSize,
       reserveAmmo: w.rifleReserveAmmo,
@@ -104,6 +126,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       armorPenetration: w.shotgunArmorPenetration,
       knockback: w.shotgunKnockback,
       fireIntervalTicks: w.shotgunFireIntervalTicks,
+      automatic: false,
       swapTicks: w.shotgunSwapTicks,
       magazineSize: w.shotgunMagazineSize,
       reserveAmmo: w.shotgunReserveAmmo,
@@ -121,6 +144,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       armorPenetration: w.meleeClassArmorPenetration,
       knockback: w.meleeClassKnockback,
       fireIntervalTicks: 0, // melee swings via the timed melee window, not this refire gate
+      automatic: false,
       swapTicks: w.meleeClassSwapTicks,
       // melee is UNLIMITED: no magazine / reserve / reload (T74).
     }),

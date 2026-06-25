@@ -16,7 +16,7 @@ export const WEAPON_VISUALS: readonly WeaponVisual[] = ['pistol', 'longgun', 'bl
 export function weaponVisualForItem(item: number): WeaponVisual | null {
   const cls = weaponClassForItem(item);
   if (cls === 'pistol') return 'pistol';
-  if (cls === 'shotgun' || cls === 'rifle') return 'longgun';
+  if (cls === 'shotgun' || cls === 'rifle' || cls === 'smg') return 'longgun';
   if (cls === 'melee') return item === ITEM.KitchenKnife ? 'blade' : 'club';
   // Hand tools read as a held handle (club) when drawn. The FLASHLIGHT is excluded — it is an OFF-hand prop
   // (rendered in the left hand while lit, T141), not a right-hand weapon.

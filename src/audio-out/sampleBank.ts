@@ -20,7 +20,9 @@ export const SFX_BANKS = {
   pistolOutdoor: ['single-pistol-outdoor'],
   pistolReload: ['pistol-reload'],
   shotgunFire: ['shotgun_shot_eject'], // single fire+eject clip (its length sets the shotgun fire rate)
+  shotgunReload: ['shotgun_reload'], // shell-by-shell reload clip (its length sets shotgunReloadTicks)
   itemSwing: ['item-swing'], // melee / item swing whoosh
+  explosion: ['medium-explosion'], // grenade detonation boom
   grunt: ['grunt/grunt-'], // 7 separated variants
   footstepConcrete: ['concrete-footsteps'],
   footstepDirt: ['walking-on-dirt', 'footsteps-dirt-gravel'],

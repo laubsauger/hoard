@@ -82,6 +82,19 @@ describe('runtime equipment slots (T140)', () => {
     expect(rt.playerCarries(ITEM.GasCan)).toBe(false);
   });
 
+  it('the SMG is a carried, back-slot, AUTOMATIC weapon', () => {
+    const rt = makeRuntime();
+    expect(rt.playerCarries(ITEM.SMG)).toBe(true); // in the starter pack
+    expect(rt.equippableSlots(ITEM.SMG)).toContain('back'); // long-gun slot
+    rt.dropItem(ITEM.WoodPlank); // free pack room (heavy starter load) so the displaced shotgun fits
+    expect(rt.equipItem(ITEM.SMG, 'back')).toBe(true); // swaps the shotgun out to the pack
+    expect(rt.drawSlot('back')).toBe('back');
+    expect(rt.currentWeaponId()).toBe('smg');
+    expect(rt.currentWeaponAutomatic()).toBe(true);
+    expect(rt.drawSlot('holster')).toBe('holster'); // back to the (semi) pistol
+    expect(rt.currentWeaponAutomatic()).toBe(false);
+  });
+
   it('cycleWeapon walks the equipped weapon slots in order', () => {
     const rt = makeRuntime();
     expect(rt.currentWeaponId()).toBe('pistol'); // active holster

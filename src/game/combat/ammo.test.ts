@@ -174,10 +174,10 @@ describe('T74 weapon switching — cycle changes the weapon and the swap delay b
     spawn(h, 5, 0);
 
     const next = h.sys.cycleWeapon(1);
-    expect(next).toBe('rifle');
-    expect(h.sys.currentWeaponId()).toBe('rifle');
+    expect(next).toBe('smg'); // registry order: pistol → smg → rifle → shotgun → melee
+    expect(h.sys.currentWeaponId()).toBe('smg');
 
-    const swap = h.weapons.rifleSwapTicks;
+    const swap = h.weapons.smgSwapTicks;
     // mid-swap: fire blocked
     h.sys.tick(swap - 1);
     expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(0);
