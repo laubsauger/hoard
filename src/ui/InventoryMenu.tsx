@@ -4,11 +4,11 @@
 // from the T83 catalog. The player + container contents are the sim's LIVE inventory (runtime.inventorySnapshot()
 // published by GameViewport) — NO UI mock seed; a container shows only when actually opened via the loot verb.
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
 import { inventoryViewStore, type ContainerView } from '../stores/inventoryView';
-import { buildDefaultCatalog, isConsumable, ITEM, slotsForItem, SLOT_LABELS, type EquipSlot } from '../game/inventory';
+import { buildDefaultCatalog, isConsumable, isEquippable, ITEM } from '../game/inventory';
 import type { EngineHandle } from './viewport/engineHandle';
 
 const CATALOG = buildDefaultCatalog();
@@ -51,13 +51,11 @@ function Pane({
   action: string;
   /** T138/T139: optional per-item extra button — "use" a consumable, "wear"/"remove" a backpack. Player pane only. */
   extraAction?: (item: number) => { readonly label: string; readonly onClick: () => void } | null;
-  /** T140: equip a weapon/tool into a belt slot (player pane only). Null disables the attach picker. */
-  onEquip?: (item: number, slot: EquipSlot) => void;
+  /** T140: one-click equip+draw a weapon/tool/throwable (player pane only). Null hides the equip button. */
+  onEquip?: (item: number) => void;
   /** T85: drop an item onto the floor (player pane only). Null hides the drop button. */
   onDrop?: (item: number) => void;
 }) {
-  // T140: which row's "equip ▾" slot-picker is currently expanded (one at a time).
-  const [attachItem, setAttachItem] = useState<number | null>(null);
   if (!view) return <div className="hbn-inv__pane hbn-inv__pane--empty">nothing nearby</div>;
   return (
     <div className="hbn-inv__pane">
@@ -72,8 +70,7 @@ function Pane({
         {view.slots.length === 0 && <li className="hbn-inv__empty">empty</li>}
         {view.slots.map((s) => {
           const extra = extraAction?.(s.item) ?? null;
-          const equipSlots = onEquip ? slotsForItem(s.item) : [];
-          const attachOpen = attachItem === s.item;
+          const canEquip = onEquip && isEquippable(s.item);
           return (
             <li key={s.item} className="hbn-inv__row">
               <button type="button" className={`hbn-inv__item cat-${itemCategory(s.item)}`} onClick={() => onItemClick(s.item)} title={action}>
@@ -81,41 +78,24 @@ function Pane({
                 {s.count > 1 && <span className="hbn-inv__count">×{s.count}</span>}
                 <span className="hbn-inv__action">{action}</span>
               </button>
-              {extra && (
-                <button type="button" className="hbn-inv__use" onClick={extra.onClick} title={extra.label}>
-                  {extra.label}
-                </button>
-              )}
-              {equipSlots.length > 0 && (
-                <button
-                  type="button"
-                  className={`hbn-inv__use${attachOpen ? ' is-open' : ''}`}
-                  onClick={() => setAttachItem(attachOpen ? null : s.item)}
-                  title="equip to a belt slot"
-                >
-                  equip ▾
-                </button>
-              )}
-              {onDrop && (
-                <button type="button" className="hbn-inv__use hbn-inv__drop" onClick={() => onDrop(s.item)} title="drop on the floor">
-                  drop
-                </button>
-              )}
-              {attachOpen && equipSlots.length > 0 && (
-                <div className="hbn-inv__attach">
-                  {equipSlots.map((sl) => (
-                    <button
-                      key={sl}
-                      type="button"
-                      className="hbn-inv__attach-slot"
-                      onClick={() => {
-                        onEquip?.(s.item, sl);
-                        setAttachItem(null);
-                      }}
-                    >
-                      {SLOT_LABELS[sl]}
+              {/* Actions wrap onto their own row so nothing is clipped by the pane width. */}
+              {(extra || canEquip || onDrop) && (
+                <div className="hbn-inv__actions">
+                  {canEquip && (
+                    <button type="button" className="hbn-inv__use hbn-inv__equip" onClick={() => onEquip?.(s.item)} title="equip + ready it in hand">
+                      equip
                     </button>
-                  ))}
+                  )}
+                  {extra && (
+                    <button type="button" className="hbn-inv__use" onClick={extra.onClick} title={extra.label}>
+                      {extra.label}
+                    </button>
+                  )}
+                  {onDrop && (
+                    <button type="button" className="hbn-inv__use hbn-inv__drop" onClick={() => onDrop(s.item)} title="drop on the floor">
+                      drop
+                    </button>
+                  )}
                 </div>
               )}
             </li>
@@ -183,7 +163,7 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
             }
             return null;
           }}
-          onEquip={(item, slot) => handle?.equipItem(item, slot)}
+          onEquip={(item) => handle?.equipAndDraw(item)}
           onDrop={(item) => handle?.drop(item)}
         />
         <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />

@@ -1971,6 +1971,20 @@ export class GameRuntime {
     return true;
   }
 
+  /** T140: ONE-CLICK equip — stow `item` into its canonical slot (preferring a slot already holding it, else a
+   *  free one, else the first — swapping that slot's item back to the pack) AND draw it so it's immediately IN
+   *  HAND (active), replacing whatever was equipped. The inventory "equip" button calls this. Returns false when
+   *  the item isn't equippable / not carried / the destination can't be freed. */
+  equipAndDraw(item: number): boolean {
+    const slots = this.equippableSlots(item);
+    if (slots.length === 0) return false;
+    const slot =
+      slots.find((s) => this.equipSlotItem(s) === item) ?? slots.find((s) => this.equipSlotItem(s) === null) ?? slots[0]!;
+    if (this.equipSlotItem(slot) !== item && !this.equipItem(item, slot)) return false;
+    this.setActiveSlot(slot); // make it the active (in-hand) weapon/throwable now
+    return true;
+  }
+
   /** T140: take an item out of an equipment slot back into the pack (refused if the pack can't hold it). If the
    *  slot was active the player drops to unarmed. Returns false when the slot is empty or the pack is full. */
   unequipSlot(slot: EquipSlot): boolean {

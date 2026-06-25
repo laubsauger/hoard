@@ -62,6 +62,8 @@ export interface EngineHandle {
   isBackpackEquipped(): boolean;
   /** T140: stow a carried item into an equipment slot (holster/back/belt L/belt R) — validated by weapon class. */
   equipItem(item: number, slot: EquipSlot): void;
+  /** T140: one-click equip — stow the item in its canonical slot AND draw it (immediately in hand). */
+  equipAndDraw(item: number): void;
   /** T140: take the item out of an equipment slot back into the pack (drops to unarmed if it was active). */
   unequipSlot(slot: EquipSlot): void;
   /** T140: draw an equipment slot to hands (make it the active weapon), or re-holster if already active. */
@@ -179,6 +181,12 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
     // the inventory so the paper-doll + hotbar + HUD reflect the new loadout immediately (mirrors equipBackpack).
     equipItem: (item, slot) => {
       if (getRuntime().equipItem(item, slot)) {
+        gameAudio.containerOpen();
+        publishInventory();
+      }
+    },
+    equipAndDraw: (item) => {
+      if (getRuntime().equipAndDraw(item)) {
         gameAudio.containerOpen();
         publishInventory();
       }

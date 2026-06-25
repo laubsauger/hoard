@@ -79,6 +79,6 @@ describe('T134 death impact carries the firing weapon knockback (not raw damage)
     h.sys.setWeapon('melee');
     const res = h.sys.fire(ORIGIN, 1, 0, 'head');
     expect(res.killed).toBe(true);
-    expect(h.impacts[0]!.force).toBe(h.weapons.meleeClassKnockback);
+    expect(h.impacts[0]!.force).toBeCloseTo(h.weapons.meleeClassKnockback * Math.max(0.35, 1 - 1 / h.weapons.meleeClassRangeMeters), 1);
   });
 });

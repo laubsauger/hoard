@@ -25,7 +25,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   // Dev tools are always on in a DEV build; in PROD they're hidden until summoned with the backtick (`) key, so
   // the deployed build stays clean but the panel is one keypress away for debugging on the live site.
-  const [devToolsOpen, setDevToolsOpen] = useState(import.meta.env.DEV);
+  const [devToolsOpen, setDevToolsOpen] = useState(false); // closed by default — toggle it open with the dev-tools key
 
   const onReady = useCallback((h: EngineHandle) => setHandle(h), []);
   const onError = useCallback((message: string) => setError(message), []);
