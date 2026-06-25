@@ -210,6 +210,7 @@ export const weaponsConfig = registerDomain('weapons', {
   pistolDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Pistol fraction of damage lost per meter of travel (distance falloff) (V50).', default: 0, min: 0, max: 1 }),
   pistolPellets: num({ owner: 'weapons', unit: 'count', doc: 'Pistol projectiles per shot (1 = single ball) (V50).', default: 1, min: 1, max: 64, integer: true }),
   pistolArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a pistol shot ignores (V50).', default: 0.5, min: 0, max: 1 }),
+  pistolKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Pistol ragdoll knockback ENERGY on a kill (T134) — the corpse impulse, decoupled from damage so a pistol topples the body without mangling it. Sane impulse range ~0..15.', default: 4, min: 0, max: 100 }),
 
   // rifle — high damage + long range, pierces SEVERAL bodies, slow distance falloff.
   rifleDamage: num({ owner: 'weapons', unit: 'count', doc: 'Rifle base damage per shot before region multiplier + armor (V50).', default: 85, min: 1, max: 100_000 }),
@@ -219,6 +220,7 @@ export const weaponsConfig = registerDomain('weapons', {
   rifleDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Rifle fraction of damage lost per meter of travel (V50).', default: 0.004, min: 0, max: 1 }),
   riflePellets: num({ owner: 'weapons', unit: 'count', doc: 'Rifle projectiles per shot (1 = single bullet) (V50).', default: 1, min: 1, max: 64, integer: true }),
   rifleArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a rifle shot ignores (V50).', default: 0.85, min: 0, max: 1 }),
+  rifleKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Rifle ragdoll knockback ENERGY on a kill (T134) — a sharp high-velocity punch through the body. Sane impulse range ~0..15.', default: 7, min: 0, max: 100 }),
 
   // shotgun — many low-power pellets in a wide spread, short range, steep distance falloff.
   shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50).', default: 20, min: 1, max: 100_000 }),
@@ -228,6 +230,7 @@ export const weaponsConfig = registerDomain('weapons', {
   shotgunDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Shotgun fraction of damage lost per meter of travel (steep) (V50).', default: 0.03, min: 0, max: 1 }),
   shotgunPellets: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun pellets per shot (the spread cone) (V50).', default: 8, min: 1, max: 64, integer: true }),
   shotgunArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a shotgun pellet ignores (V50).', default: 0.3, min: 0, max: 1 }),
+  shotgunKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun ragdoll knockback ENERGY on a kill (T134) — the heavy close-range blast that LAUNCHES the corpse back hardest. Sane impulse range ~0..15.', default: 13, min: 0, max: 100 }),
 
   // melee — close range, stops at the first body, mirrors the T18 melee damage/reach as a fire class.
   meleeClassDamage: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class base damage per strike before region multiplier + armor (V50).', default: 45, min: 1, max: 100_000 }),
@@ -237,6 +240,7 @@ export const weaponsConfig = registerDomain('weapons', {
   meleeClassDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Melee weapon-class distance falloff (0 over its short reach) (V50).', default: 0, min: 0, max: 1 }),
   meleeClassPellets: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class strikes per swing (1) (V50).', default: 1, min: 1, max: 64, integer: true }),
   meleeClassArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a melee strike ignores (V50).', default: 0.25, min: 0, max: 1 }),
+  meleeClassKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Melee weapon-class ragdoll knockback ENERGY on a kill (T134) — a blunt shove that tips the body over. Sane impulse range ~0..15.', default: 6, min: 0, max: 100 }),
 
   // ---- T74 ammo / reload / weapon-switch (extends the T73 per-weapon ballistics, V50) ----
   // Each FIREARM class carries a magazine (rounds chambered) plus a finite reserve; one `fire` consumes

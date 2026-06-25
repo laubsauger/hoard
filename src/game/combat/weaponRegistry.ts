@@ -35,6 +35,10 @@ export interface WeaponClass {
   readonly pellets: number;
   /** Fraction of the target's armor a hit ignores (penetration term in resolution). */
   readonly armorPenetration: number;
+  /** Ragdoll knockback ENERGY transferred to the corpse on a kill (T134) — the impulse the body's ragdoll
+   *  receives along the shot direction, DECOUPLED from damage so each weapon has its own kinetic signature
+   *  (a pistol topples, a shotgun launches). Fed to the death seam as `DeathImpact.force`. */
+  readonly knockback: number;
   // ---- T74 ammo / reload / swap ----
   /** Fixed-clock ready delay after switching TO this class via cycleWeapon; fire is blocked until ready. */
   readonly swapTicks: number;
@@ -61,6 +65,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       damageFalloffPerMeter: w.pistolDamageFalloffPerMeter,
       pellets: w.pistolPellets,
       armorPenetration: w.pistolArmorPenetration,
+      knockback: w.pistolKnockback,
       swapTicks: w.pistolSwapTicks,
       magazineSize: w.pistolMagazineSize,
       reserveAmmo: w.pistolReserveAmmo,
@@ -76,6 +81,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       damageFalloffPerMeter: w.rifleDamageFalloffPerMeter,
       pellets: w.riflePellets,
       armorPenetration: w.rifleArmorPenetration,
+      knockback: w.rifleKnockback,
       swapTicks: w.rifleSwapTicks,
       magazineSize: w.rifleMagazineSize,
       reserveAmmo: w.rifleReserveAmmo,
@@ -91,6 +97,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       damageFalloffPerMeter: w.shotgunDamageFalloffPerMeter,
       pellets: w.shotgunPellets,
       armorPenetration: w.shotgunArmorPenetration,
+      knockback: w.shotgunKnockback,
       swapTicks: w.shotgunSwapTicks,
       magazineSize: w.shotgunMagazineSize,
       reserveAmmo: w.shotgunReserveAmmo,
@@ -106,6 +113,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       damageFalloffPerMeter: w.meleeClassDamageFalloffPerMeter,
       pellets: w.meleeClassPellets,
       armorPenetration: w.meleeClassArmorPenetration,
+      knockback: w.meleeClassKnockback,
       swapTicks: w.meleeClassSwapTicks,
       // melee is UNLIMITED: no magazine / reserve / reload (T74).
     }),

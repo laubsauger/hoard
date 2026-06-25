@@ -689,9 +689,11 @@ export class CombatSystem {
 
     if (killed) {
       this.deps.worldEvents.push({ kind: 'entityDied', id: this.deps.nextEventId(), entity });
-      // T131/V99: carry the killing hit's kinetic vector (bullet/swing direction + effective damage) so the
-      // corpse topples in the push direction — front shot onto its back, behind onto its face, side sideways.
-      this.deps.onEntityDied(slot, { dirX: ndx, dirZ: ndz, force: effective });
+      // T131/V99 + T134: carry the killing hit's kinetic vector (bullet/swing direction) so the corpse ragdoll
+      // topples in the push direction — front shot onto its back, behind onto its face, side sideways. The `force`
+      // is the equipped weapon's KNOCKBACK energy (a pistol topples, a shotgun launches), NOT raw damage —
+      // decoupled so each weapon has its own kinetic signature and a high-damage pistol doesn't mangle the body.
+      this.deps.onEntityDied(slot, { dirX: ndx, dirZ: ndz, force: this.currentWeapon().knockback });
     }
 
     return {
