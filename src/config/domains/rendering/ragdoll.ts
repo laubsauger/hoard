@@ -25,7 +25,7 @@ export const ragdollFields = {
     owner: 'rendering',
     unit: 'ratio',
     doc: 'Fraction of the WHOLE-BODY COM TRANSLATION velocity bled per second — LIGHT so a shot’s knockback TRAVELS (the body slides/tumbles across the ground) instead of damping to a crumble in place (T134).',
-    default: 0.35,
+    default: 0.5,
     min: 0,
     max: 8,
   }),
@@ -60,6 +60,14 @@ export const ragdollFields = {
     default: 0.12,
     min: 0,
     max: 0.9,
+  }),
+  ragdollGroundAngularDamping: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'ROLLING RESISTANCE — fraction of angular velocity bled per second from any body currently TOUCHING the floor. Only grounded bodies are damped, so the airborne tumble of a fall is preserved while a body that lands and rolls quickly settles (kills the high-friction rolling limit cycle) (T134).',
+    default: 7,
+    min: 0,
+    max: 40,
   }),
   ragdollGroundRestitution: num({
     owner: 'rendering',
@@ -100,8 +108,8 @@ export const ragdollFields = {
   ragdollImpulseScale: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'force → initial COM SPEED (m/s) of the WHOLE body along the killing shot — the travelling shove. Tuned so pistol (force 4) clearly topples + travels and shotgun (force 13) launches visibly harder (T134).',
-    default: 0.5,
+    doc: 'force → initial COM SPEED (m/s) of the WHOLE body along the killing shot — the travelling shove. Tuned so pistol (force 4) clearly topples + travels ~1m and shotgun (force 13) launches visibly harder (several metres) (T134).',
+    default: 0.32,
     min: 0,
     max: 8,
   }),
@@ -109,7 +117,7 @@ export const ragdollFields = {
     owner: 'rendering',
     unit: 'ratio',
     doc: 'force → initial whole-body TIP-OVER angular speed (rad/s) about the horizontal axis ⟂ the shot — the corpse pitches over in the shot direction (a directional topple, not a vertical crumple) (T134).',
-    default: 0.42,
+    default: 0.45,
     min: 0,
     max: 8,
   }),
@@ -120,6 +128,14 @@ export const ragdollFields = {
     default: 0.08,
     min: 0,
     max: 5,
+  }),
+  ragdollSettleSpeed: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Settle is primarily POSITION-based: once the fastest-moving body centre has moved slower than this for a frame the corpse is declared settled (robust to the phantom recompute-velocity that a frustrated joint/ground contact leaves in the proxy, which the energy metric alone never clears) (T134).',
+    default: 0.12,
+    min: 0.001,
+    max: 2,
   }),
   // ---- VOLUME: per-size-class capsule radii (m). The torso is FATTER than the limbs so the body rests with bulk
   // (not a flat towel) + the limbs stay outside the trunk. Used for both ground rest-height AND mass/inertia. ----

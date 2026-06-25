@@ -91,9 +91,9 @@ async function main(): Promise<void> {
   key.target.position.set(0, 0.6, 0);
   scene.add(key, key.target);
 
-  const camera = new PerspectiveCamera(34, 1, 0.1, 100);
-  camera.position.set(2.2, 1.7, 3.9);
-  camera.lookAt(0, 0.62, 0);
+  const camera = new PerspectiveCamera(42, 1, 0.1, 100);
+  camera.position.set(3.6, 2.7, 6.2); // angled 3/4 view down the knockback travel lane (origin → several m +Z)
+  camera.lookAt(-0.2, 0.15, 1.7);
 
   const resize = (): void => {
     const w = canvas.clientWidth || window.innerWidth;

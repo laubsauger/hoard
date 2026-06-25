@@ -18,26 +18,35 @@ import {
 
 const CFG: RagdollConfig = {
   gravity: 16,
-  linearDamping: 0.8,
-  angularDamping: 2.1,
+  linearDamping: 0.5,
+  internalLinearDamping: 6,
+  angularDamping: 4.5,
+  tumbleDamping: 1.2,
+  jointAngularDamping: 0.12,
+  groundAngularDamping: 7,
   groundRestitution: 0.03,
-  groundFriction: 0.85,
+  groundFriction: 0.6,
   constraintIterations: 2,
   substeps: 10,
-  impulseScale: 0.25,
-  torqueScale: 0.28,
+  impulseScale: 0.32,
+  torqueScale: 0.45,
   settleEnergyThreshold: 0.08,
+  settleSpeed: 0.12,
   torsoRadius: 0.17,
   headRadius: 0.11,
   limbRadius: 0.075,
-  spineLimit: 0.3,
+  spineLimit: 0.14,
   neckLimit: 1.7,
   shoulderLimit: 1.4,
   hipLimit: 1.1,
   hingeSwingLimit: 0.3,
   elbowMax: 2.4,
   kneeMax: 2.4,
-  trunkStiffness: 0.35,
+  trunkStiffness: 0.7,
+  trunkIterations: 6,
+  maxLinearSpeed: 14,
+  maxAngularSpeed: 22,
+  explodeSpeed: 28,
 };
 
 /** A small deterministic non-identity quaternion for body `i` (axis-angle), to exercise the orientation-dependent
@@ -195,6 +204,46 @@ const HINGE_JOINTS = RAGDOLL_JOINTS.map((j, i) => ({ i, k: j.limit }))
   .filter((x) => x.k === 'knee' || x.k === 'elbow')
   .map((x) => x.i);
 
+/** Total rotation angle (rad) of joint `ji`'s relative orientation away from its rest — how far the child has rotated
+ *  relative to the parent. The stiff trunk keeps this tiny; a limb joint opens it wide. */
+function jointRelAngle(rag: Ragdoll, ji: number): number {
+  const j = rag.spec.joints[ji]!;
+  const qp = [rag.q[j.parent * 4]!, rag.q[j.parent * 4 + 1]!, rag.q[j.parent * 4 + 2]!, rag.q[j.parent * 4 + 3]!];
+  const qc = [rag.q[j.child * 4]!, rag.q[j.child * 4 + 1]!, rag.q[j.child * 4 + 2]!, rag.q[j.child * 4 + 3]!];
+  const qpInv = [-qp[0]!, -qp[1]!, -qp[2]!, qp[3]!];
+  const qrel = qmul(qpInv, qc);
+  const rr = j.restRel;
+  const rrInv = [-rr[0]!, -rr[1]!, -rr[2]!, rr[3]!];
+  const err = qmul(rrInv, qrel);
+  let w = Math.abs(err[3]!);
+  if (w > 1) w = 1;
+  return 2 * Math.acos(w);
+}
+
+/** (mass-weighted COM speed, max per-body RESIDUAL speed) — the residual is each body's velocity minus the whole-body
+ *  rigid prediction (vcom + ωavg×r), i.e. exactly the non-rigid limb-flail the decoupled damping bleeds hard. */
+function comAndResidual(rag: Ragdoll): { com: number; res: number } {
+  const B = rag.spec.bodyCount;
+  let mx = 0, my = 0, mz = 0, mm = 0, cx = 0, cy = 0, cz = 0;
+  let wx = 0, wy = 0, wz = 0;
+  for (let i = 0; i < B; i++) {
+    const m = 1 / rag.spec.invMass[i]!;
+    mm += m;
+    mx += m * rag.v[i * 3]!; my += m * rag.v[i * 3 + 1]!; mz += m * rag.v[i * 3 + 2]!;
+    cx += m * rag.c[i * 3]!; cy += m * rag.c[i * 3 + 1]!; cz += m * rag.c[i * 3 + 2]!;
+    wx += rag.w[i * 3]!; wy += rag.w[i * 3 + 1]!; wz += rag.w[i * 3 + 2]!;
+  }
+  mx /= mm; my /= mm; mz /= mm; cx /= mm; cy /= mm; cz /= mm;
+  wx /= B; wy /= B; wz /= B;
+  let res = 0;
+  for (let i = 0; i < B; i++) {
+    const rx = rag.c[i * 3]! - cx, ry = rag.c[i * 3 + 1]! - cy, rz = rag.c[i * 3 + 2]! - cz;
+    const px = mx + (wy * rz - wz * ry), py = my + (wz * rx - wx * rz), pz = mz + (wx * ry - wy * rx);
+    res = Math.max(res, Math.hypot(rag.v[i * 3]! - px, rag.v[i * 3 + 1]! - py, rag.v[i * 3 + 2]! - pz));
+  }
+  return { com: Math.hypot(mx, my, mz), res };
+}
+
 describe('ragdoll sim (oriented rigid bodies)', () => {
   it('holds point-to-point joints coincident across many steps', () => {
     const spec = buildTestSpec();
@@ -339,5 +388,68 @@ describe('ragdoll sim (oriented rigid bodies)', () => {
     const light = run(4, 0, 1, 33);
     const heavy = run(14, 0, 1, 33);
     expect(heavy.c[2]!).toBeGreaterThan(light.c[2]!);
+  });
+
+  it('NEVER sinks below the floor — across many seeds, directions, and a hard awkward shot', () => {
+    // The hard floor clamp + explosion backstop must hold every step: no body centre dips below the plane and the
+    // capsules rest on their radius (a centre cannot go negative). Stress a wide matrix incl. a violent shot.
+    const dirs: readonly (readonly [number, number])[] = [[0, 1], [1, 0], [0, -1], [0.7, 0.7], [-0.6, 0.5]];
+    for (const force of [0, 4, 13, 20, 40]) {
+      for (const [dx, dz] of dirs) {
+        for (const seed of [1, 7, 33, 99, 2024]) {
+          const spec = buildTestSpec();
+          const rag = new Ragdoll(spec);
+          rag.reset(spec, CFG, dx, dz, force, mulberry32(seed));
+          for (let i = 0; i < 1200 && !rag.settled; i++) {
+            rag.step(CFG, 1 / 60);
+            for (let b = 0; b < rag.spec.bodyCount; b++) {
+              expect(rag.c[b * 3 + 1]!).toBeGreaterThan(-1e-6); // never below the floor plane
+              expect(Number.isFinite(rag.c[b * 3 + 1]!)).toBe(true); // never explodes to non-finite
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('STIFF TRUNK — the chest barely rotates relative to the pelvis (rigid board), far less than a limb joint', () => {
+    const spineJi = RAGDOLL_JOINTS.findIndex((j) => j.limit === 'spine');
+    const elbowJi = RAGDOLL_JOINTS.findIndex((j) => j.limit === 'elbow');
+    const hipJi = RAGDOLL_JOINTS.findIndex((j) => j.limit === 'hip');
+    let maxSpine = 0, maxElbow = 0, maxHip = 0;
+    for (const [sx, sz, seed] of [[0, 1, 7], [1, 0, 3], [0, -1, 42], [0.6, 0.8, 99]] as const) {
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, sx, sz, 40, mulberry32(seed));
+      for (let i = 0; i < 1200 && !rag.settled; i++) {
+        rag.step(CFG, 1 / 60);
+        maxSpine = Math.max(maxSpine, jointRelAngle(rag, spineJi));
+        maxElbow = Math.max(maxElbow, jointRelAngle(rag, elbowJi));
+        maxHip = Math.max(maxHip, jointRelAngle(rag, hipJi));
+      }
+    }
+    // The trunk stays within a tight angular spread (the tight spine limit + trunk coupling + extra iterations).
+    expect(maxSpine).toBeLessThan(0.6);
+    // …and it is markedly STIFFER than the articulating limb joints.
+    expect(maxSpine).toBeLessThan(maxElbow);
+    expect(maxSpine).toBeLessThan(maxHip);
+  });
+
+  it('DECOUPLED damping — the non-rigid residual (limb flail) decays faster than the COM translation', () => {
+    // Airborne after a forward shot: the residual velocity (deviation from the whole-body rigid motion) is bled HARD
+    // while the common COM translation is bled LIGHTLY → a stiff body whose knockback keeps travelling.
+    const spec = buildTestSpec();
+    const rag = new Ragdoll(spec);
+    rag.reset(spec, CFG, 0, 1, 10, mulberry32(5));
+    rag.step(CFG, 1 / 60);
+    rag.step(CFG, 1 / 60);
+    const a = comAndResidual(rag); // early (still airborne)
+    for (let i = 0; i < 6; i++) rag.step(CFG, 1 / 60);
+    const b = comAndResidual(rag); // a few frames later, before landing
+    // Residual collapses to a small fraction; the COM speed is nearly preserved.
+    expect(b.res / a.res).toBeLessThan(0.7);
+    expect(b.com / a.com).toBeGreaterThan(0.85);
+    // The residual decays by a strictly larger fraction than the COM translation (the decouple).
+    expect(b.res / a.res).toBeLessThan(b.com / a.com);
   });
 });

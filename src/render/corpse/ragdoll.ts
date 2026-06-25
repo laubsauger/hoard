@@ -43,6 +43,9 @@ export interface RagdollConfig {
   /** Per-joint fraction of the RELATIVE angular velocity between the joint's two bodies removed each substep
    *  (the "stiffness like damping" → elbows/knees/shoulders/hips don't flail). */
   readonly jointAngularDamping: number;
+  /** Rolling resistance: fraction of angular velocity bled per second from any body TOUCHING the floor (only
+   *  grounded bodies → the airborne tumble survives, but a landed roll settles → no rolling limit cycle). */
+  readonly groundAngularDamping: number;
   /** Vertical bounce kept on a ground hit (0 = dead stop, 1 = perfectly elastic). */
   readonly groundRestitution: number;
   /** Coulomb friction coefficient at a ground capsule contact (0 = frictionless). */
@@ -57,6 +60,8 @@ export interface RagdollConfig {
   readonly torqueScale: number;
   /** Total kinetic proxy Σ(|v|²+|ω|²) below which the body is declared SETTLED (then it stops integrating). */
   readonly settleEnergyThreshold: number;
+  /** Primary POSITION-based settle: once the fastest body centre moves slower than this (m/s) for a frame, settle. */
+  readonly settleSpeed: number;
   // ---- VOLUME: per-size-class capsule radius (m). Torso fattest so the trunk rests with bulk; head mid; limbs
   // thin. Used for BOTH ground rest-height AND mass/inertia (a fat trunk resists folding through the limbs). ----
   readonly torsoRadius: number;
@@ -411,6 +416,8 @@ export class Ragdoll {
   readonly w: Float64Array;
   private readonly cPrev: Float64Array;
   private readonly qPrev: Float64Array;
+  /** Body centres at the previous stepped FRAME — the position-based settle metric (robust to phantom velocity). */
+  private readonly cFrame: Float64Array;
   /** False until the first step de-penetrates the spawn pose (keeps the pre-step pose exactly M0). */
   private started = false;
   /** Cached emitted bone matrices (column-major, boneCount*16) — refreshed only while moving. */
@@ -428,6 +435,7 @@ export class Ragdoll {
     this.w = new Float64Array(B * 3);
     this.cPrev = new Float64Array(B * 3);
     this.qPrev = new Float64Array(B * 4);
+    this.cFrame = new Float64Array(B * 3);
     this.bones = new Float32Array(spec.boneCount * 16);
   }
 
@@ -573,9 +581,27 @@ export class Ragdoll {
     }
     const sub = Math.max(1, cfg.substeps | 0);
     const h = dt / sub;
+    const B = this.spec.bodyCount;
+    this.cFrame.set(this.c); // baseline for this frame's position-based settle test
     let energy = 0;
     for (let s = 0; s < sub; s++) energy = this.substep(cfg, h);
-    if (energy < cfg.settleEnergyThreshold) this.settled = true;
+    // SETTLE — primarily position-based (the corpse stopped MOVING): the energy proxy can be stuck high on a phantom
+    // recompute-velocity that a frustrated joint↔ground contact never clears, so we declare settled once the fastest
+    // body centre has moved slower than `settleSpeed` over the frame (energy is the cheap early-out for clean stops).
+    let maxD2 = 0;
+    for (let i = 0; i < B; i++) {
+      const dx = this.c[i * 3]! - this.cFrame[i * 3]!;
+      const dy = this.c[i * 3 + 1]! - this.cFrame[i * 3 + 1]!;
+      const dz = this.c[i * 3 + 2]! - this.cFrame[i * 3 + 2]!;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > maxD2) maxD2 = d2;
+    }
+    const moveThresh = cfg.settleSpeed * dt;
+    if (energy < cfg.settleEnergyThreshold || maxD2 < moveThresh * moveThresh) {
+      this.settled = true;
+      this.v.fill(0); // freeze: drop any phantom recompute-velocity so a settled body holds its pose cleanly
+      this.w.fill(0);
+    }
   }
 
   /** One substep: integrate v,ω → integrate c,q → joints + cones → ground push → recompute v,ω → contacts. */
@@ -588,21 +614,16 @@ export class Ragdoll {
     const v = this.v;
     const w = this.w;
     const g = cfg.gravity;
-    const linDamp = clamp01(1 - cfg.linearDamping * h);
-    const angDamp = clamp01(1 - cfg.angularDamping * h);
 
-    // --- Integrate velocities (gravity + damping), then positions. ---
+    // --- Integrate velocities (gravity only — damping is the DECOUPLED pass after the recompute), then positions.
+    // Damping here would be a single global drag on every body; instead we split it (common motion light, residual
+    // heavy) below so the knockback travels while the limbs stay stiff. ---
     this.cPrev.set(c);
     this.qPrev.set(q);
     for (let i = 0; i < B; i++) {
       if (im[i]! <= 0) continue;
       const b3 = i * 3;
-      v[b3] = v[b3]! * linDamp;
-      v[b3 + 1] = (v[b3 + 1]! - g * h) * linDamp;
-      v[b3 + 2] = v[b3 + 2]! * linDamp;
-      w[b3] = w[b3]! * angDamp;
-      w[b3 + 1] = w[b3 + 1]! * angDamp;
-      w[b3 + 2] = w[b3 + 2]! * angDamp;
+      v[b3 + 1] = v[b3 + 1]! - g * h;
       c[b3] = c[b3]! + v[b3]! * h;
       c[b3 + 1] = c[b3 + 1]! + v[b3 + 1]! * h;
       c[b3 + 2] = c[b3 + 2]! + v[b3 + 2]! * h;
@@ -615,6 +636,14 @@ export class Ragdoll {
     const iters = Math.max(1, cfg.constraintIterations | 0);
     for (let it = 0; it < iters; it++) {
       for (let jx = 0; jx < spec.joints.length; jx++) this.solveJoint(spec.joints[jx]!);
+    }
+    // EXTRA passes on the TRUNK (spine) joint only → the pelvis↔chest anchor barely separates → a rigid torso board.
+    const trunkIters = Math.max(0, cfg.trunkIterations | 0);
+    for (let it = 0; it < trunkIters; it++) {
+      for (let jx = 0; jx < spec.joints.length; jx++) {
+        const j = spec.joints[jx]!;
+        if (j.trunk) this.solveJoint(j);
+      }
     }
 
     // --- Recompute velocities from the JOINT position delta (this is what swings the limbs). ---
@@ -629,12 +658,21 @@ export class Ragdoll {
       w[b3 + 1] = clampMag(w[b3 + 1]!, cfg.maxAngularSpeed);
       w[b3 + 2] = clampMag(w[b3 + 2]!, cfg.maxAngularSpeed);
     }
-    // --- Ground at VELOCITY level (restitution + friction at the contact point → tumbles + settles), THEN a
-    // positional Baumgarte push-out (AFTER the recompute, so the lift injects NO velocity → no vibration pump). ---
+    // --- DECOUPLED DAMPING: split the recomputed velocities into the whole-body RIGID motion (common COM translation
+    // + common tumble, damped LIGHTLY → the knockback travels) and the non-rigid RESIDUAL (each body's deviation =
+    // limb flail, damped HARD → stiff, no mangle). This is what lets a stiff body still slide/tumble after a hit. ---
+    this.applyDecoupledDamping(cfg, h);
+
+    // --- Ground at VELOCITY level (restitution + friction at the contact point → tumbles + settles), THEN the
+    // anatomical limits (+ per-joint angular damping), self-collision + positional ground push-out, and finally a HARD
+    // floor clamp + explosion backstop so nothing ever ends up below the plane or freaks out. ---
     this.solveContacts(cfg);
-    this.solveJointLimits();
+    this.dampGroundedSpin(cfg, h);
+    this.solveJointLimits(cfg);
     this.solveSelfCollisions();
     this.solveGround();
+    this.guardExplosion(cfg);
+    this.clampGround();
 
     // --- Kinetic proxy: Σ(|v|²+|ω|²). ---
     let energy = 0;
@@ -695,7 +733,7 @@ export class Ragdoll {
    * violated direction removes only the OPENING component of the relative angular velocity. The trunk `coupling`
    * additionally bleeds the relative spin so the pelvis+chest co-rotate like a board.
    */
-  private solveJointLimits(): void {
+  private solveJointLimits(cfg: RagdollConfig): void {
     const spec = this.spec;
     const q = this.q;
     const w = this.w;
@@ -704,10 +742,12 @@ export class Ragdoll {
       const p = j.parent;
       const cb = j.child;
 
-      // Trunk co-rotation: pull the parent + child angular velocities toward their mean by `coupling` (a stable,
-      // energy-removing contraction) → the spine acts as a rigid board, not a floppy hinge.
-      if (j.coupling > 0) {
-        const k = j.coupling;
+      // Per-joint angular damping: pull the parent + child angular velocities toward their MEAN (a stable,
+      // energy-removing contraction that bleeds the RELATIVE spin but conserves the common tumble). The TRUNK uses its
+      // strong `coupling` (→ rigid spine board); every other joint uses the lighter `jointAngularDamping` so
+      // elbows/knees/shoulders/hips don't flail into a mangle while still flopping under gravity/impact.
+      const k = j.coupling > 0 ? j.coupling : cfg.jointAngularDamping;
+      if (k > 0) {
         for (let a = 0; a < 3; a++) {
           const wp = w[p * 3 + a]!;
           const wc = w[cb * 3 + a]!;
@@ -775,6 +815,38 @@ export class Ragdoll {
     w[p * 3 + 2] = w[p * 3 + 2]! + az * dP;
   }
 
+  /**
+   * ROLLING RESISTANCE — bleed the angular velocity of any body currently TOUCHING the floor. A high-friction capsule
+   * that lands spinning will otherwise roll forever (its energy ping-pongs between the lightly-damped common
+   * translation and the lightly-damped common tumble — both protected by the decoupled damping because a roll is
+   * rigid-body motion). Damping ONLY grounded bodies leaves the airborne tumble of the dramatic fall untouched while
+   * guaranteeing a landed body settles in a roll or two (kills the limit cycle → `settled` always reached).
+   */
+  private dampGroundedSpin(cfg: RagdollConfig, h: number): void {
+    const spec = this.spec;
+    const B = spec.bodyCount;
+    const k = clamp01(1 - cfg.groundAngularDamping * h);
+    if (k >= 1) return;
+    const w = this.w;
+    for (let i = 0; i < B; i++) {
+      if (spec.invMass[i]! <= 0) continue;
+      const rad = spec.radius[i]!;
+      const band = rad + 0.02; // "touching the floor" — a sample within ~2cm of resting on its radius
+      const n = capsuleSampleCount(spec, i);
+      let grounded = false;
+      for (let s = 0; s < n; s++) {
+        capsuleSamplePoint(spec, i, s, this.q, this.c, _pt);
+        if (_pt[1]! <= band) { grounded = true; break; }
+      }
+      if (grounded) {
+        const b3 = i * 3;
+        w[b3] = w[b3]! * k;
+        w[b3 + 1] = w[b3 + 1]! * k;
+        w[b3 + 2] = w[b3 + 2]! * k;
+      }
+    }
+  }
+
   /** Positional ground push-out: for each capsule sample point below the radius, lift it back to the plane. */
   private solveGround(): void {
     const spec = this.spec;
@@ -798,6 +870,142 @@ export class Ragdoll {
             applyPositional(this, i, +lambda, 0, 1, 0, _ip);
           }
         }
+      }
+    }
+  }
+
+  /**
+   * DECOUPLED DAMPING. Split each body's velocity into the whole-body RIGID motion — the mass-weighted COM
+   * translation `vc` + the common tumble `wa` (average ω) — and the non-rigid RESIDUAL (its deviation from
+   * `vc + wa×r`). The common motion is damped LIGHTLY (`linearDamping`/`tumbleDamping`) so the knockback TRAVELS and
+   * the corpse keeps tumbling; the residual is damped HARD (`internalLinearDamping`/`angularDamping`) so limbs stay
+   * stiff and never mangle. Pure scalar math (no allocation) — reuses locals only.
+   */
+  private applyDecoupledDamping(cfg: RagdollConfig, h: number): void {
+    const spec = this.spec;
+    const B = spec.bodyCount;
+    const im = spec.invMass;
+    const c = this.c;
+    const v = this.v;
+    const w = this.w;
+    // Common COM (mass-weighted) + common linear/angular velocity.
+    let comX = 0, comY = 0, comZ = 0, massSum = 0;
+    let vcx = 0, vcy = 0, vcz = 0;
+    let wax = 0, way = 0, waz = 0, count = 0;
+    for (let i = 0; i < B; i++) {
+      if (im[i]! <= 0) continue;
+      const b3 = i * 3;
+      const m = 1 / im[i]!;
+      massSum += m;
+      comX += m * c[b3]!; comY += m * c[b3 + 1]!; comZ += m * c[b3 + 2]!;
+      vcx += m * v[b3]!; vcy += m * v[b3 + 1]!; vcz += m * v[b3 + 2]!;
+      wax += w[b3]!; way += w[b3 + 1]!; waz += w[b3 + 2]!;
+      count++;
+    }
+    if (massSum <= EPS || count === 0) return;
+    const invM = 1 / massSum;
+    comX *= invM; comY *= invM; comZ *= invM;
+    vcx *= invM; vcy *= invM; vcz *= invM;
+    const invC = 1 / count;
+    wax *= invC; way *= invC; waz *= invC;
+    // Light damping on the common (rigid) motion; heavy on the residual.
+    const transK = clamp01(1 - cfg.linearDamping * h);
+    const tumbleK = clamp01(1 - cfg.tumbleDamping * h);
+    const internLin = clamp01(1 - cfg.internalLinearDamping * h);
+    const internAng = clamp01(1 - cfg.angularDamping * h);
+    const vcxD = vcx * transK, vcyD = vcy * transK, vczD = vcz * transK;
+    const waxD = wax * tumbleK, wayD = way * tumbleK, wazD = waz * tumbleK;
+    for (let i = 0; i < B; i++) {
+      if (im[i]! <= 0) continue;
+      const b3 = i * 3;
+      const rx = c[b3]! - comX, ry = c[b3 + 1]! - comY, rz = c[b3 + 2]! - comZ;
+      // Undamped rigid prediction (for the residual) and damped rigid prediction (the kept light-damped part).
+      const vrigx = vcx + (way * rz - waz * ry);
+      const vrigy = vcy + (waz * rx - wax * rz);
+      const vrigz = vcz + (wax * ry - way * rx);
+      const vrigxD = vcxD + (wayD * rz - wazD * ry);
+      const vrigyD = vcyD + (wazD * rx - waxD * rz);
+      const vrigzD = vczD + (waxD * ry - wayD * rx);
+      v[b3] = vrigxD + (v[b3]! - vrigx) * internLin;
+      v[b3 + 1] = vrigyD + (v[b3 + 1]! - vrigy) * internLin;
+      v[b3 + 2] = vrigzD + (v[b3 + 2]! - vrigz) * internLin;
+      w[b3] = waxD + (w[b3]! - wax) * internAng;
+      w[b3 + 1] = wayD + (w[b3 + 1]! - way) * internAng;
+      w[b3 + 2] = wazD + (w[b3 + 2]! - waz) * internAng;
+    }
+  }
+
+  /**
+   * HARD FLOOR CLAMP — the final non-negotiable correctness pass each substep: every capsule sample must sit at or
+   * above its radius. Any residual penetration (left by the soft positional push-out after self-collisions) is
+   * removed by lifting the WHOLE body up by the deepest penetration (a rigid shift → introduces no NEW penetration),
+   * and the body's downward velocity is killed so it can't re-penetrate next substep. A body is pushed OUT (up),
+   * never sucked through. NaN-safe (a non-finite sample makes `lowest` non-finite → the `< 0` test is false → the
+   * explosion guard, which runs first, has already reset that body).
+   */
+  private clampGround(): void {
+    const spec = this.spec;
+    const B = spec.bodyCount;
+    for (let i = 0; i < B; i++) {
+      if (spec.invMass[i]! <= 0) continue;
+      const rad = spec.radius[i]!;
+      const n = capsuleSampleCount(spec, i);
+      let lowest = Infinity;
+      for (let k = 0; k < n; k++) {
+        capsuleSamplePoint(spec, i, k, this.q, this.c, _pt);
+        const below = _pt[1]! - rad;
+        if (below < lowest) lowest = below;
+      }
+      if (lowest < 0) {
+        this.c[i * 3 + 1] = this.c[i * 3 + 1]! - lowest + 1e-4; // lift so the deepest sample rests on the floor
+        if (this.v[i * 3 + 1]! < 0) this.v[i * 3 + 1] = 0; // kill downward velocity → no re-penetration
+      }
+    }
+  }
+
+  /**
+   * EXPLOSION BACKSTOP — a correctness guard against solver blow-ups (NOT a gameplay fallback). If a body's state is
+   * non-finite it is hard-reset to rest on the ground (its rest x/z, on its radius, rest orientation, zero velocity).
+   * If it is finite but its speed has blown past `explodeSpeed` (or its spin past `maxAngularSpeed`), the velocity is
+   * scaled back into the physical range instead of letting it "freak out." Root-cause penetration is fixed by the
+   * de-penetrate + clampGround passes; this only catches the pathological residue.
+   */
+  private guardExplosion(cfg: RagdollConfig): void {
+    const spec = this.spec;
+    const B = spec.bodyCount;
+    const cap2 = cfg.explodeSpeed * cfg.explodeSpeed;
+    const wcap2 = cfg.maxAngularSpeed * cfg.maxAngularSpeed;
+    for (let i = 0; i < B; i++) {
+      if (spec.invMass[i]! <= 0) continue;
+      const b3 = i * 3;
+      const q4 = i * 4;
+      const finite =
+        Number.isFinite(this.c[b3]!) && Number.isFinite(this.c[b3 + 1]!) && Number.isFinite(this.c[b3 + 2]!) &&
+        Number.isFinite(this.q[q4]!) && Number.isFinite(this.q[q4 + 1]!) && Number.isFinite(this.q[q4 + 2]!) && Number.isFinite(this.q[q4 + 3]!) &&
+        Number.isFinite(this.v[b3]!) && Number.isFinite(this.v[b3 + 1]!) && Number.isFinite(this.v[b3 + 2]!) &&
+        Number.isFinite(this.w[b3]!) && Number.isFinite(this.w[b3 + 1]!) && Number.isFinite(this.w[b3 + 2]!);
+      if (!finite) {
+        // Hard reset to rest on the ground.
+        this.c[b3] = spec.restPos[b3]!;
+        this.c[b3 + 1] = spec.radius[i]!;
+        this.c[b3 + 2] = spec.restPos[b3 + 2]!;
+        this.q[q4] = spec.restQuat[q4]!;
+        this.q[q4 + 1] = spec.restQuat[q4 + 1]!;
+        this.q[q4 + 2] = spec.restQuat[q4 + 2]!;
+        this.q[q4 + 3] = spec.restQuat[q4 + 3]!;
+        this.v[b3] = 0; this.v[b3 + 1] = 0; this.v[b3 + 2] = 0;
+        this.w[b3] = 0; this.w[b3 + 1] = 0; this.w[b3 + 2] = 0;
+        continue;
+      }
+      const sp2 = this.v[b3]! ** 2 + this.v[b3 + 1]! ** 2 + this.v[b3 + 2]! ** 2;
+      if (sp2 > cap2) {
+        const s = cfg.explodeSpeed / Math.sqrt(sp2);
+        this.v[b3] = this.v[b3]! * s; this.v[b3 + 1] = this.v[b3 + 1]! * s; this.v[b3 + 2] = this.v[b3 + 2]! * s;
+      }
+      const ws2 = this.w[b3]! ** 2 + this.w[b3 + 1]! ** 2 + this.w[b3 + 2]! ** 2;
+      if (ws2 > wcap2) {
+        const s = cfg.maxAngularSpeed / Math.sqrt(ws2);
+        this.w[b3] = this.w[b3]! * s; this.w[b3 + 1] = this.w[b3 + 1]! * s; this.w[b3 + 2] = this.w[b3 + 2]! * s;
       }
     }
   }
