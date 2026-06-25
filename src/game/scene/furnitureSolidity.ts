@@ -35,6 +35,7 @@ export const FURNITURE_SOLIDITY: Readonly<Record<FurnitureKind, boolean>> = {
   workbench: true,
   shelving: true,
   washer: true,
+  gunCabinet: true, // T139: a tall steel locker — solid
   // waist/chest-height boxes that reach the floor — a body can't pass through them.
   nightstand: true,
   armchair: true,
@@ -78,6 +79,7 @@ export const FURNITURE_FOOTPRINT_METERS: Readonly<Record<FurnitureKind, { w: num
   workbench: { w: 1.6, d: 0.7 },
   shelving: { w: 1.0, d: 0.5 },
   washer: { w: 0.7, d: 0.7 },
+  gunCabinet: { w: 0.7, d: 0.5 }, // T139: a narrow tall locker
   toilet: { w: 0.5, d: 0.6 },
   console: { w: 1.0, d: 0.35 },
   // non-solid pieces (never blocked) — footprints kept for completeness / future use.

@@ -8,7 +8,7 @@ import { useEffect } from 'react';
 import { useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
 import { inventoryViewStore, type ContainerView } from '../stores/inventoryView';
-import { buildDefaultCatalog, isConsumable } from '../game/inventory';
+import { buildDefaultCatalog, isConsumable, ITEM } from '../game/inventory';
 import type { EngineHandle } from './viewport/engineHandle';
 
 const CATALOG = buildDefaultCatalog();
@@ -42,37 +42,43 @@ function Pane({
   view,
   onItemClick,
   action,
-  onUse,
+  extraAction,
 }: {
   view: ContainerView | undefined;
   onItemClick: (item: number) => void;
   action: string;
-  /** T138: when set, a CONSUMABLE item also gets a "Use" button (eat/drink/treat) — only the player pane wires it. */
-  onUse?: (item: number) => void;
+  /** T138/T139: optional per-item extra button — "use" a consumable, "wear"/"remove" a backpack. Player pane only. */
+  extraAction?: (item: number) => { readonly label: string; readonly onClick: () => void } | null;
 }) {
   if (!view) return <div className="hbn-inv__pane hbn-inv__pane--empty">nothing nearby</div>;
   return (
     <div className="hbn-inv__pane">
       <header className="hbn-inv__pane-head">
         <span className="hbn-inv__pane-title">{view.container === 'player' ? 'Inventory' : view.container}</span>
-        <span className="hbn-inv__weight">{weightOf(view.slots).toFixed(1)} kg</span>
+        <span className="hbn-inv__weight">
+          {weightOf(view.slots).toFixed(1)}
+          {view.capacity > 0 ? ` / ${view.capacity}` : ''} kg
+        </span>
       </header>
       <ul className="hbn-inv__list">
         {view.slots.length === 0 && <li className="hbn-inv__empty">empty</li>}
-        {view.slots.map((s) => (
-          <li key={s.item} className="hbn-inv__row">
-            <button type="button" className={`hbn-inv__item cat-${itemCategory(s.item)}`} onClick={() => onItemClick(s.item)} title={action}>
-              <span className="hbn-inv__name">{itemName(s.item)}</span>
-              {s.count > 1 && <span className="hbn-inv__count">×{s.count}</span>}
-              <span className="hbn-inv__action">{action}</span>
-            </button>
-            {onUse && isConsumable(s.item) && (
-              <button type="button" className="hbn-inv__use" onClick={() => onUse(s.item)} title="Use this item">
-                use
+        {view.slots.map((s) => {
+          const extra = extraAction?.(s.item) ?? null;
+          return (
+            <li key={s.item} className="hbn-inv__row">
+              <button type="button" className={`hbn-inv__item cat-${itemCategory(s.item)}`} onClick={() => onItemClick(s.item)} title={action}>
+                <span className="hbn-inv__name">{itemName(s.item)}</span>
+                {s.count > 1 && <span className="hbn-inv__count">×{s.count}</span>}
+                <span className="hbn-inv__action">{action}</span>
               </button>
-            )}
-          </li>
-        ))}
+              {extra && (
+                <button type="button" className="hbn-inv__use" onClick={extra.onClick} title={extra.label}>
+                  {extra.label}
+                </button>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -119,11 +125,18 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
           view={player}
           action="store ▸"
           onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)}
-          onUse={(item) => handle?.useItem(item)}
+          extraAction={(item) => {
+            if (isConsumable(item)) return { label: 'use', onClick: () => handle?.useItem(item) };
+            if (item === ITEM.Backpack) {
+              const worn = handle?.isBackpackEquipped() ?? false;
+              return { label: worn ? 'remove' : 'wear', onClick: () => (worn ? handle?.unequipBackpack() : handle?.equipBackpack()) };
+            }
+            return null;
+          }}
         />
         <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />
       </div>
-      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “use” to eat / drink / bandage</p>
+      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “use” to eat / drink / bandage · “wear” a pack for more room</p>
     </div>
   );
 }

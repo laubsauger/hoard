@@ -35,6 +35,8 @@ import type { QualityTier } from '../../config/types';
 import type { ResourceRegistry } from '../engine/resources';
 import type { ToneMappingMode } from '../engine/renderer';
 import { Crowd, resolveCrowdSettings } from '../crowd/crowd';
+import { resolveRagdollConfig } from '../crowd/rigged';
+import type { RagdollConfig } from '../corpse/ragdoll';
 import type { ArchetypeKey } from '../crowd';
 import { resolveCorpseFieldSettings, type CorpseFieldSettings } from '../corpse';
 import type { DebugFlags } from '../../diagnostics/flags';
@@ -106,6 +108,8 @@ export class BlockScene {
   private readonly perception = resolveDomain(perceptionConfig, this.tierOf());
   /** T131/V99 — corpse render pool cap + topple-collapse duration (drives the rigged corpse layer). */
   private readonly corpseRender: CorpseFieldSettings = resolveCorpseFieldSettings(this.tierOf());
+  /** T134 — per-limb death-ragdoll tunables for the rigged corpse layer (resolved tier-correct). */
+  private readonly ragdollConfig: RagdollConfig = resolveRagdollConfig(this.tierOf());
   private readonly visibility = resolveVisibilitySettings(this.tierOf());
   private readonly cutawayDepth: CutawayDepthSettings = resolveCutawayDepthSettings(this.tierOf());
   private readonly roofFadeSeconds = resolve(renderingConfig.roofFadeSeconds, this.tierOf());
@@ -446,7 +450,7 @@ export class BlockScene {
   attachZombieMesh(key: ArchetypeKey, gltf: GLTF): void {
     // T131/V99: the corpse-render pool cap sizes each archetype's rigged CORPSE mesh (a dead body keeps its
     // archetype mesh, frozen + toppled), reusing this same bake.
-    this.crowd.rigged.attach(key, gltf, (resource, kind, label) => this.res.track(resource, kind, label), this.corpseRender.capacity);
+    this.crowd.rigged.attach(key, gltf, (resource, kind, label) => this.res.track(resource, kind, label), this.corpseRender.capacity, this.ragdollConfig);
   }
 
   /** T131/V99 — true once all archetype GLBs baked in: the rigged corpse layer now draws the corpse pool, so the
@@ -547,10 +551,10 @@ export class BlockScene {
     // Player position drives the crowd's distance-ranked figure/box LOD (nearest zombies are figures, far = boxes).
     const playerPos = this.runtime.player();
     this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, playerPos.x, playerPos.z, visibility);
-    // T131/V99: render the lingering CORPSE POOL as rigged zombie meshes (same bake) frozen + toppled along the
-    // killing shot. No-op until all archetype GLBs bake in (the blob CorpseField covers that window). The corpse
-    // `bornTick` is stamped in the runtime's absolute tick, so the topple ages against `absoluteTick`.
-    this.crowd.rigged.updateCorpses(this.runtime.corpses.list, this.runtime.absoluteTick, this.corpseRender.collapseTicks);
+    // T134: render the lingering CORPSE POOL as per-limb RAGDOLLS — each dead body goes limp and falls under
+    // physics from its killing shot, stepped by the frame dt until it settles. No-op until all archetype GLBs bake
+    // in (the blob CorpseField covers that window). A render-only VIEW (V2) — reads the corpse records read-only.
+    this.crowd.rigged.updateCorpses(this.runtime.corpses.list, Math.max(0, dtSeconds));
 
     const p = this.runtime.player();
     // T127: stand the avatar on the LOCAL ground — the interior floor slab (`floorThicknessMeters`) when the
@@ -596,13 +600,14 @@ export class BlockScene {
     });
   }
 
-  /** Player fired (B7) — flash the muzzle + draw a tracer from the player's muzzle along the aim direction. */
-  fireFeedback(dirX: number, dirZ: number, stopDistanceMeters?: number): void {
+  /** Player fired (B7) — flash the muzzle + draw a tracer (T139: a FAN of `pellets` tracers across `spreadDegrees`
+   *  for a shotgun) from the player's muzzle along the aim direction. */
+  fireFeedback(dirX: number, dirZ: number, stopDistanceMeters?: number, pellets = 1, spreadDegrees = 0): void {
     const p = this.runtime.player();
     const muzzleY = this.player.bodyHeightMeters * 0.6;
     // Pass the authoritative shot stop distance (struck body OR first wall) so the tracer terminates there
     // and never draws through a wall when no zombie was hit (V49/V53/B20).
-    this.combat.fire(p.x, muzzleY, p.z, dirX, dirZ, stopDistanceMeters);
+    this.combat.fire(p.x, muzzleY, p.z, dirX, dirZ, stopDistanceMeters, pellets, spreadDegrees);
   }
 
   /** Live tone-mapping exposure (B6) — read by the renderer host each frame to apply interior/night lift. */

@@ -52,6 +52,11 @@ export interface EngineHandle {
   /** T138: USE (consume) one unit of a consumable from the player inventory — eat/drink/treat. Re-publishes the
    *  inventory so the reduced count surfaces immediately; the HUD survival vitals update on the next snapshot. */
   useItem(item: number): void;
+  /** T139: wear a carried backpack (raises carry capacity) / take it off (restored, refused while overloaded). */
+  equipBackpack(): void;
+  unequipBackpack(): void;
+  /** T139: whether a backpack is currently worn (drives the inventory equip/remove toggle). */
+  isBackpackEquipped(): boolean;
   /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
    *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
   worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
@@ -141,6 +146,19 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
         publishInventory(); // re-surface the reduced count immediately (V1)
       }
     },
+    equipBackpack: () => {
+      if (getRuntime().equipBackpack()) {
+        gameAudio.containerOpen();
+        publishInventory(); // capacity rose → re-surface so the pane header reflects it
+      }
+    },
+    unequipBackpack: () => {
+      if (getRuntime().unequipBackpack()) {
+        gameAudio.containerOpen();
+        publishInventory();
+      }
+    },
+    isBackpackEquipped: () => getRuntime().isBackpackEquipped(),
     worldToScreen: (x, y, z) => {
       const rect = canvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return null;

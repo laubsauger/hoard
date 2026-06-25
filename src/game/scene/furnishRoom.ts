@@ -58,6 +58,7 @@ export type FurnitureKind =
   | 'workbench'
   | 'shelving'
   | 'washer'
+  | 'gunCabinet'
   | 'console';
 
 /**
@@ -184,6 +185,9 @@ const PROGRAMS: Record<RoomType, readonly PieceSpec[]> = {
     wall('workbench'),
     wall('shelving', 'garage', true),
     wall('shelving', 'garage', true),
+    // T139: a locked GUN CABINET — the household's firearms + ammo (the only 'gunCabinet' loot source placed, so
+    // weapons/ammunition are findable in the world, not just the starter loadout).
+    wall('gunCabinet', 'gunCabinet', true),
   ],
   closet: [wall('shelving', 'wardrobe', true)],
   laundry: [wall('washer', 'wardrobe'), wall('shelving', 'garage', true)],

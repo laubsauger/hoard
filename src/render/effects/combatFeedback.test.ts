@@ -277,3 +277,25 @@ describe('B15/T74 — tracer terminates at the actual stop distance (V49)', () =
     expect(s.tracerStopDistance()).toBe(4);
   });
 });
+
+describe('tracer fan (T139 shotgun scatter visual)', () => {
+  it('emits one tracer per pellet, fanned across the spread; a single-pellet shot is one tracer', () => {
+    const s = new CombatFeedbackSystem(settings);
+    s.fire(0, 1, 0, 1, 0, undefined, 8, 14); // 8 pellets across a 14° cone
+    expect(s.tracerPulses.length).toBe(8);
+    const headings = s.tracerPulses.map((t) => Math.atan2(t.dirZ, t.dirX));
+    // the pellet directions span the cone (~14° ≈ 0.24 rad), not all identical.
+    expect(Math.max(...headings) - Math.min(...headings)).toBeGreaterThan(0.15);
+
+    s.fire(0, 1, 0, 1, 0); // default single pellet
+    expect(s.tracerPulses.length).toBe(1);
+    expect(s.tracerPulses[0]!.dirX).toBeCloseTo(1);
+  });
+
+  it('caps the fan at MAX_TRACERS so a huge pellet count never overruns the view pool', () => {
+    const s = new CombatFeedbackSystem(settings);
+    s.fire(0, 1, 0, 1, 0, undefined, 999, 30);
+    expect(s.tracerPulses.length).toBeLessThanOrEqual(12);
+    expect(s.tracerPulses.length).toBeGreaterThan(1);
+  });
+});

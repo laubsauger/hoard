@@ -102,7 +102,10 @@ export function registerInput(args: RegisterInputArgs): () => void {
     bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
     // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
     // never draws through a wall on a miss into structure (V49/V53/B20).
-    scene.fireFeedback(dx, dz, shot.stopDistanceMeters); // B7: muzzle flash + tracer + report on fire
+    // B7 / T139: muzzle flash + a tracer FAN (one trail per pellet across the equipped weapon's spread — a
+    // shotgun draws a visible cone, a pistol a single trail) + report on fire.
+    const scatter = runtime.currentWeaponScatter();
+    scene.fireFeedback(dx, dz, shot.stopDistanceMeters, scatter.pellets, scatter.spreadDegrees);
     // T80/T81 (V57): DISTINCT surface response, branched off the authoritative ShotResult.
     //   hit === true  → a zombie was struck → blood already fires (bloodView); add a WOUND mark at the
     //                   struck body point. NO wall spark.

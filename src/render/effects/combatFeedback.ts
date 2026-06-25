@@ -197,6 +197,9 @@ export function resolveCombatFeedbackSettings(tier: QualityTier): CombatFeedback
   };
 }
 
+/** T139: max tracers drawn for one blast (a shotgun pellet fan) — bounds the view's tracer/spark mesh pool. */
+const MAX_TRACERS = 12;
+
 /** A timed one-shot effect (muzzle flash / tracer). Lives until age reaches ttl. */
 interface Pulse {
   x: number;
@@ -233,7 +236,8 @@ export class CombatFeedbackSystem {
   readonly gore: GoreSystem;
   private readonly settings: CombatFeedbackSettings;
   private muzzle: Pulse | null = null;
-  private tracer: Pulse | null = null;
+  /** T139: a FAN of tracers — one per pellet for a shotgun blast, a single centre tracer for one-shot weapons. */
+  private tracers: Pulse[] = [];
   private pending: { energy: number; dirX: number; dirZ: number; region: AnatomyRegion } | null = null;
   private lastImpact: { x: number; y: number; z: number } | null = null;
 
@@ -251,7 +255,7 @@ export class CombatFeedbackSystem {
    * when supplied; otherwise it defaults to the clean-miss max range and may still be refined by an
    * impact-coincident bloodSpray during ingest.
    */
-  fire(x: number, y: number, z: number, dirX: number, dirZ: number, stopDistanceMeters?: number): void {
+  fire(x: number, y: number, z: number, dirX: number, dirZ: number, stopDistanceMeters?: number, pellets = 1, spreadDegrees = 0): void {
     const len = Math.hypot(dirX, dirZ) || 1;
     const nx = dirX / len;
     const nz = dirZ / len;
@@ -262,7 +266,19 @@ export class CombatFeedbackSystem {
     const explicit = stopDistanceMeters !== undefined && Number.isFinite(stopDistanceMeters) && stopDistanceMeters > 0;
     const stop = explicit ? Math.min(stopDistanceMeters, range) : range;
     this.muzzle = { x: ox, y, z: oz, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.muzzleFlashSeconds, stopDistance: stop, stopExplicit: explicit };
-    this.tracer = { x: ox, y, z: oz, dirX: nx, dirZ: nz, age: 0, ttl: this.settings.tracerSeconds, stopDistance: stop, stopExplicit: explicit };
+    // T139: emit one tracer PER PELLET, fanned symmetrically across the weapon's spread (mirrors the sim's pellet
+    // pattern, hitPath.ts) — a shotgun draws a visible cone of 8 trails, a single-pellet weapon one centre trail.
+    const n = Math.max(1, Math.min(pellets, MAX_TRACERS));
+    const spreadRad = (spreadDegrees * Math.PI) / 180;
+    this.tracers = [];
+    for (let i = 0; i < n; i++) {
+      const angle = n === 1 ? 0 : -spreadRad / 2 + (spreadRad * i) / (n - 1);
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      const px = nx * c - nz * s;
+      const pz = nx * s + nz * c;
+      this.tracers.push({ x: ox, y, z: oz, dirX: px, dirZ: pz, age: 0, ttl: this.settings.tracerSeconds, stopDistance: stop, stopExplicit: explicit });
+    }
   }
 
   /** Consume one frame's drained VisualEvents, feeding the pooled GoreSystem (B7). */
@@ -308,13 +324,15 @@ export class CombatFeedbackSystem {
     }
   }
 
-  /** Terminate the active tracer at a struck-body impact (V49) unless an explicit stop was already supplied. */
+  /** Terminate the active tracer(s) at a struck-body impact (V49) unless an explicit stop was already supplied.
+   *  For a pellet fan, refines every non-explicit tracer toward the impact (they converge on the target). */
   private applyTracerStopFromImpact(x: number, z: number): void {
-    const t = this.tracer;
-    if (!t || t.stopExplicit) return;
-    const proj = (x - t.x) * t.dirX + (z - t.z) * t.dirZ; // distance along the aim toward the impact
-    if (proj <= 0) return; // behind the muzzle — not this shot.
-    t.stopDistance = Math.min(proj, this.settings.tracerRangeMeters);
+    for (const t of this.tracers) {
+      if (t.stopExplicit) continue;
+      const proj = (x - t.x) * t.dirX + (z - t.z) * t.dirZ; // distance along the aim toward the impact
+      if (proj <= 0) continue; // behind the muzzle — not this shot.
+      t.stopDistance = Math.min(proj, this.settings.tracerRangeMeters);
+    }
   }
 
   /** Advance timed pulses + age the gore pools, recycling expired records (B7). */
@@ -324,9 +342,9 @@ export class CombatFeedbackSystem {
       this.muzzle.age += dtSeconds;
       if (this.muzzle.age >= this.muzzle.ttl) this.muzzle = null;
     }
-    if (this.tracer) {
-      this.tracer.age += dtSeconds;
-      if (this.tracer.age >= this.tracer.ttl) this.tracer = null;
+    if (this.tracers.length > 0) {
+      for (const t of this.tracers) t.age += dtSeconds;
+      if (this.tracers[0]!.age >= this.tracers[0]!.ttl) this.tracers = []; // all share the same ttl → clear together
     }
     this.gore.update(dtSeconds, this.settings.sparkLifetimeSeconds, this.settings.stainLifetimeSeconds);
   }
@@ -336,21 +354,27 @@ export class CombatFeedbackSystem {
     return this.muzzle ? Math.max(0, 1 - this.muzzle.age / this.muzzle.ttl) : 0;
   }
 
-  /** Tracer opacity 0..1 (linear fade over its ttl), or 0 if inactive. */
+  /** Tracer opacity 0..1 (linear fade over its ttl), or 0 if inactive. Reads the CENTRE/first tracer. */
   tracerAlpha01(): number {
-    return this.tracer ? Math.max(0, 1 - this.tracer.age / this.tracer.ttl) : 0;
+    const t = this.tracers[0];
+    return t ? Math.max(0, 1 - t.age / t.ttl) : 0;
   }
 
-  /** Distance from the muzzle at which the active tracer terminates (V49), or 0 if inactive. */
+  /** Distance from the muzzle at which the active (centre) tracer terminates (V49), or 0 if inactive. */
   tracerStopDistance(): number {
-    return this.tracer ? this.tracer.stopDistance : 0;
+    return this.tracers[0]?.stopDistance ?? 0;
+  }
+
+  /** T139: every live tracer (the pellet fan) for the view to draw — one for a single-shot weapon, N for a blast. */
+  get tracerPulses(): readonly Pulse[] {
+    return this.tracers;
   }
 
   get muzzlePulse(): Readonly<Pulse> | null {
     return this.muzzle;
   }
   get tracerPulse(): Readonly<Pulse> | null {
-    return this.tracer;
+    return this.tracers[0] ?? null;
   }
 
   /** Active blood/impact spray records (renderer expands each into billboarded droplets). */
@@ -391,25 +415,34 @@ export class CombatFeedbackSystem {
  * shot's stop distance with an impact-spark bead. Nothing is allocated per shot. sync() mirrors state each frame.
  */
 export class CombatFeedbackView {
-  private readonly tracerMesh: Mesh;
+  // T139: POOLS of tracer + impact-spark meshes (a shotgun draws up to MAX_TRACERS at once); all share one
+  // geo + one material each (so a single per-frame opacity write fades the whole fan together).
+  private readonly tracerMeshes: Mesh[];
+  private readonly tracerMat: MeshBasicMaterial;
+  private readonly impactSparks: Mesh[];
+  private readonly sparkMat: MeshBasicMaterial;
   private readonly muzzleLight: PointLight;
   private readonly muzzleBead: Mesh;
-  private readonly impactSpark: Mesh;
   private readonly settings: CombatFeedbackSettings;
 
   constructor(settings: CombatFeedbackSettings, registry: ResourceRegistry) {
     this.settings = settings;
 
-    // ---- tracer ----
+    // ---- tracer fan (pool) ----
     const tracerGeo = registry.track(new BoxGeometry(1, 0.03, 0.03), 'geometry', 'combat.tracerGeo');
-    const tracerMat = registry.track(
+    this.tracerMat = registry.track(
       new MeshBasicMaterial({ name: 'combat.tracer', color: TRACER_COLOR, transparent: true, opacity: 0, depthWrite: false }),
       'material',
       'combat.tracerMat',
     );
-    this.tracerMesh = new Mesh(tracerGeo, tracerMat);
-    this.tracerMesh.visible = false;
-    this.tracerMesh.renderOrder = 2;
+    this.tracerMeshes = [];
+    for (let i = 0; i < MAX_TRACERS; i++) {
+      const m = new Mesh(tracerGeo, this.tracerMat);
+      m.visible = false;
+      m.renderOrder = 2;
+      m.frustumCulled = false;
+      this.tracerMeshes.push(m);
+    }
 
     // ---- muzzle flash ----
     this.muzzleLight = new PointLight(MUZZLE_COLOR, 0, settings.tracerRangeMeters * 0.5);
@@ -427,21 +460,26 @@ export class CombatFeedbackView {
     this.muzzleBead.visible = false;
     this.muzzleBead.renderOrder = 2;
 
-    // ---- impact spark at the tracer stop point (V49) ----
+    // ---- impact sparks at each pellet's stop point (V49 / T139 pool) ----
     const sparkGeo = registry.track(new PlaneGeometry(0.35, 0.35), 'geometry', 'combat.impactSparkGeo');
-    const sparkMat = registry.track(
+    this.sparkMat = registry.track(
       new MeshBasicMaterial({ name: 'combat.impactSpark', color: SPARK_COLOR, transparent: true, opacity: 0, depthWrite: false }),
       'material',
       'combat.impactSparkMat',
     );
-    this.impactSpark = new Mesh(sparkGeo, sparkMat);
-    this.impactSpark.visible = false;
-    this.impactSpark.renderOrder = 3;
+    this.impactSparks = [];
+    for (let i = 0; i < MAX_TRACERS; i++) {
+      const m = new Mesh(sparkGeo, this.sparkMat);
+      m.visible = false;
+      m.renderOrder = 3;
+      m.frustumCulled = false;
+      this.impactSparks.push(m);
+    }
   }
 
   /** Add the feedback objects to the scene graph (parent owns scene-graph membership, registry owns disposal). */
   attachTo(parent: Object3D): void {
-    parent.add(this.tracerMesh, this.muzzleLight, this.muzzleBead, this.impactSpark);
+    parent.add(this.muzzleLight, this.muzzleBead, ...this.tracerMeshes, ...this.impactSparks);
   }
 
   /** Mirror the pure system's current state onto the GPU objects (B7). `reduceFlashes` suppresses the
@@ -469,23 +507,28 @@ export class CombatFeedbackView {
       this.muzzleBead.visible = false;
     }
 
-    // ---- tracer: stretch the reused box from the muzzle to the shot's stop distance only (V49) ----
-    const t = system.tracerPulse;
-    const alpha = system.tracerAlpha01();
-    if (t && alpha > 0) {
-      const stop = system.tracerStopDistance();
-      this.tracerMesh.position.set(t.x + t.dirX * stop * 0.5, t.y, t.z + t.dirZ * stop * 0.5);
-      this.tracerMesh.scale.set(Math.max(0.001, stop), 1, 1);
-      this.tracerMesh.rotation.set(0, Math.atan2(-t.dirZ, t.dirX), 0);
-      (this.tracerMesh.material as MeshBasicMaterial).opacity = alpha;
-      this.tracerMesh.visible = true;
-      // impact spark marks where the shot actually stopped.
-      this.impactSpark.position.set(t.x + t.dirX * stop, t.y, t.z + t.dirZ * stop);
-      (this.impactSpark.material as MeshBasicMaterial).opacity = alpha;
-      this.impactSpark.visible = true;
-    } else {
-      this.tracerMesh.visible = false;
-      this.impactSpark.visible = false;
+    // ---- tracer FAN: stretch one reused box per pellet from the muzzle to its own stop distance (V49/T139) ----
+    const pulses = system.tracerPulses;
+    const alpha = system.tracerAlpha01(); // shared fade (all pellets share the tracer ttl)
+    for (let i = 0; i < this.tracerMeshes.length; i++) {
+      const t = pulses[i];
+      const mesh = this.tracerMeshes[i]!;
+      const spark = this.impactSparks[i]!;
+      if (t && alpha > 0) {
+        const stop = t.stopDistance;
+        mesh.position.set(t.x + t.dirX * stop * 0.5, t.y, t.z + t.dirZ * stop * 0.5);
+        mesh.scale.set(Math.max(0.001, stop), 1, 1);
+        mesh.rotation.set(0, Math.atan2(-t.dirZ, t.dirX), 0);
+        mesh.visible = true;
+        spark.position.set(t.x + t.dirX * stop, t.y, t.z + t.dirZ * stop);
+        spark.visible = true;
+      } else {
+        mesh.visible = false;
+        spark.visible = false;
+      }
     }
+    // Shared materials → one opacity write fades the whole fan + its sparks together.
+    this.tracerMat.opacity = alpha;
+    this.sparkMat.opacity = alpha;
   }
 }

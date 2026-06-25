@@ -118,7 +118,10 @@ const FIXTURES: readonly Fixture[] = [
       windows: [],
       exteriorEdges: ['e', 'w'],
     },
-    mustContain: [{ kind: 'shelving', source: 'garage' }],
+    mustContain: [
+      { kind: 'shelving', source: 'garage' },
+      { kind: 'gunCabinet', source: 'gunCabinet' }, // T139: weapons/ammo source placed in garages
+    ],
   },
   {
     type: 'closet',

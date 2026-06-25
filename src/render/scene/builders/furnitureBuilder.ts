@@ -127,6 +127,11 @@ const KIND_PARTS: Record<FurnitureKind, readonly Part[]> = {
   workbench: tableParts(1.6, 0.7, 0.86, C.applianceDark, C.woodDark),
   shelving: [p(1.0, 1.8, 0.5, 0, 0.92, 0, C.metalShelf)],
   washer: [p(0.7, 0.9, 0.7, 0, 0.47, 0, C.applianceWhite)],
+  // T139: a tall steel GUN LOCKER — narrow metal cabinet with a darker door face (the household's firearms/ammo).
+  gunCabinet: [
+    p(0.7, 1.8, 0.5, 0, 0.9, 0, C.steel),
+    p(0.66, 1.6, 0.04, 0, 0.9, 0.26, C.applianceDark), // door face (front +z)
+  ],
   console: [p(1.0, 0.8, 0.35, 0, 0.42, 0, C.woodMid)],
 };
 

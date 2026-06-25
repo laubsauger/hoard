@@ -135,6 +135,7 @@ const FURNITURE_CONTAINER_LABEL: Partial<Record<FurnitureKind, string>> = {
   medicineCabinet: 'Medicine Cabinet',
   shelving: 'Shelving',
   washer: 'Washer',
+  gunCabinet: 'Gun Cabinet',
 };
 const HORDE_NAV_GROUP = 0;
 const ZOMBIE_AGENT_LAYERS = layerMask(CollisionLayer.Movement, CollisionLayer.Projectile, CollisionLayer.Sight);
@@ -587,6 +588,7 @@ export class GameRuntime {
     });
     const playerRef: ContainerRef = { entity: this.playerEntity, container: 'player' };
     this.inventory.addContainer(playerRef, { type: 'backpack' });
+    this.basePlayerCapacityKg = this.inventory.capacityOf(playerRef); // T139: base carry cap, before any worn pack
     this.namedContainers.set('player', playerRef);
     // T108/T138: starter loadout — a knife (melee) + a PISTOL (so the equipped pistol is a weapon the player
     // actually CARRIES, and weapon-swap has two classes to cycle out of the box), a hammer + planks for window
@@ -638,7 +640,7 @@ export class GameRuntime {
     const out: ContainerView[] = [];
     for (const [name, ref] of this.namedContainers) {
       const slots = this.inventory.contents(ref).map((s) => ({ item: s.item as number, count: s.count }));
-      out.push({ container: name, capacity: 0, weight: this.inventory.containerWeight(ref), slots });
+      out.push({ container: name, capacity: this.inventory.capacityOf(ref), weight: this.inventory.containerWeight(ref), slots });
     }
     return out;
   }
@@ -657,6 +659,37 @@ export class GameRuntime {
     else this.playerSurvival.treatWound(eff.amount);
     this.inventory.take(ref, item as ItemId, 1);
     return true;
+  }
+
+  /** T139: whether a backpack is currently WORN (granting +capacity). Captured base capacity is the no-pack cap. */
+  private equippedBackpack = false;
+  private basePlayerCapacityKg = 0;
+
+  /** Equip a found backpack the player CARRIES → raise carry capacity by backpackCapacityBonusKg. No-op if one is
+   *  already worn or none is held. The pack stays in the inventory (its weight still counts). */
+  equipBackpack(): boolean {
+    if (this.equippedBackpack) return false;
+    const ref: ContainerRef = { entity: this.playerEntity, container: 'player' };
+    if (this.inventory.count(ref, ITEM.Backpack as ItemId) < 1) return false;
+    this.equippedBackpack = true;
+    this.inventory.setCapacity(ref, this.basePlayerCapacityKg + this.inventory.settings.backpackCapacityBonusKg);
+    return true;
+  }
+
+  /** Remove the worn backpack → restore base capacity. REFUSED while carried weight exceeds the base (you can't
+   *  take the pack off while it's the only thing keeping you under the cap). */
+  unequipBackpack(): boolean {
+    if (!this.equippedBackpack) return false;
+    const ref: ContainerRef = { entity: this.playerEntity, container: 'player' };
+    if (this.inventory.containerWeight(ref) > this.basePlayerCapacityKg) return false;
+    this.equippedBackpack = false;
+    this.inventory.setCapacity(ref, this.basePlayerCapacityKg);
+    return true;
+  }
+
+  /** True when a backpack is worn (drives the inventory UI equip/remove toggle). */
+  isBackpackEquipped(): boolean {
+    return this.equippedBackpack;
   }
 
   /** Transfer a whole item stack between two named containers (T85). Returns true on success. */
@@ -1574,6 +1607,13 @@ export class GameRuntime {
   }
   currentWeaponId(): string {
     return this.combat.currentWeaponId();
+  }
+
+  /** T139: the equipped weapon's pellet fan — drives the render tracer SCATTER (one trail per pellet across the
+   *  spread, so a shotgun draws a visible cone, a single-shot weapon one trail). */
+  currentWeaponScatter(): { pellets: number; spreadDegrees: number } {
+    const w = this.combat.currentWeapon();
+    return { pellets: w.pellets, spreadDegrees: w.spreadDegrees };
   }
 
   /**

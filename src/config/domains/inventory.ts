@@ -11,6 +11,11 @@ export const inventoryConfig = registerDomain('inventory', {
     doc: 'Default weight capacity (kg) of a container when its definition omits one.',
     default: 15, min: 0, max: 5000,
   }),
+  backpackCapacityBonusKg: num({
+    owner: 'inventory', unit: 'count',
+    doc: 'Extra carry capacity (kg) a worn backpack adds to the player container (T139). Equipping a found pack raises capacity by this; removing it restores the base (refused while overloaded).',
+    default: 20, min: 0, max: 5000,
+  }),
   quickAccessSlotCount: num({
     owner: 'inventory', unit: 'count',
     doc: 'Number of quick-access slots (fast retrieval) on the player.',

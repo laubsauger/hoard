@@ -139,3 +139,29 @@ describe('V16 melee damage ONLY in the active attack-volume window', () => {
     expect(out.shots.length).toBe(2); // the two in front, not the one behind
   });
 });
+
+describe('shotgun scatter (T138 / V50)', () => {
+  it('a shotgun blast fans pellets that strike off-axis bodies a single pistol shot misses', () => {
+    // 3 zombies at 12 m down +X: dead-centre + two at the pellet-cone edge (~1.47 m off-axis — beyond the 0.5 m
+    // hit radius of a single centre ray, but inside the 14° shotgun spread).
+    const place = (h: ReturnType<typeof harness>) => [spawn(h, 12, 0), spawn(h, 12, -1.47), spawn(h, 12, 1.47)];
+    const damaged = (h: ReturnType<typeof harness>, slots: number[]) => slots.filter((s) => h.zombies.getHealth(s) < 100).length;
+
+    // PISTOL — one ray: only the centre body is within the 0.5 m hit radius.
+    const hp = harness();
+    hp.combat.setWeapon('pistol');
+    const zp = place(hp);
+    hp.combat.fire(ORIGIN, 1, 0, 'torsoUpper');
+    const pistolHits = damaged(hp, zp);
+    expect(pistolHits).toBeLessThanOrEqual(1);
+
+    // SHOTGUN — 8-pellet cone: the fan also strikes the off-axis bodies → strictly more than the pistol.
+    const hs = harness();
+    hs.combat.setWeapon('shotgun');
+    const zs = place(hs);
+    hs.combat.fire(ORIGIN, 1, 0, 'torsoUpper');
+    const shotgunHits = damaged(hs, zs);
+    expect(shotgunHits).toBeGreaterThanOrEqual(2);
+    expect(shotgunHits).toBeGreaterThan(pistolHits);
+  });
+});

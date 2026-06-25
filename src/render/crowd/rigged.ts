@@ -58,10 +58,25 @@ import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { FieldViews } from '../../game/core/contracts/soa';
 import type { Corpse } from '../../game/zombie';
 import type { Disposable, ResourceKind } from '../engine/resources';
+import type { QualityTier } from '../../config/types';
+import { resolve } from '../../config/spec';
+import { renderingConfig } from '../../config/domains/rendering';
 import type { CrowdSettings } from './crowd';
 import { variationHash01, variationScale, variationSeed } from './packing';
 import { visionCullFade, type VisionCull } from './visionCull';
-import { corpseTopple, CORPSE_LIE_HEIGHT, CORPSE_PRONE_PITCH } from '../corpse/corpseTopple';
+import {
+  Ragdoll,
+  buildRagdollSpec,
+  mulberry32,
+  RAGDOLL_PARTICLE_BONES,
+  RAGDOLL_PARTICLE_COUNT,
+  RAGDOLL_SEGMENT_BONES,
+  RAGDOLL_LINKS,
+  RAGDOLL_CONES,
+  type RagdollConfig,
+  type RagdollSpec,
+  type RagdollSegment,
+} from '../corpse/ragdoll';
 import {
   ARCHETYPE_KEYS,
   CLIP_MAPS,
@@ -117,9 +132,29 @@ const CORPSE_FROZEN_CLIP = 'idle' as const;
 const CORPSE_DARKEN = 0.78;
 /** Salt for the per-corpse variation seed (stable per dead entity, deterministic V26 — not the live slot channel). */
 const CORPSE_SEED_SALT = 0x6c07;
+/** Salt for the per-corpse RAGDOLL impulse-jitter PRNG (T134 — decorrelated from the colour/scale seed channel). */
+const RAGDOLL_SEED_SALT = 0x9e37;
 
 /** Registry track signature handed in from BlockScene (V24). */
 export type TrackFn = (resource: Disposable, kind: ResourceKind, label: string) => void;
+
+/** Resolve the per-limb death-ragdoll tunables for a tier (V4 — every constant the sim reads is typed config). */
+export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
+  return {
+    gravity: resolve(renderingConfig.ragdollGravityMetersPerSec2, tier),
+    linearDamping: resolve(renderingConfig.ragdollLinearDamping, tier),
+    angularDamping: resolve(renderingConfig.ragdollAngularDamping, tier),
+    groundRestitution: resolve(renderingConfig.ragdollGroundRestitution, tier),
+    groundFriction: resolve(renderingConfig.ragdollGroundFriction, tier),
+    constraintIterations: resolve(renderingConfig.ragdollConstraintIterations, tier),
+    substeps: resolve(renderingConfig.ragdollSubsteps, tier),
+    impulseScale: resolve(renderingConfig.ragdollImpulseScale, tier),
+    torqueScale: resolve(renderingConfig.ragdollTorqueScale, tier),
+    settleEnergyThreshold: resolve(renderingConfig.ragdollSettleEnergyThreshold, tier),
+    jointConeRadians: resolve(renderingConfig.ragdollJointConeRadians, tier),
+    groundRadiusMeters: resolve(renderingConfig.ragdollGroundRadiusMeters, tier),
+  };
+}
 
 function requireView<T>(views: FieldViews, name: string): T {
   const v = views[name];
@@ -144,11 +179,18 @@ interface ArchetypeSlot {
   // skinning), drawn from the corpse POOL (frozen frame + impact topple). Separate geometry/attrs so it never
   // double-draws the live crowd. ----
   readonly corpseMesh: InstancedMesh;
-  /** T133 — INTERLEAVED per-corpse data (one slot, 2 attributes): iPose@0 [px,py,pz,heading] · iCorpse@4
-   *  [scale, topplePitch, fallYaw, variationSeed]. */
+  /** T133/T134 — INTERLEAVED per-corpse data (one slot, 2 attributes): iPose@0 [px,py,pz,heading] · iCorpse@4
+   *  [scale, liveBoneRow, 0, variationSeed]. `liveBoneRow` indexes this archetype's LIVE per-corpse bone texture. */
   readonly corpseArr: Float32Array;
   readonly corpseBuf: InstancedInterleavedBuffer;
   corpseLive: number;
+  // ---- T134 RAGDOLL: per-archetype immutable ragdoll definition + a LIVE per-corpse bone-matrix texture the
+  // corpse shader skins from (rows = corpse slots, cols = boneCount×4 texels = the 4 mat4 columns). The ragdoll
+  // sim writes each live corpse's 24 bone matrices into its row every frame (replacing the rigid whole-body topple). ----
+  readonly ragSpec: RagdollSpec;
+  readonly boneCount: number;
+  readonly liveBoneTex: DataTexture;
+  readonly liveBoneData: Float32Array;
 }
 
 /**
@@ -156,7 +198,7 @@ interface ArchetypeSlot {
  * material. GPU-device-free (AnimationMixer + Skeleton.update are CPU); only the texture/buffer UPLOAD needs the
  * device, on first render. Returns everything the RiggedCrowd needs to pack + draw that archetype.
  */
-function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCapacity: number, settings: CrowdSettings, track: TrackFn): ArchetypeSlot {
+function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCapacity: number, settings: CrowdSettings, ragdollConfig: RagdollConfig, track: TrackFn): ArchetypeSlot {
   gltf.scene.updateMatrixWorld(true);
 
   let skinned: SkinnedMesh | null = null;
@@ -184,12 +226,24 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
   const box = new Box3().setFromObject(gltf.scene);
   const size = box.getSize(new Vector3());
   const fit = size.y > 0 ? RIGGED_HEIGHT_METERS / size.y : 1;
-  const leftConst = new Matrix4()
+  // F = the GEOMETRIC fit-to-output transform (no bind sandwich): maps a GLB-scene point to the output-local
+  // space the corpse renders in (meters, feet at y=0). T134 uses it to seed the ragdoll joint particles where the
+  // bones visually are at the frozen idle pose. leftConst = F · bindMatrixInverse (the skinning fold).
+  const fitWorld = new Matrix4()
     .makeTranslation(0, -box.min.y * fit, 0)
     .multiply(new Matrix4().makeScale(fit, fit, fit))
-    .multiply(mesh.matrixWorld)
-    .multiply(mesh.bindMatrixInverse);
+    .multiply(mesh.matrixWorld);
+  const leftConst = new Matrix4().copy(fitWorld).multiply(mesh.bindMatrixInverse);
   const bindMatrix = mesh.bindMatrix;
+
+  // T134 — seed-pose capture: the LIVE corpse ragdoll starts from the FROZEN idle pose. Capture each ragdoll
+  // joint particle's output-local position at idle frame 0 (filled in the bake loop below) + the bone name→index
+  // map for the segment→bone resolve.
+  const boneByName = new Map<string, number>();
+  for (let b = 0; b < boneCount; b++) boneByName.set(skeleton.bones[b]!.name, b);
+  const ragSeed = new Float32Array(RAGDOLL_PARTICLE_COUNT * 3);
+  const frozenClipName = CLIP_MAPS[key][CORPSE_FROZEN_CLIP];
+  const _seedPos = new Vector3();
 
   // ---- Bake every needed clip at BAKE_FPS into the bone texture (rows = global frame index across clips). ----
   const clipNames = bakeClipNames(key);
@@ -254,6 +308,17 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
         boneMat.fromArray(boneMatrices, b * 16);
         M.copy(leftConstFrame).multiply(boneMat).multiply(bindMatrix);
         data.set(M.elements, rowBase + b * TEXELS_PER_BONE * 4); // 16 floats = 4 RGBA texels = 4 columns
+      }
+      // T134 — capture the ragdoll's SEED joint positions at the frozen idle frame 0 (output-local = F · boneWorld).
+      if (name === frozenClipName && f === 0) {
+        for (let p = 0; p < RAGDOLL_PARTICLE_COUNT; p++) {
+          const bi = boneByName.get(RAGDOLL_PARTICLE_BONES[p]!);
+          if (bi === undefined) throw new Error(`rigged '${key}' missing ragdoll bone '${RAGDOLL_PARTICLE_BONES[p]}'`);
+          _seedPos.setFromMatrixPosition(skeleton.bones[bi]!.matrixWorld).applyMatrix4(fitWorld);
+          ragSeed[p * 3] = _seedPos.x;
+          ragSeed[p * 3 + 1] = _seedPos.y;
+          ragSeed[p * 3 + 2] = _seedPos.z;
+        }
       }
     }
     // Close the cycle (last frame → first) so a looping stride counts its full ground distance.
@@ -386,12 +451,46 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
   inst.name = `crowd.rigged.${key}`;
   track(inst as unknown as Disposable, 'buffer', `crowd.rigged.${key}.mesh`);
 
-  // ---- T131/V99 CORPSE layer: the SAME rigged mesh, FROZEN at a neutral standing frame + toppled prone along the
-  // killing shot. Reuses the baked bone texture + albedo; a CLONED geometry carries its own per-corpse instance
-  // attributes so the corpse pool never double-draws the live crowd. The frozen clip row is a per-archetype const
-  // (every corpse samples the same neutral pose), so the shader needs no per-instance frame attribute. ----
-  const frozenRow = table.entries.get(CLIP_MAPS[key][CORPSE_FROZEN_CLIP])!.startRow;
-  const corpseSlot = buildCorpseLayer(key, geometry, boneTex, albedo, frozenRow, corpseCapacity, denom, spread, track);
+  // ---- T134 RAGDOLL: build the per-archetype ragdoll spec from the captured seed pose + the baked FROZEN idle
+  // bone matrices (M0, read straight out of `data` so the rest pose is EXACTLY the old frozen corpse pose), and a
+  // LIVE per-corpse bone-matrix texture the corpse shader skins from. ----
+  const frozenRow = table.entries.get(frozenClipName)!.startRow;
+  const m0 = data.slice(frozenRow * width * 4, frozenRow * width * 4 + boneCount * 16); // one row = 24 bones × 16
+  const segments: RagdollSegment[] = RAGDOLL_SEGMENT_BONES.map((s) => ({
+    anchor: s.anchor,
+    dirFrom: s.dirFrom,
+    dirTo: s.dirTo,
+    bones: s.bones.map((bn) => {
+      const bi = boneByName.get(bn);
+      if (bi === undefined) throw new Error(`rigged '${key}' ragdoll segment missing bone '${bn}'`);
+      return bi;
+    }),
+  }));
+  const ragSpec = buildRagdollSpec(
+    { particleCount: RAGDOLL_PARTICLE_COUNT, boneCount, seed: ragSeed, m0, links: RAGDOLL_LINKS, coneTriples: RAGDOLL_CONES, segments },
+    ragdollConfig.jointConeRadians,
+  );
+
+  // LIVE per-corpse bone texture: rows = corpse slots, cols = boneCount×4 texels (the 4 mat4 columns), RGBA float.
+  // Seeded to the frozen idle pose (M0 repeated per row) so a corpse drawn before its first ragdoll step still
+  // reads as the standing zombie. Re-uploaded each frame (the ragdoll writes each live corpse's row). V24-tracked.
+  const liveWidth = boneCount * TEXELS_PER_BONE;
+  const cap = Math.max(1, corpseCapacity);
+  const liveBoneData = new Float32Array(liveWidth * cap * 4);
+  for (let row = 0; row < cap; row++) liveBoneData.set(m0, row * boneCount * 16);
+  const liveBoneTex = new DataTexture(liveBoneData, liveWidth, cap, RGBAFormat, FloatType);
+  liveBoneTex.magFilter = NearestFilter;
+  liveBoneTex.minFilter = NearestFilter;
+  liveBoneTex.generateMipmaps = false;
+  liveBoneTex.flipY = false;
+  liveBoneTex.name = `corpse.rigged.${key}.liveBones`;
+  liveBoneTex.needsUpdate = true;
+  track(liveBoneTex, 'texture', `corpse.rigged.${key}.liveBoneTex`);
+
+  // ---- T134 CORPSE layer: the SAME rigged mesh, skinned from the LIVE per-corpse ragdoll texture (no whole-body
+  // topple). A CLONED geometry carries its own per-corpse instance attributes so the corpse pool never double-draws
+  // the live crowd. The per-corpse `liveBoneRow` attribute (iCorpse.y) selects the corpse's row in the live texture. ----
+  const corpseSlot = buildCorpseLayer(key, geometry, liveBoneTex, albedo, corpseCapacity, denom, spread, track);
 
   return {
     key,
@@ -401,27 +500,32 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
     instArr,
     instBuf,
     live: 0,
+    ragSpec,
+    boneCount,
+    liveBoneTex,
+    liveBoneData,
     ...corpseSlot,
   };
 }
 
 /**
- * T131/V99 — build one archetype's CORPSE InstancedMesh: a frozen-frame, impact-toppled body. Reuses the live
- * crowd's baked `boneTex` + `albedo` (same zombie, scene-lit), on a CLONED geometry that SHARES the vertex data
- * (position/normal/uv/skinIndex/skinWeight) but carries its OWN per-corpse instance attributes — so the corpse
- * pool draws independently of the live crowd (no double-draw). The skinning math mirrors the live `positionNode`
- * but, after the facing yaw, applies the per-instance impact TOPPLE (Rodrigues about a horizontal axis through the
- * feet) — front shot tips onto the back, side topples sideways. Per-corpse data is INTERLEAVED into one instanced
- * buffer (T133), so this is 6/8 vertex-buffer slots (5 mesh + 1 instance). Every GPU resource is registry-tracked (V24).
+ * T134 — build one archetype's CORPSE InstancedMesh: a per-limb RAGDOLL body skinned from a LIVE per-corpse
+ * bone-matrix texture (`liveBoneTex`), reusing the live crowd's `albedo` (same zombie, scene-lit), on a CLONED
+ * geometry that SHARES the vertex data (position/normal/uv/skinIndex/skinWeight) but carries its OWN per-corpse
+ * instance attributes — so the corpse pool draws independently of the live crowd (no double-draw). The skinning
+ * mirrors the live `positionNode` (the `skinAt` weighted sum of 4 bones) but reads `textureLoad` from the LIVE
+ * texture at the corpse's ROW (iCorpse.y) instead of the baked clip texture, and applies NO whole-body topple — the
+ * ragdoll already places the bones in output-local space; the shader only re-applies the per-instance facing yaw +
+ * scale + world translate (exactly as the live crowd does). Per-corpse data is INTERLEAVED into one instanced buffer
+ * (T133), so this is 6/8 vertex-buffer slots (5 mesh + 1 instance). Every GPU resource is registry-tracked (V24).
  */
 type CorpseLayer = Pick<ArchetypeSlot, 'corpseMesh' | 'corpseArr' | 'corpseBuf' | 'corpseLive'>;
 
 function buildCorpseLayer(
   key: ArchetypeKey,
   liveGeo: BufferGeometry,
-  boneTex: Texture,
+  liveBoneTex: Texture,
   albedo: Texture | null,
-  frozenRow: number,
   capacity: number,
   denom: number,
   spread: number,
@@ -430,13 +534,13 @@ function buildCorpseLayer(
   const cap = Math.max(1, capacity);
 
   // CLONE the geometry (own GPU buffers → safe independent disposal) then strip the live instanced attributes and
-  // install the corpse's own pose + topple attributes. The base vertex attributes (position/normal/uv/skin*) ride
-  // along the clone, so the corpse renders the identical mesh.
+  // install the corpse's own pose + ragdoll-row attributes. The base vertex attributes (position/normal/uv/skin*)
+  // ride along the clone, so the corpse renders the identical mesh.
   const geo = liveGeo.clone();
   if (geo.getAttribute('iPose')) geo.deleteAttribute('iPose');
   if (geo.getAttribute('iAnim')) geo.deleteAttribute('iAnim');
-  if (geo.getAttribute('iBlend')) geo.deleteAttribute('iBlend'); // T132 live-only attr — corpse pose is static
-  // T133 — interleave the corpse's pose + topple into ONE instanced buffer (iPose@0, iCorpse@4): 1 slot, 2 attrs.
+  if (geo.getAttribute('iBlend')) geo.deleteAttribute('iBlend'); // T132 live-only attr — corpse pose is ragdoll-driven
+  // T133 — interleave the corpse's pose + ragdoll-row into ONE instanced buffer (iPose@0, iCorpse@4): 1 slot, 2 attrs.
   const corpseArr = new Float32Array(cap * FLOATS_PER_CORPSE_INSTANCE);
   const corpseBuf = new InstancedInterleavedBuffer(corpseArr, FLOATS_PER_CORPSE_INSTANCE);
   corpseBuf.setUsage(DynamicDrawUsage);
@@ -447,23 +551,22 @@ function buildCorpseLayer(
   const material = new MeshStandardNodeMaterial({ name: `corpse.rigged.${key}` });
   material.metalness = 0;
   material.roughness = 0.92; // a settled body is matte
-  const halfPi = CORPSE_PRONE_PITCH; // = π/2 (the standing→facing yaw offset AND the prone topple)
-  const liftPerRad = CORPSE_LIE_HEIGHT / CORPSE_PRONE_PITCH; // lift = LIE_HEIGHT·(pitch/(π/2)) (derived from pitch)
+  const halfPi = Math.PI / 2; // the standing→facing yaw offset (SAME convention as the live crowd)
 
   material.positionNode = Fn(() => {
     const skinIndex = attribute<'uvec4'>('skinIndex', 'uvec4');
     const skinWeight = attribute<'vec4'>('skinWeight', 'vec4');
     const pose = attribute<'vec4'>('iPose', 'vec4'); // [posX, posY, posZ, heading]
-    const corpse = attribute<'vec4'>('iCorpse', 'vec4'); // [scale, topplePitch, fallYaw, seed]
-    const row = int(frozenRow); // CONSTANT neutral frame — every corpse samples the same standing pose
+    const corpse = attribute<'vec4'>('iCorpse', 'vec4'); // [scale, liveBoneRow, 0, seed]
+    const row = int(corpse.y); // this corpse's ROW in the LIVE per-corpse ragdoll bone texture
 
     const boneColumns = (boneIdx: ReturnType<typeof int>) => {
       const c = boneIdx.mul(TEXELS_PER_BONE);
       return mat4(
-        textureLoad(boneTex, ivec2(c, row)),
-        textureLoad(boneTex, ivec2(c.add(1), row)),
-        textureLoad(boneTex, ivec2(c.add(2), row)),
-        textureLoad(boneTex, ivec2(c.add(3), row)),
+        textureLoad(liveBoneTex, ivec2(c, row)),
+        textureLoad(liveBoneTex, ivec2(c.add(1), row)),
+        textureLoad(liveBoneTex, ivec2(c.add(2), row)),
+        textureLoad(liveBoneTex, ivec2(c.add(3), row)),
       );
     };
     const m0 = boneColumns(int(skinIndex.x));
@@ -486,45 +589,25 @@ function buildCorpseLayer(
       .add(m2.mul(n4).xyz.mul(skinWeight.z))
       .add(m3.mul(n4).xyz.mul(skinWeight.w));
 
-    // Topple basis: facing yaw (heading−90°, SAME convention as the live crowd) THEN a tip about the horizontal
-    // axis a=(sinψ, 0, −cosψ) by `pitch` (ψ = fallYaw). Rodrigues for a horizontal axis (aᵧ=0), pivoting at the
-    // feet (origin), so the body tips over in the world fall direction. lift rises with pitch so it rests flat.
+    // Instance transform — SAME as the live crowd: uniform scale → facing yaw (heading−90°) → world translate. The
+    // ragdoll already placed the bones in output-local space (feet near y=0, tumbled in the LOCAL shot direction),
+    // so there is NO whole-body topple here; the facing yaw maps the local tumble back into the world push direction.
     const scale = corpse.x;
-    const pitch = corpse.y;
-    const psi = corpse.z;
     const facing = pose.w.sub(halfPi);
     const cf = cos(facing);
     const sf = sin(facing);
-    const ct = cos(pitch);
-    const st = sin(pitch);
-    const ax = sin(psi);
-    const az = cos(psi).mul(-1);
-    const omct = float(1).sub(ct);
-
-    // --- POSITION: scale → facing yaw → topple (Rodrigues) → translate + lift ---
     const sx = local.x.mul(scale);
     const sy = local.y.mul(scale);
     const sz = local.z.mul(scale);
-    const fx = cf.mul(sx).sub(sf.mul(sz));
-    const fy = sy;
-    const fz = sf.mul(sx).add(cf.mul(sz));
-    const adot = ax.mul(fx).add(az.mul(fz));
-    const tx = fx.mul(ct).add(az.mul(fy).mul(st).mul(-1)).add(ax.mul(adot).mul(omct));
-    const ty = fy.mul(ct).add(az.mul(fx).sub(ax.mul(fz)).mul(st));
-    const tz = fz.mul(ct).add(ax.mul(fy).mul(st)).add(az.mul(adot).mul(omct));
-    const lift = pitch.mul(liftPerRad);
+    const wx = cf.mul(sx).sub(sf.mul(sz)).add(pose.x);
+    const wy = sy.add(pose.y);
+    const wz = sf.mul(sx).add(cf.mul(sz)).add(pose.z);
 
-    // --- NORMAL: same facing yaw + topple (no scale / translate), then renormalize ---
-    const fnx = cf.mul(nrm.x).sub(sf.mul(nrm.z));
-    const fny = nrm.y;
-    const fnz = sf.mul(nrm.x).add(cf.mul(nrm.z));
-    const adotn = ax.mul(fnx).add(az.mul(fnz));
-    const nx = fnx.mul(ct).add(az.mul(fny).mul(st).mul(-1)).add(ax.mul(adotn).mul(omct));
-    const ny = fny.mul(ct).add(az.mul(fnx).sub(ax.mul(fnz)).mul(st));
-    const nz = fnz.mul(ct).add(ax.mul(fny).mul(st)).add(az.mul(adotn).mul(omct));
-    normalLocal.assign(vec3(nx, ny, nz).normalize());
+    const nx = cf.mul(nrm.x).sub(sf.mul(nrm.z));
+    const nz = sf.mul(nrm.x).add(cf.mul(nrm.z));
+    normalLocal.assign(vec3(nx, nrm.y, nz).normalize());
 
-    return vec3(tx.add(pose.x), ty.add(pose.y).add(lift), tz.add(pose.z));
+    return vec3(wx, wy, wz);
   })();
 
   const baseTint = new Color(RIGGED_FALLBACK_COLOR);
@@ -571,6 +654,14 @@ export class RiggedCrowd {
   private readonly scaleMax: number;
   /** T131/V99 — corpse pool render cap (sim corpse capacity); each archetype's corpse mesh is sized to it. Set at attach. */
   private corpseCapacity = 0;
+  /** T134 — per-limb death-ragdoll tunables (resolved tier-correct by the caller; set at attach). */
+  private ragdollConfig: RagdollConfig | null = null;
+  /** T134 — LIVE ragdolls keyed by dead-entity id (stable across frames as the corpse list re-orders/prunes). */
+  private readonly ragdolls = new Map<number, Ragdoll>();
+  /** T134 — recycled ragdoll instances (same particle/bone dims across archetypes) — no per-death alloc (V24). */
+  private readonly freeRagdolls: Ragdoll[] = [];
+  /** T134 — liveness generation: bumped each `updateCorpses`; ragdolls not seen this gen are freed. */
+  private ragdollGen = 0;
   /** Per-SLOT normalized clip phase (stable identity, seeded so figures are not in lockstep). Lazily sized to SoA count. */
   private slotPhase: Float32Array | null = null;
   /** T132 state-crossfade per-SLOT bookkeeping (lazily sized with slotPhase). `slotClipId` is the current clip's
@@ -601,10 +692,11 @@ export class RiggedCrowd {
    * both. `corpseCapacity` (the sim corpse pool cap, resolved tier-correct by the caller) sizes each archetype's
    * corpse mesh. Tracks every GPU resource (V24).
    */
-  attach(key: ArchetypeKey, gltf: GLTF, track: TrackFn, corpseCapacity: number = this.budget): void {
+  attach(key: ArchetypeKey, gltf: GLTF, track: TrackFn, corpseCapacity: number, ragdollConfig: RagdollConfig): void {
     if (this.slots.has(key)) return;
     this.corpseCapacity = corpseCapacity;
-    const slot = buildArchetype(key, gltf, this.budget, corpseCapacity, this.settings, track);
+    this.ragdollConfig = ragdollConfig;
+    const slot = buildArchetype(key, gltf, this.budget, corpseCapacity, this.settings, ragdollConfig, track);
     this.slots.set(key, slot);
     this.parent.add(slot.mesh);
     this.parent.add(slot.corpseMesh);
@@ -616,29 +708,52 @@ export class RiggedCrowd {
   }
 
   /**
-   * T131/V99 — mirror the sim CORPSE POOL onto the per-archetype corpse meshes: each dead body renders as its
-   * archetype's rigged mesh FROZEN at a neutral standing frame, then toppled prone along the killing shot's push
-   * direction (`corpseTopple`) over `collapseTicks`, pivoting at the feet. Routes each corpse to its archetype by
+   * T134 — mirror the sim CORPSE POOL onto the per-archetype corpse meshes as PER-LIMB RAGDOLLS: each dead body
+   * goes LIMP and falls under physics from its killing shot (impactDir·force) instead of the rigid whole-body
+   * topple. Each corpse owns a pooled CPU ragdoll keyed by its dead-entity id (stable as the corpse list re-orders
+   * / prunes); a NEW corpse seeds a ragdoll from the frozen idle pose + the shot, every frame steps it by `dt`
+   * (until SETTLED, then it freezes), and writes its 24 live bone matrices into the archetype's LIVE bone texture
+   * at the corpse's row. The shader skins from that row (no topple). Routes each corpse to its archetype by
    * `archetypeKeyForIndex`; size + seed are stable per dead entity (deterministic V26). No-op (returns 0) until
-   * every archetype is loaded — the blob `CorpseField` fallback covers that brief pre-bake window (V95-style, no
-   * gap). Corpses draw at full reveal (no vision cull), so body-anchored gore stays consistent with them (V90 —
-   * a corpse's gore fades by AGE, not reveal). Allocation-free per frame (V24). `nowAbsTick` is the runtime's
-   * absolute tick the corpse `bornTick` was stamped in. Returns the total drawn count.
+   * every archetype is loaded — the blob `CorpseField` fallback covers that brief pre-bake window (no gap). Corpses
+   * draw at full reveal (no vision cull). Allocation-free per frame after warm-up (V24). Returns the drawn count.
    */
-  updateCorpses(corpses: readonly Corpse[], nowAbsTick: number, collapseTicks: number): number {
+  updateCorpses(corpses: readonly Corpse[], dtSeconds: number): number {
     if (!this.isReady) return 0;
+    const cfg = this.ragdollConfig;
+    if (!cfg) throw new Error('rigged corpse ragdoll config not set — attach() must run before updateCorpses');
     const cap = this.corpseCapacity;
     for (const slot of this.slots.values()) slot.corpseLive = 0;
+    const gen = ++this.ragdollGen;
 
     const n = Math.min(corpses.length, cap);
     for (let ci = 0; ci < n; ci++) {
       const c = corpses[ci]!;
       const slot = this.slots.get(archetypeKeyForIndex(c.archetype))!;
       if (slot.corpseLive >= cap) continue;
-      const t = corpseTopple(c.impactDirX, c.impactDirZ, c.impactForce, nowAbsTick - c.bornTick, collapseTicks, c.heading);
+
+      // Get-or-seed this corpse's ragdoll (keyed by stable entity id). A fresh corpse is launched from the killing
+      // shot: rotate the WORLD impact dir into the corpse's LOCAL frame (the shader re-applies the facing yaw), then
+      // seed the impulse + per-corpse jitter from a deterministic PRNG (V26 — same death reproduces the same fall).
+      let rag = this.ragdolls.get(c.entity);
+      if (!rag) {
+        rag = this.freeRagdolls.pop() ?? new Ragdoll(slot.ragSpec);
+        const facing = c.heading - Math.PI / 2;
+        const cf = Math.cos(facing);
+        const sf = Math.sin(facing);
+        const localX = cf * c.impactDirX + sf * c.impactDirZ;
+        const localZ = -sf * c.impactDirX + cf * c.impactDirZ;
+        rag.reset(slot.ragSpec, cfg, localX, localZ, c.impactForce, mulberry32((c.entity >>> 0) ^ RAGDOLL_SEED_SALT));
+        this.ragdolls.set(c.entity, rag);
+      }
+      if (!rag.settled) rag.step(cfg, dtSeconds);
+      rag.gen = gen;
+
       const seed = variationSeed((c.entity >>> 0) ^ CORPSE_SEED_SALT, this.variationCount);
       const scale = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
       const i = slot.corpseLive;
+      // Write the ragdoll's 24 live bone matrices into this corpse's row of the archetype's live bone texture.
+      rag.writeBones(slot.liveBoneData, i * slot.boneCount * 16);
       const b = i * FLOATS_PER_CORPSE_INSTANCE;
       const pp = b + CORPSE_INST_POSE;
       const pa = b + CORPSE_INST_ANIM;
@@ -647,15 +762,24 @@ export class RiggedCrowd {
       slot.corpseArr[pp + 2] = c.z;
       slot.corpseArr[pp + 3] = c.heading;
       slot.corpseArr[pa] = scale;
-      slot.corpseArr[pa + 1] = t.pitch;
-      slot.corpseArr[pa + 2] = t.fallYaw;
+      slot.corpseArr[pa + 1] = i; // liveBoneRow — this corpse's row in the live ragdoll bone texture
+      slot.corpseArr[pa + 2] = 0;
       slot.corpseArr[pa + 3] = seed;
       slot.corpseLive++;
+    }
+
+    // Recycle ragdolls whose corpse vanished this frame (pruned/expired) — no per-death allocation (V24).
+    for (const [entity, rag] of this.ragdolls) {
+      if (rag.gen !== gen) {
+        this.ragdolls.delete(entity);
+        this.freeRagdolls.push(rag);
+      }
     }
 
     let total = 0;
     for (const slot of this.slots.values()) {
       slot.corpseBuf.needsUpdate = true;
+      slot.liveBoneTex.needsUpdate = true;
       slot.corpseMesh.count = slot.corpseLive;
       total += slot.corpseLive;
     }
