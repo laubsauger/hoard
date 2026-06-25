@@ -19,6 +19,8 @@ export interface AudioOutTuning {
   readonly gunshotGain: number;
   /** Extra gain scale on the INDOOR gunshot sample (the room clip read too loud); 1 = no change. */
   readonly gunshotIndoorScale: number;
+  /** Extra gain scale on the OUTDOOR gunshot sample (pistol/SMG); 1 = no change. */
+  readonly gunshotOutdoorScale: number;
   readonly gunshotNoiseDecaySeconds: number;
   readonly gunshotThumpFreqHz: number;
   readonly gunshotThumpDecaySeconds: number;

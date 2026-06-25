@@ -168,7 +168,7 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
         />
         <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />
       </div>
-      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “use” to eat / drink / bandage · “equip ▾” a weapon to a belt slot (draw with 1–4) · “wear” a pack</p>
+      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “equip” readies a weapon/grenade in hand (swap with 1–4 or [ ]) · “use” / “throw” / “drop”</p>
     </div>
   );
 }

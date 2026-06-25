@@ -608,9 +608,13 @@ body,
 .hbn-inv__count { font: 11px ui-monospace, Menlo; color: #9fb0cc; }
 .hbn-inv__action { font: 9px ui-monospace, Menlo; color: #5aa0ff; opacity: 0; }
 .hbn-inv__item:hover .hbn-inv__action { opacity: 1; }
-/* T138: a row = the transfer button + an optional "use" button (consumables). */
-.hbn-inv__row { display: flex; align-items: center; gap: 4px; }
-.hbn-inv__row .hbn-inv__item { flex: 1; }
+/* T138/T140: a row = the full-width transfer button, with any action buttons (equip/use/throw/drop) wrapping
+   onto their OWN row beneath it so they are never clipped by the narrow pane (the old inline picker overflowed). */
+.hbn-inv__row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.hbn-inv__row .hbn-inv__item { flex: 1 1 100%; min-width: 0; }
+.hbn-inv__actions { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; padding-left: 6px; }
+.hbn-inv__equip { background: #5aa0ff; color: #06101f; }
+.hbn-inv__equip:hover { background: #7ab6ff; }
 .hbn-inv__use {
   flex: 0 0 auto; padding: 6px 10px; border: 0; border-radius: 6px; cursor: pointer;
   font: 600 10px ui-monospace, Menlo; letter-spacing: 0.08em; text-transform: uppercase;

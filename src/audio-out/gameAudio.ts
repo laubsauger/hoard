@@ -36,6 +36,7 @@ export function resolveAudioOutTuning(tier: QualityTier): AudioOutTuning {
     masterCeiling: a.outMasterCeiling,
     gunshotGain: a.outGunshotGain,
     gunshotIndoorScale: a.outGunshotIndoorScale,
+    gunshotOutdoorScale: a.outGunshotOutdoorScale,
     gunshotNoiseDecaySeconds: a.outGunshotNoiseDecaySeconds,
     gunshotThumpFreqHz: a.outGunshotThumpFreqHz,
     gunshotThumpDecaySeconds: a.outGunshotThumpDecaySeconds,
@@ -201,7 +202,7 @@ export class GameAudio {
       this.playSample('shotgunFire', peak, 0, 0.03, /* counted */ false);
       return;
     }
-    const gain = indoor ? peak * this.tuning.gunshotIndoorScale : peak; // the room clip read too loud — tone it down
+    const gain = peak * (indoor ? this.tuning.gunshotIndoorScale : this.tuning.gunshotOutdoorScale); // both read a touch loud
     this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', gain, 0, 0.03, /* counted */ false);
   }
 
