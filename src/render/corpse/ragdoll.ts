@@ -37,25 +37,49 @@ export interface RagdollConfig {
   readonly groundRestitution: number;
   /** Coulomb friction coefficient at a ground capsule contact (0 = frictionless). */
   readonly groundFriction: number;
-  /** Joint (point + cone) solver iterations per substep (stiffer joints at higher counts). */
+  /** Joint (point + limit) solver iterations per substep (stiffer joints at higher counts). */
   readonly constraintIterations: number;
   /** Semi-implicit Euler substeps per stepped frame (stability vs cost). */
   readonly substeps: number;
-  /** force → initial linear SPEED (m/s) of the upper body along the shot direction. */
+  /** force → initial linear SPEED (m/s) of the WHOLE body along the shot direction (the travelling shove). */
   readonly impulseScale: number;
   /** force → initial tip-over ANGULAR speed (rad/s) of the chest about the axis ⟂ the shot. */
   readonly torqueScale: number;
   /** Total kinetic proxy Σ(|v|²+|ω|²) below which the body is declared SETTLED (then it stops integrating). */
   readonly settleEnergyThreshold: number;
-  /** Loose cone/twist limit (rad): max deviation of a joint's relative orientation from its rest pose. */
-  readonly jointConeRadians: number;
-  /** Collision radius (m) of every body capsule end-sphere against the ground plane (the body rests this far up). */
-  readonly groundRadiusMeters: number;
-  /** Capsule radius (m) used for each body's mass + diagonal inertia (its thickness for tumbling). */
-  readonly capsuleRadiusMeters: number;
+  // ---- VOLUME: per-size-class capsule radius (m). Torso fattest so the trunk rests with bulk; head mid; limbs
+  // thin. Used for BOTH ground rest-height AND mass/inertia (a fat trunk resists folding through the limbs). ----
+  readonly torsoRadius: number;
+  readonly headRadius: number;
+  readonly limbRadius: number;
+  // ---- ANATOMICAL ANGULAR LIMITS (rad), measured as deviation from each joint's REST relative orientation. The
+  // SPINE is near-rigid (board); the NECK is loose (head lolls to the ground); shoulders/hips are cone-limited;
+  // knees/elbows are one-way HINGES (twist range about the bend axis, cannot hyperextend backward). ----
+  /** Spine (pelvis↔chest): tight swing+twist → stiff trunk. */
+  readonly spineLimit: number;
+  /** Neck (chest↔head): loose swing → the head can loll all the way down. */
+  readonly neckLimit: number;
+  /** Shoulder (chest↔upperArm) cone half-angle. */
+  readonly shoulderLimit: number;
+  /** Hip (pelvis↔thigh) cone half-angle. */
+  readonly hipLimit: number;
+  /** Off-hinge swing tolerance for the knee/elbow hinges (keeps them planar). */
+  readonly hingeSwingLimit: number;
+  /** Elbow hinge fold range (rad): 0 = straight rest, up to elbowMax folded; cannot go below −hingeSwingLimit. */
+  readonly elbowMax: number;
+  /** Knee hinge fold range (rad). */
+  readonly kneeMax: number;
+  /** TRUNK STIFFNESS [0..1]: fraction of the pelvis↔chest RELATIVE angular velocity removed each substep so the
+   *  two co-rotate like a board (energy-removing → stable; complements the tight spine limit). */
+  readonly trunkStiffness: number;
 }
 
-/** A point-to-point joint: the parent body's `anchorParent` (body-local) must coincide with the child's `anchorChild`. */
+/** Joint kinds — pick the per-joint limit parameters from config + drive the hinge/cone geometry at build. */
+export type JointLimitKind = 'spine' | 'neck' | 'shoulder' | 'hip' | 'elbow' | 'knee';
+
+/** A point-to-point joint with an anatomical angular limit. The parent body's `anchorParent` (body-local) must
+ *  coincide with the child's `anchorChild`; the relative orientation is limited via a swing-twist decomposition
+ *  about `hingeAxis` (parent-local): swing ≤ `swingLimit`, twist ∈ [`twistLo`,`twistHi`]. */
 interface JointSpec {
   readonly parent: number;
   readonly child: number;
@@ -63,8 +87,17 @@ interface JointSpec {
   readonly anchorParent: readonly [number, number, number];
   /** Anchor point in the CHILD body-local frame. */
   readonly anchorChild: readonly [number, number, number];
-  /** Rest relative orientation q0p⁻¹·q0c (the cone limit measures deviation from this). */
+  /** Rest relative orientation q0p⁻¹·q0c (the limit measures deviation from this). */
   readonly restRel: readonly [number, number, number, number];
+  /** Bend / twist axis in the PARENT-local frame (oriented so +twist = the anatomical fold for a hinge). */
+  readonly hingeAxis: readonly [number, number, number];
+  /** Max swing (off-axis) deviation (rad). */
+  readonly swingLimit: number;
+  /** Allowed twist about `hingeAxis` (rad). */
+  readonly twistLo: number;
+  readonly twistHi: number;
+  /** Relative-angular-velocity removal fraction [0..1] (trunk co-rotation stiffness; 0 for floppy joints). */
+  readonly coupling: number;
 }
 
 /** The immutable per-archetype ragdoll definition (one entry per rigid body + the joints wiring them). */
@@ -94,6 +127,9 @@ export interface RagdollSpec {
   readonly m0: Float32Array;
 }
 
+/** Body size class → which capsule radius the body uses (volume). */
+export type RagdollBodySize = 'torso' | 'head' | 'limb';
+
 /** One rigid body's raw topology input to `buildRagdollSpec`. */
 export interface RagdollBodyTopology {
   /** GLB bone indices this body carries rigidly. */
@@ -101,6 +137,8 @@ export interface RagdollBodyTopology {
   /** Particle indices (into `seed`) of the capsule's two ends — equal for a sphere-like body (head). */
   readonly capStart: number;
   readonly capEnd: number;
+  /** Size class → capsule radius (torso fattest → bulk; head mid; limbs thin). */
+  readonly sizeClass: RagdollBodySize;
   /** The body's idle world transform (output-local): rigid position + orientation captured in the bake. */
   readonly restPos: readonly [number, number, number];
   readonly restQuat: readonly [number, number, number, number];
@@ -112,6 +150,8 @@ export interface RagdollJointTopology {
   readonly child: number;
   /** Particle index (into `seed`) whose seed position is the shared anchor at rest. */
   readonly particle: number;
+  /** Anatomical limit kind → resolves the swing/twist ranges + hinge geometry. */
+  readonly limit: JointLimitKind;
 }
 
 /** Raw topology input to `buildRagdollSpec`. */
@@ -136,6 +176,57 @@ function clampMag(x: number, max: number): number {
   return x > max ? max : x < -max ? -max : x;
 }
 
+/** Capsule radius for a body's size class (torso fattest → bulk; head mid; limbs thin). */
+function bodyRadius(cfg: RagdollConfig, size: RagdollBodySize): number {
+  return size === 'torso' ? cfg.torsoRadius : size === 'head' ? cfg.headRadius : cfg.limbRadius;
+}
+
+/** Resolved swing/twist limit + coupling for a joint kind. `hinge` picks the lateral bend axis at build time. */
+interface LimitParams {
+  readonly hinge: boolean;
+  readonly swing: number;
+  readonly twistLo: number;
+  readonly twistHi: number;
+  readonly coupling: number;
+}
+
+function jointLimit(cfg: RagdollConfig, kind: JointLimitKind): LimitParams {
+  switch (kind) {
+    case 'spine':
+      return { hinge: false, swing: cfg.spineLimit, twistLo: -cfg.spineLimit, twistHi: cfg.spineLimit, coupling: cfg.trunkStiffness };
+    case 'neck':
+      return { hinge: false, swing: cfg.neckLimit, twistLo: -cfg.neckLimit * 0.5, twistHi: cfg.neckLimit * 0.5, coupling: 0 };
+    case 'shoulder':
+      return { hinge: false, swing: cfg.shoulderLimit, twistLo: -cfg.shoulderLimit, twistHi: cfg.shoulderLimit, coupling: 0 };
+    case 'hip':
+      return { hinge: false, swing: cfg.hipLimit, twistLo: -cfg.hipLimit, twistHi: cfg.hipLimit, coupling: 0 };
+    case 'elbow':
+      return { hinge: true, swing: cfg.hingeSwingLimit, twistLo: -cfg.hingeSwingLimit, twistHi: cfg.elbowMax, coupling: 0 };
+    case 'knee':
+      return { hinge: true, swing: cfg.hingeSwingLimit, twistLo: -cfg.hingeSwingLimit, twistHi: cfg.kneeMax, coupling: 0 };
+  }
+}
+
+/** Squared distance from the child's distal tip (limb rotated ±δ about the hinge axis) to the parent COM — used at
+ *  build time to orient the hinge axis so +twist is the anatomical FOLD (tip moves toward the parent). */
+function foldProbe(
+  lx: number, ly: number, lz: number,
+  ax: number, ay: number, az: number,
+  sign: number, len: number,
+  jx: number, jy: number, jz: number,
+  pcx: number, pcy: number, pcz: number,
+): number {
+  const ang = sign * 0.3;
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  const dot = ax * lx + ay * ly + az * lz;
+  const crx = ay * lz - az * ly, cry = az * lx - ax * lz, crz = ax * ly - ay * lx;
+  const rx = lx * ca + crx * sa + ax * dot * (1 - ca);
+  const ry = ly * ca + cry * sa + ay * dot * (1 - ca);
+  const rz = lz * ca + crz * sa + az * dot * (1 - ca);
+  const tx = jx + rx * len - pcx, ty = jy + ry * len - pcy, tz = jz + rz * len - pcz;
+  return tx * tx + ty * ty + tz * tz;
+}
+
 /**
  * Build the immutable spec: per-body mass/inertia from the capsule dimensions (derived from the seed), the rest
  * transforms (decomposed into c,q + inverse matrix), and the joint anchors (the shared particle expressed in each
@@ -153,15 +244,18 @@ export function buildRagdollSpec(topo: RagdollTopology, cfg: RagdollConfig): Rag
   const capB = new Float64Array(B * 3);
   const radius = new Float64Array(B);
   const boneLists: (readonly number[])[] = [];
-  const r = cfg.capsuleRadiusMeters;
 
   for (let i = 0; i < B; i++) {
     const body = bodies[i]!;
     boneLists.push(body.bones.slice());
-    radius[i] = cfg.groundRadiusMeters;
-    // Rest transform (c0, q0) + inverse matrix.
+    const r = bodyRadius(cfg, body.sizeClass);
+    radius[i] = r;
+    // Rest transform (c0, q0). The HEAD is captured as a zero-length sphere AT the neck particle → its COM sits on
+    // its own joint pivot, so gravity makes NO toppling torque and it stays propped upright. Lift the head COM UP
+    // by its radius (along world up) so the neck anchor sits BELOW the COM → gravity lolls the head to the ground.
+    const isHead = body.sizeClass === 'head';
     restPos[i * 3] = body.restPos[0];
-    restPos[i * 3 + 1] = body.restPos[1];
+    restPos[i * 3 + 1] = body.restPos[1] + (isHead ? r : 0);
     restPos[i * 3 + 2] = body.restPos[2];
     restQuat[i * 4] = body.restQuat[0];
     restQuat[i * 4 + 1] = body.restQuat[1];
@@ -176,6 +270,13 @@ export function buildRagdollSpec(topo: RagdollTopology, cfg: RagdollConfig): Rag
     const sb = body.capEnd * 3;
     worldToLocal(capA, i * 3, restPos, i * 3, restQuat, i * 4, seed[sa]!, seed[sa + 1]!, seed[sa + 2]!);
     worldToLocal(capB, i * 3, restPos, i * 3, restQuat, i * 4, seed[sb]!, seed[sb + 1]!, seed[sb + 2]!);
+    if (isHead) {
+      // Head: capStart==capEnd==neck particle → after the COM lift, capA points DOWN to the neck. Mirror it to a
+      // capsule of length 2·r centred on the COM (neck below, crown above) so the head has real volume + lolls.
+      capB[i * 3] = -capA[i * 3]!;
+      capB[i * 3 + 1] = -capA[i * 3 + 1]!;
+      capB[i * 3 + 2] = -capA[i * 3 + 2]!;
+    }
 
     // Capsule length + mass + diagonal inertia (cylinder approximation, density 1 — only RELATIVE mass matters).
     const dx = capB[i * 3]! - capA[i * 3]!;
@@ -217,12 +318,45 @@ export function buildRagdollSpec(topo: RagdollTopology, cfg: RagdollConfig): Rag
     // restRel = q0p⁻¹ · q0c
     conjQuat(_q0, restQuat, p * 4);
     quatMulInto(_q1, _q0, 0, restQuat, c * 4);
+
+    // CHILD limb long-axis in world (distal direction). For the head this is the synthesised vertical capsule.
+    const cax = capB[c * 3]! - capA[c * 3]!;
+    const cay = capB[c * 3 + 1]! - capA[c * 3 + 1]!;
+    const caz = capB[c * 3 + 2]! - capA[c * 3 + 2]!;
+    const clen = Math.hypot(cax, cay, caz);
+    rotateVec(_limb, restQuat, c * 4, clen > EPS ? cax / clen : 0, clen > EPS ? cay / clen : 1, clen > EPS ? caz / clen : 0);
+    const lx = _limb[0]!, ly = _limb[1]!, lz = _limb[2]!;
+
+    const lim = jointLimit(cfg, j.limit);
+    let axX: number, axY: number, axZ: number; // world hinge/twist axis
+    if (lim.hinge) {
+      // Hinge: bend axis ⟂ to the limb (lateral). limb × forward = (ly,-lx,0); fall back to limb × up if colinear.
+      axX = ly; axY = -lx; axZ = 0;
+      if (axX * axX + axY * axY + axZ * axZ < 1e-6) { axX = -lz; axY = 0; axZ = lx; } // limb × (0,1,0)
+      const m = Math.hypot(axX, axY, axZ) || 1;
+      axX /= m; axY /= m; axZ /= m;
+      // Orient so +twist about the axis = the anatomical FOLD (distal tip moves TOWARD the parent COM). Probe ±δ.
+      const jw0 = seed[s]!, jw1 = seed[s + 1]!, jw2 = seed[s + 2]!;
+      const pcx = restPos[p * 3]!, pcy = restPos[p * 3 + 1]!, pcz = restPos[p * 3 + 2]!;
+      const dPlus = foldProbe(lx, ly, lz, axX, axY, axZ, +1, clen, jw0, jw1, jw2, pcx, pcy, pcz);
+      const dMinus = foldProbe(lx, ly, lz, axX, axY, axZ, -1, clen, jw0, jw1, jw2, pcx, pcy, pcz);
+      if (dPlus > dMinus) { axX = -axX; axY = -axY; axZ = -axZ; } // +twist must be the closer (folding) sense
+    } else {
+      axX = lx; axY = ly; axZ = lz; // twist about the limb's own long axis; swing covers the cone bend
+    }
+    // World axis → parent-local (the limit math runs in the parent frame).
+    rotateVecConj(_hinge, restQuat, p * 4, axX, axY, axZ);
     return {
       parent: p,
       child: c,
       anchorParent: [aP[0]!, aP[1]!, aP[2]!] as const,
       anchorChild: [aC[0]!, aC[1]!, aC[2]!] as const,
       restRel: [_q1[0]!, _q1[1]!, _q1[2]!, _q1[3]!] as const,
+      hingeAxis: [_hinge[0]!, _hinge[1]!, _hinge[2]!] as const,
+      swingLimit: lim.swing,
+      twistLo: lim.twistLo,
+      twistHi: lim.twistHi,
+      coupling: lim.coupling,
     };
   });
 
@@ -311,56 +445,72 @@ export class Ragdoll {
     for (let i = 0; i < B; i++) height = Math.max(height, spec.restPos[i * 3 + 1]!);
     const invH = height > EPS ? 1 / height : 0;
 
-    // Launch direction: the shot's local horizontal push; a force-less death falls forward (local +Z).
+    // Launch direction: the shot's local horizontal push. A force-less death (gravity) does NOT travel — it
+    // crumples straight DOWN where it stood; only the buckle below + a faint random tip topple it.
     let dx = impactLocalX;
     let dz = impactLocalZ;
     const dmag = Math.hypot(dx, dz);
-    if (force > 0 && dmag > EPS) {
-      dx /= dmag;
-      dz /= dmag;
-    } else {
-      dx = 0;
-      dz = 1;
-    }
+    const hasShot = force > 0 && dmag > EPS;
+    if (hasShot) { dx /= dmag; dz /= dmag; } else { dx = 0; dz = 0; }
     // Per-corpse jitter (deterministic): rotate the push a few degrees + vary the magnitude so no two falls match.
-    const jitterAng = (rand() - 0.5) * 0.5; // ±~14°
-    const ca = Math.cos(jitterAng);
-    const sa = Math.sin(jitterAng);
-    const jx = ca * dx - sa * dz;
-    const jz = sa * dx + ca * dz;
-    dx = jx;
-    dz = jz;
+    if (hasShot) {
+      const jitterAng = (rand() - 0.5) * 0.5; // ±~14°
+      const ca = Math.cos(jitterAng);
+      const sa = Math.sin(jitterAng);
+      const jx = ca * dx - sa * dz;
+      const jz = sa * dx + ca * dz;
+      dx = jx;
+      dz = jz;
+    } else {
+      rand(); // keep the PRNG stream aligned with the shot path (determinism)
+    }
     const magJitter = 0.85 + rand() * 0.3; // ±15%
-    const linSpeed = (force > 0 ? cfg.impulseScale * force : cfg.impulseScale * 1.2) * magJitter;
-    const spin = (force > 0 ? cfg.torqueScale * force : cfg.torqueScale * 1.2) * magJitter;
-    // Tip axis = up × pushDir (rotating the body's top toward the push direction).
-    const tipX = dz; // (0,1,0) × (dx,0,dz) = (dz, 0, -dx)
-    const tipZ = -dx;
+    // travel = the WHOLE-body forward shove (so the corpse actually TRAVELS + lands ahead of where it stood).
+    const travel = hasShot ? cfg.impulseScale * force * magJitter : 0;
+    const spin = (hasShot ? cfg.torqueScale * force : cfg.torqueScale) * magJitter;
+    // Tip axis = up × pushDir (rotating the body's top toward the push direction). Gravity → a random tip axis.
+    let tipX: number, tipZ: number;
+    if (hasShot) {
+      tipX = dz; // (0,1,0) × (dx,0,dz) = (dz, 0, -dx)
+      tipZ = -dx;
+    } else {
+      const a = rand() * Math.PI * 2;
+      tipX = Math.cos(a);
+      tipZ = Math.sin(a);
+    }
 
-    // Upper bodies (chest=1, head=2 by RAGDOLL_BODIES order) carry the knockback + tip; everything else just gets
-    // a whisper of seeded jitter so the limbs flop uniquely under gravity + the joint drag.
     const v = this.v;
     const w = this.w;
     for (let i = 0; i < B; i++) {
       const b3 = i * 3;
       const hFrac = invH > 0 ? spec.restPos[b3 + 1]! * invH : 1;
       let vx = 0, vy = 0, vz = 0, wx = 0, wy = 0, wz = 0;
+      // (1) Travelling shove — EVERY body's COM moves along the shot so the whole corpse slides/topples forward.
+      vx += dx * travel;
+      vz += dz * travel;
+      // (2) Upper bodies (chest=1, head=2) lead the topple: extra forward speed scaled by height → it tips OVER
+      // the planted feet rather than folding in place.
       if (i === RAGDOLL_BODY_INDEX.chest || i === RAGDOLL_BODY_INDEX.head) {
-        const s = linSpeed * (0.5 + 0.5 * hFrac);
+        const s = travel * 0.6 * (0.4 + 0.6 * hFrac);
         vx += dx * s;
         vz += dz * s;
+        // Gravity crumple: a downward nudge on the upper body so the knees buckle + the trunk slumps straight down
+        // (scaled off gravity so it tracks the configured weight — a seeding heuristic, like the jitter below).
+        if (!hasShot) vy -= 0.04 * cfg.gravity;
       }
+      // (3) Chest carries the tip-over spin.
       if (i === RAGDOLL_BODY_INDEX.chest) {
         wx += tipX * spin;
         wz += tipZ * spin;
       }
-      // Seeded per-body jitter (small) so the fall is unique yet reproducible.
-      vx += (rand() - 0.5) * 0.25 * linSpeed;
-      vy += (rand() - 0.5) * 0.15 * linSpeed;
-      vz += (rand() - 0.5) * 0.25 * linSpeed;
-      wx += (rand() - 0.5) * 0.4 * spin;
-      wy += (rand() - 0.5) * 0.4 * spin;
-      wz += (rand() - 0.5) * 0.4 * spin;
+      // Seeded per-body jitter (small) so the fall is unique yet reproducible — kept tiny so gravity stays in place.
+      const jb = 0.15 * (1 + travel);
+      vx += (rand() - 0.5) * jb;
+      vy += (rand() - 0.5) * jb * 0.6;
+      vz += (rand() - 0.5) * jb;
+      wx += (rand() - 0.5) * 0.4 * (spin + 0.3);
+      wy += (rand() - 0.5) * 0.4 * (spin + 0.3);
+      wz += (rand() - 0.5) * 0.4 * (spin + 0.3);
       v[b3] = vx; v[b3 + 1] = vy; v[b3 + 2] = vz;
       w[b3] = wx; w[b3 + 1] = wy; w[b3 + 2] = wz;
     }
@@ -460,7 +610,8 @@ export class Ragdoll {
     // --- Ground at VELOCITY level (restitution + friction at the contact point → tumbles + settles), THEN a
     // positional Baumgarte push-out (AFTER the recompute, so the lift injects NO velocity → no vibration pump). ---
     this.solveContacts(cfg);
-    this.solveConeLimits(cfg.jointConeRadians);
+    this.solveJointLimits();
+    this.solveSelfCollisions();
     this.solveGround();
 
     // --- Kinetic proxy: Σ(|v|²+|ω|²). ---
@@ -474,8 +625,8 @@ export class Ragdoll {
   }
 
   /** PBD point-to-point joint. Corrects both bodies' c (translation) and q (orientation) so the shared anchor
-   *  coincides — the angular part (the lever-arm correction) is what swings the limbs. The cone/twist limit is a
-   *  SEPARATE velocity-level pass (`solveConeLimits`) so it can only remove energy, never pump it. */
+   *  coincides — the angular part (the lever-arm correction) is what swings the limbs. The anatomical angular limit
+   *  is a SEPARATE velocity-level pass (`solveJointLimits`) so it can only remove energy, never pump it. */
   private solveJoint(j: JointSpec): void {
     const spec = this.spec;
     const p = j.parent;
@@ -514,13 +665,15 @@ export class Ragdoll {
   }
 
   /**
-   * Loose cone/twist limit as a VELOCITY pass (run after the velocity recompute + contacts, so it can only REMOVE
-   * energy — a positional cone fights the joint point constraint and pumps energy → the body vibrates). For each
-   * joint whose relative orientation has deviated past `coneAngle` from rest, remove the component of the relative
-   * angular velocity that is OPENING the deviation further (a one-sided limit): the joint can swing back freely but
-   * cannot keep hyperextending through. Split by inverse inertia about the deviation axis (momentum-respecting).
+   * Anatomical angular limits as a VELOCITY pass (run after the velocity recompute + contacts, so it can only
+   * REMOVE energy — a positional limit fights the joint point constraint + pumps energy → vibration). For each
+   * joint the relative orientation is decomposed (swing-twist) about its `hingeAxis`: SWING (off-axis bend) is
+   * capped at `swingLimit`; TWIST (about the axis) is clamped to [`twistLo`,`twistHi`] — a one-way HINGE for
+   * knees/elbows (cannot bend backward), a loose cone for the neck, a tight clamp for the stiff spine. Each
+   * violated direction removes only the OPENING component of the relative angular velocity. The trunk `coupling`
+   * additionally bleeds the relative spin so the pelvis+chest co-rotate like a board.
    */
-  private solveConeLimits(coneAngle: number): void {
+  private solveJointLimits(): void {
     const spec = this.spec;
     const q = this.q;
     const w = this.w;
@@ -528,35 +681,76 @@ export class Ragdoll {
       const j = spec.joints[jx]!;
       const p = j.parent;
       const cb = j.child;
+
+      // Trunk co-rotation: pull the parent + child angular velocities toward their mean by `coupling` (a stable,
+      // energy-removing contraction) → the spine acts as a rigid board, not a floppy hinge.
+      if (j.coupling > 0) {
+        const k = j.coupling;
+        for (let a = 0; a < 3; a++) {
+          const wp = w[p * 3 + a]!;
+          const wc = w[cb * 3 + a]!;
+          const mid = 0.5 * (wp + wc);
+          w[p * 3 + a] = wp + k * (mid - wp);
+          w[cb * 3 + a] = wc + k * (mid - wc);
+        }
+      }
+
+      // err = restRel⁻¹ · (qp⁻¹·qc) — the relative orientation's deviation from rest, in the PARENT-local frame.
       conjQuat(_q0, q, p * 4);
-      quatMulInto(_q1, _q0, 0, q, cb * 4); // qRel = qp⁻¹·qc
+      quatMulInto(_q1, _q0, 0, q, cb * 4);
       conjQuatArr(_q2, j.restRel as unknown as ArrayLike<number>, 0);
-      quatMulInto(_q3, _q2, 0, _q1, 0); // err = restRel⁻¹·qRel
-      let ew = _q3[3]!, ex = _q3[0]!, ey = _q3[1]!, ez = _q3[2]!;
-      if (ew < 0) { ew = -ew; ex = -ex; ey = -ey; ez = -ez; }
-      const angle = 2 * Math.acos(ew < 1 ? ew : 1);
-      if (angle <= coneAngle) continue;
-      const s = Math.sqrt(Math.max(0, 1 - ew * ew));
-      if (s <= EPS) continue;
-      rotateVec(_v1, q, p * 4, ex / s, ey / s, ez / s); // deviation axis (parent-local) → world unit
-      const ax = _v1[0]!, ay = _v1[1]!, az = _v1[2]!;
-      // Relative angular velocity ω_c − ω_p projected onto the deviation axis. >0 ⇒ opening further.
-      const rel = (w[cb * 3]! - w[p * 3]!) * ax + (w[cb * 3 + 1]! - w[p * 3 + 1]!) * ay + (w[cb * 3 + 2]! - w[p * 3 + 2]!) * az;
-      if (rel <= 0) continue; // already closing / static — leave it floppy
-      const ip = inertiaAboutAxis(spec, p, q, ax, ay, az);
-      const ic = inertiaAboutAxis(spec, cb, q, ax, ay, az);
-      const tot = ip + ic;
-      if (tot <= EPS) continue;
-      // Remove the opening relative angular velocity: child −, parent + (about the axis), split by inverse inertia.
-      const dC = -rel * (ic / tot);
-      const dP = +rel * (ip / tot);
-      w[cb * 3] = w[cb * 3]! + ax * dC;
-      w[cb * 3 + 1] = w[cb * 3 + 1]! + ay * dC;
-      w[cb * 3 + 2] = w[cb * 3 + 2]! + az * dC;
-      w[p * 3] = w[p * 3]! + ax * dP;
-      w[p * 3 + 1] = w[p * 3 + 1]! + ay * dP;
-      w[p * 3 + 2] = w[p * 3 + 2]! + az * dP;
+      quatMulInto(_q3, _q2, 0, _q1, 0);
+      let ex = _q3[0]!, ey = _q3[1]!, ez = _q3[2]!, ew = _q3[3]!;
+      if (ew < 0) { ex = -ex; ey = -ey; ez = -ez; ew = -ew; }
+
+      const ax = j.hingeAxis[0]!, ay = j.hingeAxis[1]!, az = j.hingeAxis[2]!; // parent-local unit
+      const proj = ex * ax + ey * ay + ez * az; // err.xyz · axis
+      // TWIST: signed angle about the hinge axis (atan2 is scale-invariant across err's components).
+      const twistAngle = 2 * Math.atan2(proj, ew);
+      // SWING: rotation about the perpendicular component of err.xyz.
+      const sx = ex - proj * ax, sy = ey - proj * ay, sz = ez - proj * az;
+      const smag = Math.hypot(sx, sy, sz);
+      const swingAngle = 2 * Math.atan2(smag, ew);
+
+      // --- SWING limit (one-sided velocity removal about the world swing axis). ---
+      if (swingAngle > j.swingLimit && smag > EPS) {
+        rotateVec(_swA, q, p * 4, sx / smag, sy / smag, sz / smag); // perp axis → world
+        this.removeOpening(p, cb, _swA[0]!, _swA[1]!, _swA[2]!);
+      }
+      // --- TWIST limits (about the world hinge axis, ± sense). ---
+      if (twistAngle > j.twistHi) {
+        rotateVec(_swA, q, p * 4, ax, ay, az); // hinge axis → world
+        this.removeOpening(p, cb, _swA[0]!, _swA[1]!, _swA[2]!);
+      } else if (twistAngle < j.twistLo) {
+        // One-way hinge BACKSTOP: remove the opening (more-backward) relative velocity so a knee/elbow can't keep
+        // hyperextending. Velocity-only (no anchor displacement → no energy pump, no creep) — a soft limit that
+        // allows a small transient overshoot under a violent impact but never a real backward bend.
+        rotateVec(_swA, q, p * 4, ax, ay, az);
+        this.removeOpening(p, cb, -_swA[0]!, -_swA[1]!, -_swA[2]!);
+      }
     }
+  }
+
+  /** Remove the OPENING (positive) component of the relative angular velocity ω_c − ω_p about world unit axis
+   *  (ax,ay,az), split between the two bodies by their inverse inertia about that axis (momentum-respecting). */
+  private removeOpening(p: number, cb: number, ax: number, ay: number, az: number): void {
+    const spec = this.spec;
+    const q = this.q;
+    const w = this.w;
+    const rel = (w[cb * 3]! - w[p * 3]!) * ax + (w[cb * 3 + 1]! - w[p * 3 + 1]!) * ay + (w[cb * 3 + 2]! - w[p * 3 + 2]!) * az;
+    if (rel <= 0) return; // closing / static — leave it floppy
+    const ip = inertiaAboutAxis(spec, p, q, ax, ay, az);
+    const ic = inertiaAboutAxis(spec, cb, q, ax, ay, az);
+    const tot = ip + ic;
+    if (tot <= EPS) return;
+    const dC = -rel * (ic / tot);
+    const dP = +rel * (ip / tot);
+    w[cb * 3] = w[cb * 3]! + ax * dC;
+    w[cb * 3 + 1] = w[cb * 3 + 1]! + ay * dC;
+    w[cb * 3 + 2] = w[cb * 3 + 2]! + az * dC;
+    w[p * 3] = w[p * 3]! + ax * dP;
+    w[p * 3 + 1] = w[p * 3 + 1]! + ay * dP;
+    w[p * 3 + 2] = w[p * 3 + 2]! + az * dP;
   }
 
   /** Positional ground push-out: for each capsule sample point below the radius, lift it back to the plane. */
@@ -583,6 +777,45 @@ export class Ragdoll {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Cheap INTER-BODY non-penetration: a handful of capsule pairs (forearms/shins vs the trunk, both sides) kept
+   * OUTSIDE each other so the limbs can't fold THROUGH the torso into a flat lump. Positional push-out only (no
+   * velocity injection → no energy pump), split by effective inverse mass at the closest-point lever arms.
+   */
+  private solveSelfCollisions(): void {
+    const spec = this.spec;
+    const q = this.q;
+    const c = this.c;
+    for (let pi = 0; pi < SELF_PAIRS.length; pi++) {
+      const a = SELF_PAIRS[pi]![0];
+      const b = SELF_PAIRS[pi]![1];
+      if (spec.invMass[a]! <= 0 && spec.invMass[b]! <= 0) continue;
+      capsuleSamplePoint(spec, a, 0, q, c, _segA0);
+      capsuleSamplePoint(spec, a, 1, q, c, _segA1);
+      capsuleSamplePoint(spec, b, 0, q, c, _segB0);
+      capsuleSamplePoint(spec, b, 1, q, c, _segB1);
+      closestSeg(_segA0, _segA1, _segB0, _segB1, _cpA, _cpB);
+      const nx = _cpA[0]! - _cpB[0]!;
+      const ny = _cpA[1]! - _cpB[1]!;
+      const nz = _cpA[2]! - _cpB[2]!;
+      let d = Math.hypot(nx, ny, nz);
+      const minD = spec.radius[a]! + spec.radius[b]!;
+      if (d >= minD) continue;
+      let ux: number, uy: number, uz: number;
+      if (d > EPS) { ux = nx / d; uy = ny / d; uz = nz / d; } else { ux = 0; uy = 1; uz = 0; d = 0; }
+      const pen = minD - d;
+      _rp[0] = _cpA[0]! - c[a * 3]!; _rp[1] = _cpA[1]! - c[a * 3 + 1]!; _rp[2] = _cpA[2]! - c[a * 3 + 2]!;
+      _rc[0] = _cpB[0]! - c[b * 3]!; _rc[1] = _cpB[1]! - c[b * 3 + 1]!; _rc[2] = _cpB[2]! - c[b * 3 + 2]!;
+      const wA = effectiveInvMass(spec, a, q, _rp, ux, uy, uz, _ip);
+      const wB = effectiveInvMass(spec, b, q, _rc, ux, uy, uz, _ic);
+      const tot = wA + wB;
+      if (tot <= EPS) continue;
+      const lambda = pen / tot;
+      applyPositional(this, a, +lambda, ux, uy, uz, _ip); // push a along +n
+      applyPositional(this, b, -lambda, ux, uy, uz, _ic); // push b along −n
     }
   }
 
@@ -675,6 +908,45 @@ const _q3 = new Float64Array(4);
 const _m0 = new Float64Array(16);
 const _mA = new Float64Array(16);
 const _mB = new Float64Array(16);
+const _limb = new Float64Array(3);
+const _hinge = new Float64Array(3);
+const _swA = new Float64Array(3);
+const _segA0 = new Float64Array(3);
+const _segA1 = new Float64Array(3);
+const _segB0 = new Float64Array(3);
+const _segB1 = new Float64Array(3);
+const _cpA = new Float64Array(3);
+const _cpB = new Float64Array(3);
+
+/** Closest points between segments [p1,q1] and [p2,q2] (Ericson, clamped) → outC1, outC2. Deterministic. */
+function closestSeg(
+  p1: Float64Array, q1: Float64Array, p2: Float64Array, q2: Float64Array,
+  outC1: Float64Array, outC2: Float64Array,
+): void {
+  const d1x = q1[0]! - p1[0]!, d1y = q1[1]! - p1[1]!, d1z = q1[2]! - p1[2]!;
+  const d2x = q2[0]! - p2[0]!, d2y = q2[1]! - p2[1]!, d2z = q2[2]! - p2[2]!;
+  const rx = p1[0]! - p2[0]!, ry = p1[1]! - p2[1]!, rz = p1[2]! - p2[2]!;
+  const aa = d1x * d1x + d1y * d1y + d1z * d1z;
+  const e = d2x * d2x + d2y * d2y + d2z * d2z;
+  const f = d2x * rx + d2y * ry + d2z * rz;
+  let s: number, t: number;
+  if (aa <= EPS && e <= EPS) { s = 0; t = 0; }
+  else if (aa <= EPS) { s = 0; t = clamp01(f / e); }
+  else {
+    const cc = d1x * rx + d1y * ry + d1z * rz;
+    if (e <= EPS) { t = 0; s = clamp01(-cc / aa); }
+    else {
+      const bb = d1x * d2x + d1y * d2y + d1z * d2z;
+      const denom = aa * e - bb * bb;
+      s = denom > EPS ? clamp01((bb * f - cc * e) / denom) : 0;
+      t = (bb * s + f) / e;
+      if (t < 0) { t = 0; s = clamp01(-cc / aa); }
+      else if (t > 1) { t = 1; s = clamp01((bb - cc) / aa); }
+    }
+  }
+  outC1[0] = p1[0]! + d1x * s; outC1[1] = p1[1]! + d1y * s; outC1[2] = p1[2]! + d1z * s;
+  outC2[0] = p2[0]! + d2x * t; outC2[1] = p2[1]! + d2y * t; outC2[2] = p2[2]! + d2z * t;
+}
 
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
@@ -1012,33 +1284,46 @@ export const RAGDOLL_BODIES: readonly {
   readonly anchorBone: string;
   readonly capStart: number;
   readonly capEnd: number;
+  readonly sizeClass: RagdollBodySize;
   readonly bones: readonly string[];
 }[] = [
-  { name: 'pelvis', anchorBone: 'Hips', capStart: RP.pelvis, capEnd: RP.chest, bones: ['Hips', 'Spine', 'Spine01'] },
-  { name: 'chest', anchorBone: 'Spine02', capStart: RP.chest, capEnd: RP.head, bones: ['Spine02', 'LeftShoulder', 'RightShoulder'] },
-  { name: 'head', anchorBone: 'Head', capStart: RP.head, capEnd: RP.head, bones: ['neck', 'Head', 'head_end', 'headfront'] },
-  { name: 'upperArmL', anchorBone: 'LeftArm', capStart: RP.shoulderL, capEnd: RP.elbowL, bones: ['LeftArm'] },
-  { name: 'lowerArmL', anchorBone: 'LeftForeArm', capStart: RP.elbowL, capEnd: RP.handL, bones: ['LeftForeArm', 'LeftHand'] },
-  { name: 'upperArmR', anchorBone: 'RightArm', capStart: RP.shoulderR, capEnd: RP.elbowR, bones: ['RightArm'] },
-  { name: 'lowerArmR', anchorBone: 'RightForeArm', capStart: RP.elbowR, capEnd: RP.handR, bones: ['RightForeArm', 'RightHand'] },
-  { name: 'thighL', anchorBone: 'LeftUpLeg', capStart: RP.hipL, capEnd: RP.kneeL, bones: ['LeftUpLeg'] },
-  { name: 'shinL', anchorBone: 'LeftLeg', capStart: RP.kneeL, capEnd: RP.footL, bones: ['LeftLeg', 'LeftFoot', 'LeftToeBase'] },
-  { name: 'thighR', anchorBone: 'RightUpLeg', capStart: RP.hipR, capEnd: RP.kneeR, bones: ['RightUpLeg'] },
-  { name: 'shinR', anchorBone: 'RightLeg', capStart: RP.kneeR, capEnd: RP.footR, bones: ['RightLeg', 'RightFoot', 'RightToeBase'] },
+  { name: 'pelvis', anchorBone: 'Hips', capStart: RP.pelvis, capEnd: RP.chest, sizeClass: 'torso', bones: ['Hips', 'Spine', 'Spine01'] },
+  { name: 'chest', anchorBone: 'Spine02', capStart: RP.chest, capEnd: RP.head, sizeClass: 'torso', bones: ['Spine02', 'LeftShoulder', 'RightShoulder'] },
+  { name: 'head', anchorBone: 'Head', capStart: RP.head, capEnd: RP.head, sizeClass: 'head', bones: ['neck', 'Head', 'head_end', 'headfront'] },
+  { name: 'upperArmL', anchorBone: 'LeftArm', capStart: RP.shoulderL, capEnd: RP.elbowL, sizeClass: 'limb', bones: ['LeftArm'] },
+  { name: 'lowerArmL', anchorBone: 'LeftForeArm', capStart: RP.elbowL, capEnd: RP.handL, sizeClass: 'limb', bones: ['LeftForeArm', 'LeftHand'] },
+  { name: 'upperArmR', anchorBone: 'RightArm', capStart: RP.shoulderR, capEnd: RP.elbowR, sizeClass: 'limb', bones: ['RightArm'] },
+  { name: 'lowerArmR', anchorBone: 'RightForeArm', capStart: RP.elbowR, capEnd: RP.handR, sizeClass: 'limb', bones: ['RightForeArm', 'RightHand'] },
+  { name: 'thighL', anchorBone: 'LeftUpLeg', capStart: RP.hipL, capEnd: RP.kneeL, sizeClass: 'limb', bones: ['LeftUpLeg'] },
+  { name: 'shinL', anchorBone: 'LeftLeg', capStart: RP.kneeL, capEnd: RP.footL, sizeClass: 'limb', bones: ['LeftLeg', 'LeftFoot', 'LeftToeBase'] },
+  { name: 'thighR', anchorBone: 'RightUpLeg', capStart: RP.hipR, capEnd: RP.kneeR, sizeClass: 'limb', bones: ['RightUpLeg'] },
+  { name: 'shinR', anchorBone: 'RightLeg', capStart: RP.kneeR, capEnd: RP.footR, sizeClass: 'limb', bones: ['RightLeg', 'RightFoot', 'RightToeBase'] },
 ];
 
-/** Joints: (parent body, child body) coincident at the shared joint particle's seed position. */
-export const RAGDOLL_JOINTS: readonly { readonly parent: number; readonly child: number; readonly particle: number }[] = [
-  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.chest, particle: RP.chest },
-  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.head, particle: RP.head },
-  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.upperArmL, particle: RP.shoulderL },
-  { parent: RAGDOLL_BODY_INDEX.upperArmL, child: RAGDOLL_BODY_INDEX.lowerArmL, particle: RP.elbowL },
-  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.upperArmR, particle: RP.shoulderR },
-  { parent: RAGDOLL_BODY_INDEX.upperArmR, child: RAGDOLL_BODY_INDEX.lowerArmR, particle: RP.elbowR },
-  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.thighL, particle: RP.hipL },
-  { parent: RAGDOLL_BODY_INDEX.thighL, child: RAGDOLL_BODY_INDEX.shinL, particle: RP.kneeL },
-  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.thighR, particle: RP.hipR },
-  { parent: RAGDOLL_BODY_INDEX.thighR, child: RAGDOLL_BODY_INDEX.shinR, particle: RP.kneeR },
+/** Joints: (parent body, child body) coincident at the shared joint particle's seed position, with an anatomical
+ *  limit kind (spine = stiff board, neck = loose loll, hip/shoulder = cone, knee/elbow = one-way hinge). */
+export const RAGDOLL_JOINTS: readonly RagdollJointTopology[] = [
+  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.chest, particle: RP.chest, limit: 'spine' },
+  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.head, particle: RP.head, limit: 'neck' },
+  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.upperArmL, particle: RP.shoulderL, limit: 'shoulder' },
+  { parent: RAGDOLL_BODY_INDEX.upperArmL, child: RAGDOLL_BODY_INDEX.lowerArmL, particle: RP.elbowL, limit: 'elbow' },
+  { parent: RAGDOLL_BODY_INDEX.chest, child: RAGDOLL_BODY_INDEX.upperArmR, particle: RP.shoulderR, limit: 'shoulder' },
+  { parent: RAGDOLL_BODY_INDEX.upperArmR, child: RAGDOLL_BODY_INDEX.lowerArmR, particle: RP.elbowR, limit: 'elbow' },
+  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.thighL, particle: RP.hipL, limit: 'hip' },
+  { parent: RAGDOLL_BODY_INDEX.thighL, child: RAGDOLL_BODY_INDEX.shinL, particle: RP.kneeL, limit: 'knee' },
+  { parent: RAGDOLL_BODY_INDEX.pelvis, child: RAGDOLL_BODY_INDEX.thighR, particle: RP.hipR, limit: 'hip' },
+  { parent: RAGDOLL_BODY_INDEX.thighR, child: RAGDOLL_BODY_INDEX.shinR, particle: RP.kneeR, limit: 'knee' },
+];
+
+/** Inter-body non-penetration pairs (forearms/shins vs the trunk, both sides) — keeps the limbs OUTSIDE the torso
+ *  capsule so they can't fold through it into a flat lump. A handful of pairs (cheap, not O(n²) self-collision). */
+const SELF_PAIRS: readonly (readonly [number, number])[] = [
+  [RAGDOLL_BODY_INDEX.lowerArmL, RAGDOLL_BODY_INDEX.chest],
+  [RAGDOLL_BODY_INDEX.lowerArmR, RAGDOLL_BODY_INDEX.chest],
+  [RAGDOLL_BODY_INDEX.lowerArmL, RAGDOLL_BODY_INDEX.pelvis],
+  [RAGDOLL_BODY_INDEX.lowerArmR, RAGDOLL_BODY_INDEX.pelvis],
+  [RAGDOLL_BODY_INDEX.shinL, RAGDOLL_BODY_INDEX.pelvis],
+  [RAGDOLL_BODY_INDEX.shinR, RAGDOLL_BODY_INDEX.pelvis],
 ];
 
 /** Deterministic per-corpse PRNG (mulberry32) — seeds the impact jitter so each death is unique yet reproducible. */

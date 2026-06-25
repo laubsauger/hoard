@@ -18,18 +18,26 @@ import {
 
 const CFG: RagdollConfig = {
   gravity: 16,
-  linearDamping: 1.1,
-  angularDamping: 2.5,
+  linearDamping: 0.8,
+  angularDamping: 2.1,
   groundRestitution: 0.03,
-  groundFriction: 1.3,
+  groundFriction: 0.85,
   constraintIterations: 2,
   substeps: 10,
-  impulseScale: 0.42,
-  torqueScale: 0.18,
-  settleEnergyThreshold: 0.05,
-  jointConeRadians: 1.5,
-  groundRadiusMeters: 0.11,
-  capsuleRadiusMeters: 0.12,
+  impulseScale: 0.25,
+  torqueScale: 0.28,
+  settleEnergyThreshold: 0.08,
+  torsoRadius: 0.17,
+  headRadius: 0.11,
+  limbRadius: 0.075,
+  spineLimit: 0.3,
+  neckLimit: 1.7,
+  shoulderLimit: 1.4,
+  hipLimit: 1.1,
+  hingeSwingLimit: 0.3,
+  elbowMax: 2.4,
+  kneeMax: 2.4,
+  trunkStiffness: 0.35,
 };
 
 /** A small deterministic non-identity quaternion for body `i` (axis-angle), to exercise the orientation-dependent
@@ -83,6 +91,7 @@ function buildTestSpec(tilt = false): RagdollSpec {
     bones: [i],
     capStart: bd.capStart,
     capEnd: bd.capEnd,
+    sizeClass: bd.sizeClass,
     restPos: [SEED[bd.capStart * 3]!, SEED[bd.capStart * 3 + 1]!, SEED[bd.capStart * 3 + 2]!] as const,
     restQuat: tilt ? tiltQuat(i) : ([0, 0, 0, 1] as const),
   }));
@@ -152,6 +161,39 @@ function maxBodyY(rag: Ragdoll): number {
   for (let i = 0; i < rag.spec.bodyCount; i++) maxY = Math.max(maxY, rag.c[i * 3 + 1]!);
   return maxY;
 }
+
+/** Hamilton product of two [x,y,z,w] quats. */
+function qmul(a: readonly number[], b: readonly number[]): [number, number, number, number] {
+  return [
+    a[3]! * b[0]! + a[0]! * b[3]! + a[1]! * b[2]! - a[2]! * b[1]!,
+    a[3]! * b[1]! - a[0]! * b[2]! + a[1]! * b[3]! + a[2]! * b[0]!,
+    a[3]! * b[2]! + a[0]! * b[1]! - a[1]! * b[0]! + a[2]! * b[3]!,
+    a[3]! * b[3]! - a[0]! * b[0]! - a[1]! * b[1]! - a[2]! * b[2]!,
+  ];
+}
+
+/** Signed twist (rad) of joint `ji` about its hinge axis — the same swing-twist measure the limit solver uses.
+ *  For a knee/elbow hinge a negative twist past −hingeSwingLimit is the FORBIDDEN backward bend. */
+function jointTwist(rag: Ragdoll, ji: number): number {
+  const j = rag.spec.joints[ji]!;
+  const p = j.parent, c = j.child;
+  const qp = [rag.q[p * 4]!, rag.q[p * 4 + 1]!, rag.q[p * 4 + 2]!, rag.q[p * 4 + 3]!];
+  const qc = [rag.q[c * 4]!, rag.q[c * 4 + 1]!, rag.q[c * 4 + 2]!, rag.q[c * 4 + 3]!];
+  const qpInv = [-qp[0]!, -qp[1]!, -qp[2]!, qp[3]!];
+  const qrel = qmul(qpInv, qc);
+  const rr = j.restRel;
+  const rrInv = [-rr[0]!, -rr[1]!, -rr[2]!, rr[3]!];
+  let err = qmul(rrInv, qrel);
+  if (err[3]! < 0) err = [-err[0]!, -err[1]!, -err[2]!, -err[3]!];
+  const ax = j.hingeAxis;
+  const proj = err[0]! * ax[0]! + err[1]! * ax[1]! + err[2]! * ax[2]!;
+  return 2 * Math.atan2(proj, err[3]!);
+}
+
+/** Joint indices that are one-way hinges (knee/elbow), matching the spec.joints order (= RAGDOLL_JOINTS order). */
+const HINGE_JOINTS = RAGDOLL_JOINTS.map((j, i) => ({ i, k: j.limit }))
+  .filter((x) => x.k === 'knee' || x.k === 'elbow')
+  .map((x) => x.i);
 
 describe('ragdoll sim (oriented rigid bodies)', () => {
   it('holds point-to-point joints coincident across many steps', () => {
@@ -253,5 +295,49 @@ describe('ragdoll sim (oriented rigid bodies)', () => {
     const rag = run(0, 0, 0, 5);
     expect(rag.settled).toBe(true);
     expect(maxBodyY(rag)).toBeLessThan(1.1); // crumpled, not standing
+  });
+
+  it('knees + elbows never bend the WRONG way (one-way hinge holds across the fall)', () => {
+    // Drive hard falls in several directions/seeds (the cases that most load the leg/arm hinges) + watch every
+    // hinge each step. The position-only backstop keeps the backward overshoot small and bounded.
+    let minTwist = Infinity;
+    for (const [sx, sz, seed] of [[0, 1, 77], [1, 0, 3], [0.6, 0.8, 42]] as const) {
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, sx, sz, 40, mulberry32(seed));
+      for (let i = 0; i < 1500 && !rag.settled; i++) {
+        rag.step(CFG, 1 / 60);
+        for (const ji of HINGE_JOINTS) minTwist = Math.min(minTwist, jointTwist(rag, ji));
+      }
+    }
+    // twistLo = −hingeSwingLimit; the soft velocity backstop allows a small transient overshoot under a violent
+    // impact but the hinge NEVER bends meaningfully backward (a hyperextended knee/elbow reads as a large negative
+    // twist — e.g. −π/2). This bound (~−0.9 rad) catches any real wrong-way fold while tolerating the overshoot.
+    expect(minTwist).toBeGreaterThan(-(CFG.hingeSwingLimit + 0.6));
+  });
+
+  it('a settled body keeps real VERTICAL extent — bulky, not pancaked', () => {
+    const rag = run(20, 1, 0, 11);
+    expect(rag.settled).toBe(true);
+    // The highest body centre rests on the fat TORSO radius, not flattened to the thin-limb floor → has bulk.
+    expect(maxBodyY(rag)).toBeGreaterThan(CFG.torsoRadius * 0.7);
+  });
+
+  it('a forward shot TRAVELS forward — COM lands ahead of the in-place gravity crumple', () => {
+    // Average pelvis Z over several seeds: the forward shot drives a consistent +Z travel, while the gravity
+    // crumple's faint random tip averages out to ≈ in place (each seed tips a different way).
+    let fwdSum = 0, gravSum = 0;
+    const seeds = [21, 5, 88, 314];
+    for (const seed of seeds) {
+      fwdSum += run(16, 0, 1, seed).c[2]!; // shot forward (+Z)
+      gravSum += run(0, 0, 0, seed).c[2]!; // gravity only — crumples roughly in place
+    }
+    expect(fwdSum / seeds.length).toBeGreaterThan(gravSum / seeds.length + 0.3);
+  });
+
+  it('a bigger forward force lands FARTHER forward', () => {
+    const light = run(4, 0, 1, 33);
+    const heavy = run(14, 0, 1, 33);
+    expect(heavy.c[2]!).toBeGreaterThan(light.c[2]!);
   });
 });

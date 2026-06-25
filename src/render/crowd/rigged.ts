@@ -151,9 +151,17 @@ export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
     impulseScale: resolve(renderingConfig.ragdollImpulseScale, tier),
     torqueScale: resolve(renderingConfig.ragdollTorqueScale, tier),
     settleEnergyThreshold: resolve(renderingConfig.ragdollSettleEnergyThreshold, tier),
-    jointConeRadians: resolve(renderingConfig.ragdollJointConeRadians, tier),
-    groundRadiusMeters: resolve(renderingConfig.ragdollGroundRadiusMeters, tier),
-    capsuleRadiusMeters: resolve(renderingConfig.ragdollCapsuleRadiusMeters, tier),
+    torsoRadius: resolve(renderingConfig.ragdollTorsoRadiusMeters, tier),
+    headRadius: resolve(renderingConfig.ragdollHeadRadiusMeters, tier),
+    limbRadius: resolve(renderingConfig.ragdollLimbRadiusMeters, tier),
+    spineLimit: resolve(renderingConfig.ragdollSpineLimitRadians, tier),
+    neckLimit: resolve(renderingConfig.ragdollNeckLimitRadians, tier),
+    shoulderLimit: resolve(renderingConfig.ragdollShoulderLimitRadians, tier),
+    hipLimit: resolve(renderingConfig.ragdollHipLimitRadians, tier),
+    hingeSwingLimit: resolve(renderingConfig.ragdollHingeSwingLimitRadians, tier),
+    elbowMax: resolve(renderingConfig.ragdollElbowMaxRadians, tier),
+    kneeMax: resolve(renderingConfig.ragdollKneeMaxRadians, tier),
+    trunkStiffness: resolve(renderingConfig.ragdollTrunkStiffness, tier),
   };
 }
 
@@ -492,6 +500,7 @@ function buildArchetype(key: ArchetypeKey, gltf: GLTF, budget: number, corpseCap
     }),
     capStart: bd.capStart,
     capEnd: bd.capEnd,
+    sizeClass: bd.sizeClass,
     restPos: [bodyRestPos[i * 3]!, bodyRestPos[i * 3 + 1]!, bodyRestPos[i * 3 + 2]!] as const,
     restQuat: [bodyRestQuat[i * 4]!, bodyRestQuat[i * 4 + 1]!, bodyRestQuat[i * 4 + 2]!, bodyRestQuat[i * 4 + 3]!] as const,
   }));
