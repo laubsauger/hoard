@@ -101,4 +101,25 @@ describe('RendererHost (V23/V24)', () => {
   it('rejects an invalid recovery budget', () => {
     expect(() => new RendererHost({ factory: () => new FakeBackend(), maxRecoveries: -1 })).toThrow();
   });
+
+  it('forwards the AO toggle to a backend that supports it (the `ao` debug flag plumb)', async () => {
+    class AoBackend extends FakeBackend {
+      aoEnabled: boolean | null = null;
+      setAoEnabled(enabled: boolean): void {
+        this.aoEnabled = enabled;
+      }
+    }
+    const backend = new AoBackend();
+    const host = new RendererHost({ factory: () => backend, maxRecoveries: 1 });
+    await host.init();
+    host.setAoEnabled(false);
+    expect(backend.aoEnabled).toBe(false);
+    host.setAoEnabled(true);
+    expect(backend.aoEnabled).toBe(true);
+  });
+
+  it('treats the AO toggle as a no-op on a backend without AO support (the non-GPU fake)', () => {
+    const host = new RendererHost({ factory: () => new FakeBackend(), maxRecoveries: 1 });
+    expect(() => host.setAoEnabled(true)).not.toThrow(); // before init: no backend
+  });
 });

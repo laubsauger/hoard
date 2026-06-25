@@ -80,4 +80,29 @@ describe('render config domains (V4)', () => {
     expect(resolve(lightingConfig.contactAoRadiusMeters, 'desktop-high')).toBeGreaterThan(0);
     expect(resolve(lightingConfig.contactAoGroundLiftMeters, 'desktop-high')).toBeGreaterThanOrEqual(0);
   });
+
+  it('enables GTAO post-process AO on desktop tiers and disables it on the lowest tier', () => {
+    expect(resolve(renderingConfig.aoEnabled, 'desktop-high')).toBe(true);
+    expect(resolve(renderingConfig.aoEnabled, 'desktop-medium')).toBe(true);
+    expect(resolve(renderingConfig.aoEnabled, 'desktop-compat')).toBe(true);
+    // Lowest tier: the extra full-screen depth/normal prepass + AO pass is too costly.
+    expect(resolve(renderingConfig.aoEnabled, 'mobile-webgpu')).toBe(false);
+  });
+
+  it('takes fewer GTAO samples on lower desktop tiers (cheaper prepass, V8/V22)', () => {
+    expect(resolve(renderingConfig.aoSamples, 'desktop-high')).toBeGreaterThanOrEqual(
+      resolve(renderingConfig.aoSamples, 'desktop-medium'),
+    );
+    expect(resolve(renderingConfig.aoSamples, 'desktop-medium')).toBeGreaterThanOrEqual(
+      resolve(renderingConfig.aoSamples, 'desktop-compat'),
+    );
+    expect(Number.isInteger(resolve(renderingConfig.aoSamples, 'desktop-compat'))).toBe(true);
+  });
+
+  it('keeps GTAO intensity tasteful (in [0,1], not a full black halo) with a positive radius', () => {
+    const intensity = resolve(renderingConfig.aoIntensity, 'desktop-high');
+    expect(intensity).toBeGreaterThan(0);
+    expect(intensity).toBeLessThanOrEqual(1);
+    expect(resolve(renderingConfig.aoRadius, 'desktop-high')).toBeGreaterThan(0);
+  });
 });

@@ -17,6 +17,8 @@ export type OneShotVoice = 'glass' | 'alarm' | 'impact' | 'breach' | 'footstep' 
 export interface AudioOutTuning {
   readonly masterCeiling: number;
   readonly gunshotGain: number;
+  /** Extra gain scale on the INDOOR gunshot sample (the room clip read too loud); 1 = no change. */
+  readonly gunshotIndoorScale: number;
   readonly gunshotNoiseDecaySeconds: number;
   readonly gunshotThumpFreqHz: number;
   readonly gunshotThumpDecaySeconds: number;

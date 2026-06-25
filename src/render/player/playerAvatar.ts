@@ -17,18 +17,16 @@ import {
   type Mesh,
   type MeshStandardMaterial,
   type Object3D,
-  type SkinnedMesh,
   type Texture,
 } from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Disposable, ResourceKind } from '../engine/resources';
 import { buildWeaponMeshes, buildFlashlightMesh, weaponVisualForItem, type WeaponVisual } from './weaponMesh';
 
-/** Held-weapon seat in the RIGHT-HAND bone, in WORLD meters (counter-scaled by the bone's world scale on attach,
- *  so a meter-built mesh renders at meter size regardless of the rig's internal scale). Reasonable defaults — the
- *  exact palm seat / aim alignment may want a small visual tweak against the ranger rig (T141). */
-const WEAPON_HOLD_OFFSET = { x: 0.0, y: -0.02, z: 0.0 };
-const WEAPON_HOLD_EULER = { x: 0, y: 0, z: 0 };
+/** Hand-holder offset under the avatar root, in meters (root local space, root scale 1). x = right of centre,
+ *  y = hand height, z = a little forward. The weapon holder uses +x (right hand); the flashlight mirrors to -x
+ *  (left/off hand). Tunable — the seat is approximate (the holder guarantees the FORWARD aim, T141 interim). */
+const WEAPON_HAND_OFFSET = { x: 0.22, y: 1.05, z: 0.18 };
 
 /** The Ranger clips this avatar drives (a subset of the 9 in `ranger.glb`). */
 export type RangerClip =
@@ -152,15 +150,17 @@ export class PlayerAvatar {
   private loaded = false;
   private readonly heightMeters: number;
 
-  // T141 — held weapon: the right-hand bone, prebuilt per-visual meshes (one parented at a time), and the
-  // counter-scale that cancels the rig's world scale so a meter-built weapon renders at meter size.
-  private handBone: Object3D | null = null;
-  private invHandScale = 1;
+  // T141 — held weapon (INTERIM, B-pose): rather than parent to the rig's hand BONE (whose local frame is
+  // unknown → weapons pointed sideways), the active weapon hangs off a HOLDER under `root`. `root` is positioned
+  // at the player + yaw-faced to the aim every frame (faceAim), so a holder oriented to root-forward makes the
+  // weapon reliably point where the player aims. Trade-off: it doesn't swing with the arm animation (a proper fix
+  // is a held-pose clip / IK in the GLB). root scale is 1, so meter-built meshes need no counter-scale.
+  private readonly weaponHolder = new Group();
+  private readonly flashlightHolder = new Group();
   private weaponMeshes: Record<WeaponVisual, Object3D> | null = null;
+  private offHandLightMesh: Object3D | null = null;
   private currentWeaponVisual: WeaponVisual | null = null;
   private desiredWeaponItem: number | null = null;
-  // T141 — off-hand (left) flashlight prop: parented to the left-hand bone, shown only while the beam is lit.
-  private offHandLightMesh: Object3D | null = null;
   private offhandLightOn = false;
 
   constructor(opts: PlayerAvatarOptions) {
@@ -169,6 +169,13 @@ export class PlayerAvatar {
     // T127: tag the WHOLE avatar so effectViews excludes it from the static-structure blood/decal raycast
     // (the old code keyed on CapsuleGeometry — the rigged mesh has none, so a tag is the stable signal).
     this.root.userData.isPlayerAvatar = true;
+    // T141: hand holders under root. rotation.y = -π/2 turns a weapon's local +X long axis onto root's +Z (the
+    // mesh-forward / aim direction); the weapon (right) + flashlight (left) sit at hand height, a touch forward.
+    this.weaponHolder.position.set(WEAPON_HAND_OFFSET.x, WEAPON_HAND_OFFSET.y, WEAPON_HAND_OFFSET.z);
+    this.weaponHolder.rotation.y = -Math.PI / 2;
+    this.flashlightHolder.position.set(-WEAPON_HAND_OFFSET.x, WEAPON_HAND_OFFSET.y, WEAPON_HAND_OFFSET.z);
+    this.flashlightHolder.rotation.y = -Math.PI / 2;
+    this.root.add(this.weaponHolder, this.flashlightHolder);
   }
 
   /** Whether the GLB has been swapped in (the mixer + skinned mesh are live). */
@@ -237,41 +244,20 @@ export class PlayerAvatar {
     }
     this.mixer.addEventListener('finished', this.onActionFinished);
 
-    // T141: resolve the right-hand bone + prebuild the held-weapon meshes (tracked for V24), then seat whatever
-    // weapon was requested before the GLB resolved.
-    this.setupWeaponRig(model, track);
+    // T141: prebuild the held-weapon meshes (tracked for V24) into the root-holders, then seat whatever weapon
+    // was requested before the GLB resolved. No bone lookup — the holders ride root-forward (interim hold pose).
+    this.setupWeaponRig(track);
     this.loaded = true;
     this.applyWeapon();
   }
 
-  /** Find the RIGHT-HAND bone, capture the inverse of its world scale (to render meter-built weapons at size),
-   *  and build the per-visual weapon meshes (detached until `applyWeapon` parents the active one). */
-  private setupWeaponRig(model: Object3D, track: TrackFn): void {
-    let skinned: SkinnedMesh | undefined;
-    model.traverse((o) => {
-      if (!skinned && (o as SkinnedMesh).isSkinnedMesh) skinned = o as SkinnedMesh;
-    });
-    const bones = skinned?.skeleton.bones ?? [];
-    this.handBone = bones.find((b) => b.name === 'RightHand') ?? null;
-    model.updateWorldMatrix(true, true);
-    if (this.handBone) {
-      const s = this.handBone.getWorldScale(new Vector3());
-      this.invHandScale = s.x > 0 ? 1 / s.x : 1;
-    }
+  /** Build the per-visual weapon meshes + the off-hand flashlight prop and seat them in the root-holders. */
+  private setupWeaponRig(track: TrackFn): void {
     this.weaponMeshes = buildWeaponMeshes(track);
-
-    // T141: off-hand flashlight prop — parent to the LEFT-hand bone (counter-scaled), hidden until lit.
-    const offBone = bones.find((b) => b.name === 'LeftHand') ?? null;
-    if (offBone) {
-      const inv = offBone.getWorldScale(new Vector3());
-      const invScale = inv.x > 0 ? 1 / inv.x : 1;
-      const mesh = buildFlashlightMesh(track);
-      mesh.scale.setScalar(invScale);
-      mesh.position.set(WEAPON_HOLD_OFFSET.x * invScale, WEAPON_HOLD_OFFSET.y * invScale, WEAPON_HOLD_OFFSET.z * invScale);
-      mesh.visible = this.offhandLightOn; // apply any request made before the GLB attached
-      offBone.add(mesh);
-      this.offHandLightMesh = mesh;
-    }
+    const flashlight = buildFlashlightMesh(track);
+    flashlight.visible = this.offhandLightOn; // apply any request made before the GLB attached
+    this.flashlightHolder.add(flashlight);
+    this.offHandLightMesh = flashlight;
   }
 
   /** T141: show/hide the off-hand flashlight prop (the SpotLight beam itself lives in the scene's FlashlightSystem).
@@ -291,23 +277,14 @@ export class PlayerAvatar {
     this.applyWeapon();
   }
 
-  /** Parent the desired weapon visual to the hand bone (swapping out any previous), counter-scaled + seated. */
+  /** Parent the desired weapon visual into the root weapon-holder (swapping out any previous). The holder seats +
+   *  forward-orients it; the mesh sits at the holder origin (meters, root scale 1 — no counter-scale). */
   private applyWeapon(): void {
-    if (!this.handBone || !this.weaponMeshes) return; // rig not attached yet — re-applied from attachGltf
+    if (!this.weaponMeshes) return; // meshes not built yet — re-applied from attachGltf
     const visual = this.desiredWeaponItem !== null ? weaponVisualForItem(this.desiredWeaponItem) : null;
     if (visual === this.currentWeaponVisual) return;
-    if (this.currentWeaponVisual) this.handBone.remove(this.weaponMeshes[this.currentWeaponVisual]);
-    if (visual) {
-      const mesh = this.weaponMeshes[visual];
-      mesh.scale.setScalar(this.invHandScale);
-      mesh.position.set(
-        WEAPON_HOLD_OFFSET.x * this.invHandScale,
-        WEAPON_HOLD_OFFSET.y * this.invHandScale,
-        WEAPON_HOLD_OFFSET.z * this.invHandScale,
-      );
-      mesh.rotation.set(WEAPON_HOLD_EULER.x, WEAPON_HOLD_EULER.y, WEAPON_HOLD_EULER.z);
-      this.handBone.add(mesh);
-    }
+    if (this.currentWeaponVisual) this.weaponHolder.remove(this.weaponMeshes[this.currentWeaponVisual]);
+    if (visual) this.weaponHolder.add(this.weaponMeshes[visual]);
     this.currentWeaponVisual = visual;
   }
 
@@ -358,7 +335,6 @@ export class PlayerAvatar {
     this.currentClip = null;
     this.loaded = false;
     // T141: drop weapon refs (the GPU resources are registry-owned → freed on host dispose, V24).
-    this.handBone = null;
     this.weaponMeshes = null;
     this.currentWeaponVisual = null;
     this.offHandLightMesh = null;

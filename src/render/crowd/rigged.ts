@@ -145,7 +145,10 @@ export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
   return {
     gravity: resolve(renderingConfig.ragdollGravityMetersPerSec2, tier),
     linearDamping: resolve(renderingConfig.ragdollLinearDamping, tier),
+    internalLinearDamping: resolve(renderingConfig.ragdollInternalLinearDamping, tier),
     angularDamping: resolve(renderingConfig.ragdollAngularDamping, tier),
+    tumbleDamping: resolve(renderingConfig.ragdollTumbleDamping, tier),
+    jointAngularDamping: resolve(renderingConfig.ragdollJointAngularDamping, tier),
     groundRestitution: resolve(renderingConfig.ragdollGroundRestitution, tier),
     groundFriction: resolve(renderingConfig.ragdollGroundFriction, tier),
     constraintIterations: resolve(renderingConfig.ragdollConstraintIterations, tier),
@@ -164,6 +167,10 @@ export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
     elbowMax: resolve(renderingConfig.ragdollElbowMaxRadians, tier),
     kneeMax: resolve(renderingConfig.ragdollKneeMaxRadians, tier),
     trunkStiffness: resolve(renderingConfig.ragdollTrunkStiffness, tier),
+    trunkIterations: resolve(renderingConfig.ragdollTrunkIterations, tier),
+    maxLinearSpeed: resolve(renderingConfig.ragdollMaxLinearSpeed, tier),
+    maxAngularSpeed: resolve(renderingConfig.ragdollMaxAngularSpeed, tier),
+    explodeSpeed: resolve(renderingConfig.ragdollExplodeSpeed, tier),
   };
 }
 

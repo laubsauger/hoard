@@ -26,6 +26,7 @@ import {
 const T: AudioOutTuning = {
   masterCeiling: 0.85,
   gunshotGain: 0.7,
+  gunshotIndoorScale: 0.7,
   gunshotNoiseDecaySeconds: 0.12,
   gunshotThumpFreqHz: 70,
   gunshotThumpDecaySeconds: 0.18,

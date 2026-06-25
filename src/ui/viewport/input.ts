@@ -14,6 +14,7 @@ import type { RenderAccessibility } from '../../render/accessibility';
 import { ImpactView, type ImpactIngestContext } from '../../render/effects/impactView';
 import type { RaycastSurfaceProjector } from '../../render/effects/surfaceProjector';
 import { inputStore } from '../../stores/input';
+import { inventoryViewStore } from '../../stores/inventoryView';
 import { interactionSelectStore } from '../../stores/interactionSelect';
 import { sessionStore } from '../../stores/session';
 import { uiStore } from '../../stores/ui';
@@ -93,9 +94,19 @@ export function registerInput(args: RegisterInputArgs): () => void {
   };
   const onClick = (): void => {
     gameAudio.resume(); // autoplay policy: a click is a valid gesture to start audio (always, even a dry click).
-    // T136: a UI panel owns the mouse — a click in the world must NOT fire the gun while the inventory/loot/
-    // settings pane is open (you're operating the UI, not shooting). The wheel/panes capture their own clicks.
-    if (uiStore.getState().activePanel !== 'none') return;
+    // T136: a UI panel owns the mouse — a click in the world must NOT fire the gun while a pane is open (you're
+    // operating the UI, not shooting). The wheel/panes capture their OWN clicks, so a click that reaches the
+    // CANVAS landed on the background. For the inventory side-panel (no backdrop), that background click CLOSES it
+    // + re-arms the player ("click outside to dismiss"); the next click then acts. Other panels just suppress fire.
+    const panel = uiStore.getState().activePanel;
+    if (panel !== 'none') {
+      if (panel === 'inventory') {
+        inventoryViewStore.getState().setOpenContainer(null);
+        inventoryViewStore.getState().setLootAnchor(null);
+        uiStore.getState().closePanel();
+      }
+      return;
+    }
     const runtime = getRuntime();
     const access = getAccess();
     const hit = aim.worldPoint(camera);
@@ -111,14 +122,21 @@ export function registerInput(args: RegisterInputArgs): () => void {
     // otherwise the player "shoots" with no ammo. `undefined` = a melee/non-counting weapon, which DOES act.
     const didFire = shot.firedRounds === undefined || shot.firedRounds > 0;
     if (!didFire) return;
-    gameAudio.gunshot(scene.isPlayerInsideBuilding()); // sampled pistol — indoor/outdoor by the player's location.
-    bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
-    // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
-    // never draws through a wall on a miss into structure (V49/V53/B20).
-    // B7 / T139: muzzle flash + a tracer FAN (one trail per pellet across the equipped weapon's spread — a
-    // shotgun draws a visible cone, a pistol a single trail) + report on fire.
-    const scatter = runtime.currentWeaponScatter();
-    scene.fireFeedback(dx, dz, shot.stopDistanceMeters, scatter.pellets, scatter.spreadDegrees);
+    const weaponId = runtime.currentWeaponId();
+    const isMelee = weaponId === 'melee';
+    if (isMelee) {
+      // A swing — the item-swing whoosh, NOT a gunshot. No muzzle flash / tracer / max self-noise (a swing is
+      // far quieter than a shot); the struck-body wound below still applies. (Fixes melee mis-playing the pistol.)
+      gameAudio.swing();
+    } else {
+      gameAudio.gunshot(scene.isPlayerInsideBuilding(), weaponId); // per-weapon sample (shotgun fire+eject), indoor/outdoor pistol.
+      bumpSelfNoise(); // a gunshot is the loudest thing the player produces (HUD noise meter).
+      // Pass the authoritative stop distance (struck body or first wall) so the tracer terminates there and
+      // never draws through a wall on a miss into structure (V49/V53/B20). B7 / T139: muzzle flash + a tracer FAN
+      // (one trail per pellet across the equipped weapon's spread) + report on fire.
+      const scatter = runtime.currentWeaponScatter();
+      scene.fireFeedback(dx, dz, shot.stopDistanceMeters, scatter.pellets, scatter.spreadDegrees);
+    }
     // T80/T81 (V57): DISTINCT surface response, branched off the authoritative ShotResult.
     //   hit === true  → a zombie was struck → blood already fires (bloodView); add a WOUND mark at the
     //                   struck body point. NO wall spark.
@@ -137,10 +155,18 @@ export function registerInput(args: RegisterInputArgs): () => void {
       if (shot.targetEntity != null) {
         impactView.woundOnBody(shot.targetEntity as unknown as number, shot.region ?? 'torsoUpper', -ndx, -ndz, impactCtx);
       }
-    } else if (stop < firearmRangeMeters) {
-      // Structure stop: find the real wall surface the nav-grid blocker corresponds to (raycast to range
-      // and take the first structure face), then spark + hole there oriented to its normal.
-      const wh = surfaceProjector.wallAlong(p.x, p.y, p.z, ndx, ndz, firearmRangeMeters);
+    } else if (!isMelee && stop < firearmRangeMeters) {
+      // Structure stop: spark + hole on the wall the round ACTUALLY stopped at. (Melee never punches wall holes.) The sim's `stop` already passed
+      // any OPEN/smashed window (the round flies through the gap), so probe for the surface starting JUST BEFORE
+      // the stop point rather than from the muzzle — otherwise the render ray returns the first solid wall mesh,
+      // which behind a smashed window is the empty gap → a bullet hole stamped in mid-air where the pane used to
+      // be. Starting the short probe past any opening lands the hole on the real blocker (a far wall, or a
+      // boarded/closed window that genuinely stops the round). (Fixes the "holes in the open window" report.)
+      const PROBE_BACK_METERS = 0.6; // begin a little behind the stop so the forward ray lands on the blocker face
+      const PROBE_SPAN_METERS = 1.6; // covers small sim-grid ↔ render-mesh discrepancy without catching a wall beyond
+      const sx = p.x + ndx * Math.max(0, stop - PROBE_BACK_METERS);
+      const sz = p.z + ndz * Math.max(0, stop - PROBE_BACK_METERS);
+      const wh = surfaceProjector.wallAlong(sx, p.y, sz, ndx, ndz, PROBE_SPAN_METERS);
       if (wh) impactView.structureImpact(wh.x, wh.y, wh.z, wh.nx, wh.ny, wh.nz, impactCtx);
     }
   };

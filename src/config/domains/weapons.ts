@@ -223,10 +223,10 @@ export const weaponsConfig = registerDomain('weapons', {
   rifleKnockback: num({ owner: 'weapons', unit: 'count', doc: 'Rifle ragdoll knockback ENERGY on a kill (T134) — a sharp high-velocity punch through the body. Sane impulse range ~0..15.', default: 7, min: 0, max: 100 }),
 
   // shotgun — many low-power pellets in a wide spread, short range, steep distance falloff.
-  shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50).', default: 20, min: 1, max: 100_000 }),
+  shotgunDamage: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun base damage PER PELLET before region multiplier + armor (V50). Bumped 20→25 for a tad more close-range punch.', default: 25, min: 1, max: 100_000 }),
   shotgunRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Shotgun maximum ray travel (V50).', default: 25, min: 1, max: 1000 }),
   shotgunStoppingPower: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun PER-PELLET penetration budget; a pellet stops at one body (V50).', default: 1, min: 0.1, max: 1000 }),
-  shotgunSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Shotgun full angular spread across the pellet cone (V50).', default: 14, min: 0, max: 90 }),
+  shotgunSpreadDegrees: num({ owner: 'weapons', unit: 'degrees', doc: 'Shotgun full angular spread across the pellet cone (V50). Widened 14→18 for a slightly broader fan.', default: 18, min: 0, max: 90 }),
   shotgunDamageFalloffPerMeter: num({ owner: 'weapons', unit: 'ratio', doc: 'Shotgun fraction of damage lost per meter of travel (steep) (V50).', default: 0.03, min: 0, max: 1 }),
   shotgunPellets: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun pellets per shot (the spread cone) (V50).', default: 8, min: 1, max: 64, integer: true }),
   shotgunArmorPenetration: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of target armor a shotgun pellet ignores (V50).', default: 0.3, min: 0, max: 1 }),
@@ -275,6 +275,15 @@ export const weaponsConfig = registerDomain('weapons', {
   shotgunReserveAmmo: num({ owner: 'weapons', unit: 'count', doc: 'Shotgun spare shells held in reserve (T74).', default: 24, min: 0, max: 100_000, integer: true }),
   shotgunReloadTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ticks a shotgun reload takes (T74).', default: 75, min: 1, max: 6000, integer: true }),
   shotgunSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the shotgun (T74).', default: 15, min: 0, max: 6000, integer: true }),
+
+  // ---- Per-class FIRE RATE (refire cooldown between shots, fixed-clock ticks; 0 = uncapped = click cadence) ----
+  // The shotgun's interval is its FIRE+EJECT sample length (shotgun_shot_eject.wav ≈ 1.64 s) × tickHz(30) ≈ 49
+  // ticks: the next shell can't chamber until the pump/eject finishes, so the cadence matches the sound. Pistol +
+  // rifle stay 0 (semi-auto at click speed — unchanged). Baked as a deterministic config value (the headless sim
+  // never reads the audio buffer — V1/V2); keep it in sync if the clip is replaced.
+  pistolFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between pistol shots (0 = uncapped / click cadence).', default: 0, min: 0, max: 600, integer: true }),
+  rifleFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between rifle shots (0 = uncapped).', default: 0, min: 0, max: 600, integer: true }),
+  shotgunFireIntervalTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Min ticks between shotgun shots = the fire+eject sample length (≈1.64 s @ 30 tickHz). Pump cadence; keep in sync with shotgun_shot_eject.wav.', default: 49, min: 0, max: 600, integer: true }),
 
   // melee — unlimited; only a (short) swap ready delay applies.
   meleeClassSwapTicks: num({ owner: 'weapons', unit: 'ticks', doc: 'Fixed-clock ready delay after switching TO the melee weapon; melee has no ammo/reload (T74).', default: 6, min: 0, max: 6000, integer: true }),

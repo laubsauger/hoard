@@ -208,3 +208,34 @@ describe('T74 shotgun spends ONE shell for its whole pellet pattern', () => {
     expect(h.zombies.getHealth(b)).toBeLessThan(1_000_000);
   });
 });
+
+describe('refire cooldown (fire rate)', () => {
+  it('the shotgun cannot fire again until its fire-interval elapses (pump cadence == sample length)', () => {
+    const h = harness();
+    spawn(h, 5, 0);
+    h.sys.setWeapon('shotgun');
+    const interval = h.weapons.shotgunFireIntervalTicks;
+    expect(interval).toBeGreaterThan(0);
+
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(1);
+    const magAfter = h.sys.currentAmmo().magazine;
+
+    // immediate re-fire is blocked while pumping — no round fired, no shell consumed.
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(0);
+    expect(h.sys.currentAmmo().magazine).toBe(magAfter);
+
+    // one tick short still blocked; at the interval it fires again.
+    h.sys.tick(interval - 1);
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(0);
+    h.sys.tick(1);
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(1);
+  });
+
+  it('the pistol has no refire cooldown — fires every click', () => {
+    const h = harness();
+    spawn(h, 5, 0);
+    expect(h.weapons.pistolFireIntervalTicks).toBe(0);
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(1);
+    expect(h.sys.fire(ORIGIN, 1, 0, 'torsoUpper').firedRounds).toBe(1); // back-to-back, no gate
+  });
+});

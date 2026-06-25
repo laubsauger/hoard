@@ -151,6 +151,10 @@ export class CombatSystem {
   private internalTick = 0;
   /** Monotonic per-resolved-hit nonce — seeds the deterministic hit-location roll (V26 replay-stable). */
   private hitSeq = 0;
+  /** Tick of each class's last fired shot — gates the refire cooldown (`fireIntervalTicks`, the shotgun pump). */
+  private readonly lastFireTick: Partial<Record<WeaponId, number>> = {};
+  /** DEV: when true, firing consumes no ammo + never reads empty (infinite-ammo cheat). */
+  private infiniteAmmo = false;
   /** A reload or swap is in flight until `busyUntilTick`; null when the weapon is ready. */
   private busyKind: 'reload' | 'swap' | null = null;
   /** Tick at which the in-flight reload/swap completes (deadline measured against `now()`). */
@@ -216,6 +220,11 @@ export class CombatSystem {
       throw new Error(`unknown weapon class '${id}'`);
     }
     this.equippedId = id;
+  }
+
+  /** DEV: toggle the infinite-ammo cheat (firing then consumes no ammo + never reads empty). */
+  setInfiniteAmmo(on: boolean): void {
+    this.infiniteAmmo = on;
   }
 
   /**
@@ -422,9 +431,19 @@ export class CombatSystem {
       return { hit: false, candidateCount: 0, stopDistanceMeters: weapon.rangeMeters, firedRounds: 0 };
     }
 
+    // Refire COOLDOWN (fire rate): a class with fireIntervalTicks > 0 cannot fire again until that many ticks
+    // have passed (the shotgun's pump/eject cadence == its sample length). A no-fire that spends no ammo.
+    if (weapon.fireIntervalTicks > 0) {
+      const last = this.lastFireTick[this.equippedId];
+      if (last !== undefined && this.now() < last + weapon.fireIntervalTicks) {
+        return { hit: false, candidateCount: 0, stopDistanceMeters: weapon.rangeMeters, firedRounds: 0 };
+      }
+    }
+
     // T74 ammo: a firearm spends ONE round per shot (a shotgun spends one SHELL for its pellet pattern).
     // An empty magazine is a dry click — no damage. Melee carries no ammo entry and is unlimited.
-    const state = this.ammo[this.equippedId];
+    // DEV infinite-ammo: skip the empty check + the decrement entirely (the magazine readout stays put).
+    const state = this.infiniteAmmo ? undefined : this.ammo[this.equippedId];
     if (state) {
       if (state.magazine <= 0) {
         if (this.deps.weapons.autoReloadWhenEmpty && state.reserve > 0) this.reload();
@@ -438,6 +457,8 @@ export class CombatSystem {
       }
       state.magazine -= 1;
     }
+    // Committed to firing this shot — stamp the refire clock (gates the next shot by fireIntervalTicks).
+    this.lastFireTick[this.equippedId] = this.now();
 
     const { ndx: rawX, ndz: rawZ } = normalizeXZ(dirX, dirZ, 'firearm');
     const range = weapon.rangeMeters;

@@ -148,8 +148,8 @@ export const lightingConfig = registerDomain('lighting', {
   nightExposureBoostStops: num({
     owner: 'lighting',
     unit: 'ratio',
-    doc: 'Extra exposure stops applied at full darkness (scene-brightness 0) so a night scene stays just viewable after tone mapping (B6). LOWERED for the moonlit-night opening: the old +1.5 lifted the night street ~2× into flat grey; +0.6 keeps a faint floor (never crushed to pure black) while the open ground reads genuinely dark — picked out by the moon directional + the flashlight, not washed flat.',
-    default: 0.6,
+    doc: 'Extra exposure stops applied at full darkness (scene-brightness 0) so a night scene stays just viewable after tone mapping (B6). LOWERED for the moonlit-night opening: the old +1.5 lifted the night street ~2× into flat grey; kept a faint floor while the open ground reads genuinely dark. Lowered again 0.6→0.3 to COMPENSATE the baseExposure 1→1.3 day-brightness lift — night exposure (baseExposure·2^stops) stays ~constant (1.3·2^0.3 ≈ 1.6 vs old 1·2^0.6 ≈ 1.5) so daytime brightens without the dark night drifting brighter.',
+    default: 0.3,
     min: 0,
     max: 6,
   }),

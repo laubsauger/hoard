@@ -16,21 +16,50 @@ export const ragdollFields = {
     min: 1,
     max: 40,
   }),
+  // ---- DECOUPLED DAMPING (V4). The fall is split into a WHOLE-BODY rigid motion (common COM translation + a common
+  // tumble) and the NON-rigid residual (each body deviating from that rigid motion = limb flail). The common motion is
+  // damped LIGHTLY so the knockback TRAVELS + the body tumbles; the residual is damped HARD so the limbs stay stiff and
+  // never mangle. linearDamping = the light COM-translation drag; tumbleDamping = the light common-angular drag;
+  // internalLinearDamping + angularDamping = the heavy residual (relative) drags. ----
   ragdollLinearDamping: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Fraction of a body’s linear velocity bled per second (air drag) — low so a shot’s knockback TRAVELS instead of dying on the spot (T134).',
-    default: 0.8,
+    doc: 'Fraction of the WHOLE-BODY COM TRANSLATION velocity bled per second — LIGHT so a shot’s knockback TRAVELS (the body slides/tumbles across the ground) instead of damping to a crumble in place (T134).',
+    default: 0.35,
     min: 0,
     max: 8,
+  }),
+  ragdollInternalLinearDamping: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Fraction of each body’s RESIDUAL (non-rigid) linear velocity — its velocity relative to the whole-body rigid motion — bled per second. HEAVY so limbs don’t flail/mangle, while the common COM translation (linearDamping) stays free to travel (T134).',
+    default: 6,
+    min: 0,
+    max: 40,
   }),
   ragdollAngularDamping: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Fraction of a body’s ANGULAR velocity bled per second — bleeds spin so the body settles instead of tumbling forever (T134).',
-    default: 2.1,
+    doc: 'Fraction of each body’s RESIDUAL angular velocity (its spin relative to the common whole-body tumble) bled per second — HEAVY so limbs stop spinning independently (stiff, no flail) while the common tumble (tumbleDamping) survives (T134).',
+    default: 4.5,
     min: 0,
     max: 30,
+  }),
+  ragdollTumbleDamping: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Fraction of the COMMON whole-body tumble (the average angular velocity) bled per second — LIGHT so the corpse keeps rotating/tumbling as it travels after a hit instead of damping to a stop (T134).',
+    default: 0.5,
+    min: 0,
+    max: 30,
+  }),
+  ragdollJointAngularDamping: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Per-joint fraction of the RELATIVE angular velocity between a joint’s two bodies removed each substep — the “stiffness like damping” that keeps elbows/knees/shoulders/hips from flailing into a mangle, while still letting limbs flop (T134).',
+    default: 0.12,
+    min: 0,
+    max: 0.9,
   }),
   ragdollGroundRestitution: num({
     owner: 'rendering',
@@ -71,18 +100,18 @@ export const ragdollFields = {
   ragdollImpulseScale: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'force → initial linear SPEED (m/s) of the WHOLE body along the killing shot — the travelling shove (corpse lands AHEAD of where it stood; bigger force → farther) (T134).',
-    default: 0.25,
+    doc: 'force → initial COM SPEED (m/s) of the WHOLE body along the killing shot — the travelling shove. Tuned so pistol (force 4) clearly topples + travels and shotgun (force 13) launches visibly harder (T134).',
+    default: 0.5,
     min: 0,
-    max: 4,
+    max: 8,
   }),
   ragdollTorqueScale: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'force → initial tip-over ANGULAR speed (rad/s) of the chest about the horizontal axis ⟂ the shot — the body pitches over (T134).',
-    default: 0.28,
+    doc: 'force → initial whole-body TIP-OVER angular speed (rad/s) about the horizontal axis ⟂ the shot — the corpse pitches over in the shot direction (a directional topple, not a vertical crumple) (T134).',
+    default: 0.42,
     min: 0,
-    max: 4,
+    max: 8,
   }),
   ragdollSettleEnergyThreshold: num({
     owner: 'rendering',
@@ -123,8 +152,8 @@ export const ragdollFields = {
   ragdollSpineLimitRadians: num({
     owner: 'rendering',
     unit: 'radians',
-    doc: 'Spine (pelvis↔chest) swing+twist limit — TIGHT so the trunk stays a stiff board, not a towel fold (T134).',
-    default: 0.3,
+    doc: 'Spine (pelvis↔chest) swing+twist limit — VERY TIGHT so the trunk stays a stiff board (moves as one), never folds like a towel (T134).',
+    default: 0.14,
     min: 0.02,
     max: 1.5,
   }),
@@ -179,9 +208,46 @@ export const ragdollFields = {
   ragdollTrunkStiffness: num({
     owner: 'rendering',
     unit: 'ratio',
-    doc: 'Fraction of the pelvis↔chest relative angular velocity removed each substep so they co-rotate like a board — the stiff TORSO (T134).',
-    default: 0.35,
+    doc: 'Fraction of the pelvis↔chest relative angular velocity removed each substep so they co-rotate like a board — HIGH for the near-rigid TORSO that barely bends (T134).',
+    default: 0.7,
     min: 0,
-    max: 0.9,
+    max: 0.95,
+  }),
+  ragdollTrunkIterations: num({
+    owner: 'rendering',
+    unit: 'count',
+    doc: 'EXTRA positional solver iterations run on the trunk (spine) joint each substep so the torso stays rigid + the pelvis↔chest anchor barely separates under impact (T134).',
+    default: 6,
+    min: 0,
+    max: 24,
+    integer: true,
+    tiers: { 'desktop-high': 6, 'desktop-compat': 4, 'mobile-webgpu': 2 },
+  }),
+  // ---- STABILITY CAPS / EXPLOSION BACKSTOP (V4). Clamp the PBD-recomputed velocities to a physical range; if a body
+  // still goes non-finite or its speed blows past the explode threshold, reset it to rest on the ground (a correctness
+  // guard against solver blow-ups, NOT a gameplay fallback). ----
+  ragdollMaxLinearSpeed: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'Hard cap (m/s) on each body’s recomputed linear speed per substep — a fast limb whip can spike Δx/h; keep it physical (T134).',
+    default: 14,
+    min: 1,
+    max: 60,
+  }),
+  ragdollMaxAngularSpeed: num({
+    owner: 'rendering',
+    unit: 'ratio',
+    doc: 'Hard cap (rad/s) on each body’s recomputed angular speed per substep (T134).',
+    default: 22,
+    min: 1,
+    max: 80,
+  }),
+  ragdollExplodeSpeed: num({
+    owner: 'rendering',
+    unit: 'metersPerSecond',
+    doc: 'If a body’s linear speed exceeds this (or any state goes non-finite) the solver is judged to have blown up and that body is reset to rest on the ground — a correctness backstop so a penetrating body never “freaks out” (T134).',
+    default: 28,
+    min: 2,
+    max: 120,
   }),
 };

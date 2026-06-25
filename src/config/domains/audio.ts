@@ -102,6 +102,7 @@ export const audioConfig = registerDomain('audio', {
   }),
   // ---- player gunshot (direct, fired from the player-fire path) ----
   outGunshotGain: num({ owner: 'audio', unit: 'ratio', doc: 'Peak gain of a player gunshot before master scaling.', default: 0.7, min: 0, max: 1 }),
+  outGunshotIndoorScale: num({ owner: 'audio', unit: 'ratio', doc: 'Extra gain scale on the INDOOR gunshot sample — the room clip read too loud, so it is toned down vs the outdoor shot. 1 = no change.', default: 0.7, min: 0, max: 1 }),
   outGunshotNoiseDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Exponential decay time of the gunshot noise crack.', default: 0.12, min: 0.01, max: 2 }),
   outGunshotThumpFreqHz: num({ owner: 'audio', unit: 'hz', doc: 'Base frequency of the gunshot low thump.', default: 70, min: 20, max: 400 }),
   outGunshotThumpDecaySeconds: num({ owner: 'audio', unit: 'seconds', doc: 'Exponential decay time of the gunshot low thump.', default: 0.18, min: 0.01, max: 2 }),

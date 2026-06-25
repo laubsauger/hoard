@@ -23,6 +23,7 @@ export {
   type ToneMappingMode,
 } from './renderer';
 export { createWebGpuBackendFactory, type WebGpuBackendOptions } from './webgpuBackend';
+export { type AoSettings } from './postFx';
 export {
   CameraRig,
   resolveCameraSettings,

@@ -8,6 +8,7 @@
 // consumer (renderingConfig.X) and every test is unchanged — only the field DEFINITIONS were relocated.
 
 import { registerDomain } from '../registry';
+import { aoFields } from './rendering/ao';
 import { bloodFields } from './rendering/blood';
 import { fireFields } from './rendering/fire';
 import { impactFields } from './rendering/impact';
@@ -19,6 +20,7 @@ import { houseFields } from './rendering/house';
 import { ragdollFields } from './rendering/ragdoll';
 
 export const renderingConfig = registerDomain('rendering', {
+  ...aoFields,
   ...bloodFields,
   ...fireFields,
   ...impactFields,

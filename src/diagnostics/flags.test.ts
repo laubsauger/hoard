@@ -10,9 +10,10 @@ describe('DebugFlagState', () => {
     expect(s.get().forceLodLevel).toBeNull();
     // Debug OVERLAYS default off.
     expect(s.get().showPlayerVision).toBe(false);
-    // Gameplay render features (vision-cone fog-of-war + flashlight) default ON.
+    // Gameplay render features (vision-cone fog-of-war + flashlight + ambient occlusion) default ON.
     expect(s.get().cullToVisionCone).toBe(true);
     expect(s.get().flashlight).toBe(true);
+    expect(s.get().ao).toBe(true);
   });
 
   it('toggles a single boolean control without touching others', () => {
@@ -62,6 +63,9 @@ describe('DebugFlagState', () => {
       'showPlayerVision',
       'cullToVisionCone',
       'flashlight',
+      'ao',
+      'godMode',
+      'infiniteAmmo',
     ]);
   });
 });

@@ -33,6 +33,16 @@ export interface DebugFlags {
   readonly cullToVisionCone: boolean;
   /** Player flashlight SpotLight on/off (toggled with F). Default ON — the main light source at night. */
   readonly flashlight: boolean;
+  /** DEV: player takes no damage (immortality) — pushed to the runtime so combat/attacks no-op against the player. */
+  readonly godMode: boolean;
+  /** DEV: weapons never consume ammo + never read empty (infinite ammo) — pushed to the combat system. */
+  readonly infiniteAmmo: boolean;
+  /**
+   * GTAO ambient-occlusion post-processing on/off. Default ON — grounds the world (contact shadows in
+   * corners / under furniture / at wall-floor seams). Gated further by the per-tier `aoEnabled` config:
+   * effective AO = config aoEnabled (tier) AND this flag (so the lowest tier stays AO-off regardless).
+   */
+  readonly ao: boolean;
   /**
    * Force every renderable crowd member to a fixed LOD level for fidelity inspection.
    * null = automatic LOD selection (no override). A non-negative integer pins that LOD.
@@ -54,6 +64,10 @@ export const DEFAULT_DEBUG_FLAGS: DebugFlags = {
   // Gameplay render features (not overlays) — these default ON; dev can toggle them off for debugging.
   cullToVisionCone: true,
   flashlight: true,
+  ao: true,
+  // DEV cheats — OFF by default.
+  godMode: false,
+  infiniteAmmo: false,
   forceLodLevel: null,
 };
 // Frozen: this is a SHARED const default — never alias it into mutable state. A consumer that mutated the
@@ -80,6 +94,9 @@ const BOOLEAN_FLAG_KEYS: readonly BooleanDebugFlag[] = [
   'showPlayerVision',
   'cullToVisionCone',
   'flashlight',
+  'ao',
+  'godMode',
+  'infiniteAmmo',
 ];
 
 /** Mutable typed holder for the debug control flags. Node-testable; no DOM/3D dependency. */

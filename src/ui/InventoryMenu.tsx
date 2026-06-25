@@ -135,23 +135,29 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
     const onKey = (e: KeyboardEvent): void => {
       if (e.code === 'KeyI') {
         e.preventDefault();
-        const cur = uiStore.getState().activePanel;
-        // Manual inventory (T62): PLAYER-only. The real player + container contents are the sim's
-        // `runtime.inventorySnapshot()` (GameViewport publishes it live) — there is NO mock seed. Clear the open
-        // container + loot anchor so manual `I` shows ONLY the player and never a stale / auto-picked container
-        // (the scene's real "Kitchen Cupboard" was being grabbed by the otherName fallback). A real container
-        // shows only via the "Open / Loot" verb, which sets the open container + anchor (engineHandle.loot).
-        inventoryViewStore.getState().setOpenContainer(null);
-        inventoryViewStore.getState().setLootAnchor(null);
-        uiStore.getState().openPanel(cur === 'inventory' ? 'none' : 'inventory');
+        if (uiStore.getState().activePanel === 'inventory') {
+          inventoryViewStore.getState().setOpenContainer(null);
+          inventoryViewStore.getState().setLootAnchor(null);
+          uiStore.getState().closePanel();
+          return;
+        }
+        // Opening (T62): detect the nearest CONTAINER in reach + LOS so the right pane shows it (open `I` beside a
+        // cupboard → loot it directly). Range+LOS-gated in the sim, so a far authored cupboard is NOT auto-grabbed
+        // (the old stale-grab bug). The anchor proximity-gates it like the loot verb (walk away → it closes); with
+        // no container nearby both are null → the panel is player-only and stays open until I/Esc.
+        const label = handle?.nearestContainer() ?? null;
+        inventoryViewStore.getState().setOpenContainer(label);
+        inventoryViewStore.getState().setLootAnchor(label);
+        uiStore.getState().openPanel('inventory');
       } else if (e.code === 'Escape' && uiStore.getState().activePanel === 'inventory') {
+        inventoryViewStore.getState().setOpenContainer(null);
         inventoryViewStore.getState().setLootAnchor(null);
         uiStore.getState().closePanel();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [handle]);
 
   if (!open) return null;
   const player = containers.find((c) => c.container === 'player');

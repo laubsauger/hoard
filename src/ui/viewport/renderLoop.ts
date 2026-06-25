@@ -98,6 +98,11 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     last = nowMs;
     const runtime = getRuntime();
     const access = getAccess();
+    // DEV cheats: relay the immortality + infinite-ammo flags into the sim BEFORE it steps this frame (the sim
+    // owns the state; the UI store just drives it). Cheap idempotent setters — fine to push every frame.
+    const devFlags = debugViewStore.getState().flags;
+    runtime.setDevGodMode(devFlags.godMode);
+    runtime.setDevInfiniteAmmo(devFlags.infiniteAmmo);
 
     // T49/V12: authoritative pause-gate + single-player slowdown. simStepDt returns 0 while paused (the
     // sim HALTS — not just the UI) and otherwise scales the real frame dt by the time-scale.
@@ -276,6 +281,9 @@ export function startRenderLoop(ctx: RenderLoopContext): () => void {
     playerWasDead = dead;
     // B6: apply tone mapping + the interior/night-compensated exposure resolved by the scene.
     host.setToneMapping(scene.toneMappingMode, scene.currentExposure);
+    // GTAO ambient occlusion: live `ao` debug flag → backend enable (ANDed there with the per-tier config base,
+    // so the lowest tier stays AO-off regardless). Same debug-flag plumb as flashlight/vision-cone.
+    host.setAoEnabled(debugViewStore.getState().flags.ao);
     // T140: the crowd renders through the rigged + impostor lanes (skinning reads the baked bone texture in the
     // material positionNode) — no per-frame crowd compute pass. The old box transform-assembly compute is gone.
     host.render(scene.scene, camera.camera);

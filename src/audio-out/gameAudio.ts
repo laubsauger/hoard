@@ -35,6 +35,7 @@ export function resolveAudioOutTuning(tier: QualityTier): AudioOutTuning {
   return {
     masterCeiling: a.outMasterCeiling,
     gunshotGain: a.outGunshotGain,
+    gunshotIndoorScale: a.outGunshotIndoorScale,
     gunshotNoiseDecaySeconds: a.outGunshotNoiseDecaySeconds,
     gunshotThumpFreqHz: a.outGunshotThumpFreqHz,
     gunshotThumpDecaySeconds: a.outGunshotThumpDecaySeconds,
@@ -187,14 +188,21 @@ export class GameAudio {
     }
   }
 
-  /** Player gunshot — the authored indoor/outdoor pistol SAMPLE (no synthesized stand-in; if the clip hasn't
-   *  decoded the shot is simply silent that frame, never a fake crack). `indoor` picks the tighter room sample. */
-  gunshot(indoor = false): void {
+  /** Player gunshot — the authored weapon SAMPLE (no synthesized stand-in; if the clip hasn't decoded the shot is
+   *  simply silent that frame, never a fake crack). The SHOTGUN uses its own fire+eject clip; pistol/rifle use the
+   *  indoor/outdoor pistol sample, with the INDOOR variant toned down (it read too loud). `weapon` is the active
+   *  weapon class (`runtime.currentWeaponId()`). */
+  gunshot(indoor = false, weapon = 'pistol'): void {
     const peak = voiceGain(1, this.tuning.gunshotGain, 1, this.tuning.masterCeiling);
     if (peak <= 0) return;
     // EXEMPT from the voice cap (counted=false) — the player gunshot is priority feedback; otherwise rapid fire
-    // (the pistol clip is longer than the fire interval, so shots overlap) hit the cap and dropped every other.
-    this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', peak, 0, 0.03, /* counted */ false);
+    // (the clip is longer than the fire interval, so shots overlap) hit the cap and dropped every other.
+    if (weapon === 'shotgun' && this.samples.has('shotgunFire')) {
+      this.playSample('shotgunFire', peak, 0, 0.03, /* counted */ false);
+      return;
+    }
+    const gain = indoor ? peak * this.tuning.gunshotIndoorScale : peak; // the room clip read too loud — tone it down
+    this.playSample(indoor ? 'pistolIndoor' : 'pistolOutdoor', gain, 0, 0.03, /* counted */ false);
   }
 
   /** Player weapon RELOAD — the authored reload sample (magazine swap). */

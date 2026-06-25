@@ -60,6 +60,17 @@ body,
   backdrop-filter: blur(4px);
 }
 
+/* T140/T141: the meta readout (time / zombie counts / district pop) moves to the TOP-RIGHT so it stops
+   overlapping the bottom-center equipment hotbar. Pulled out of the bottom flex row (was space-between → centred). */
+.hbn-hud__threat {
+  position: absolute;
+  top: calc(16px * var(--hbn-ui-scale));
+  right: calc(16px * var(--hbn-ui-scale));
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 42vw;
+}
+
 .hbn-vital {
   display: flex;
   flex-direction: column;

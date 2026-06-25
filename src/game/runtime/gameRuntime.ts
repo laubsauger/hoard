@@ -1494,6 +1494,27 @@ export class GameRuntime {
     return near ? near.target : null;
   }
 
+  /** T62: the label of the nearest CONTAINER within interaction reach + line-of-sight, or null. Drives the manual
+   *  inventory (`I`) right pane — opening beside a cupboard shows THAT container, not an empty pane. Container-only
+   *  (a nearer door/window must not hide a reachable container, unlike the generic nearest-interactable) and
+   *  range+LOS-gated (so a far authored cupboard is never auto-grabbed — the old stale-grab bug). */
+  nearestContainerLabel(): string | null {
+    const range = this.structuresCfg.interactionRangeMeters;
+    const px = this.playerPos.x;
+    const pz = this.playerPos.z;
+    let best: string | null = null;
+    let bestD = Infinity;
+    for (const t of this.visibleInteractables()) {
+      if (t.kind !== 'container') continue;
+      const d = Math.hypot(t.x - px, t.z - pz);
+      if (d <= range && d < bestD) {
+        bestD = d;
+        best = t.label;
+      }
+    }
+    return best;
+  }
+
   /**
    * Validate + apply a contract Command (V1: UI issues intent, engine validates, may fail with a reason).
    * Movement + firing flow through their own authoritative methods (no command kind exists for them in the
@@ -1629,9 +1650,21 @@ export class GameRuntime {
    */
   private damagePlayer(_slot: ZombieSlot, damageFraction: number): void {
     if (this.isPlayerDead()) return;
+    if (this.devGodMode) return; // DEV immortality — absorb all player damage
     this.lastPlayerHitTick = this.clock.tick; // T127: a fresh hit signal the render lane edge-detects (avatar flinch)
     this.playerSurvival.damage(damageFraction);
     if (this.isPlayerDead()) this.onPlayerDied();
+  }
+
+  // ---- DEV cheats (pushed from the debug-flag store each frame by the render loop; the sim OWNS the state) ----
+  private devGodMode = false;
+  /** DEV: player immortality — when on, `damagePlayer` absorbs all damage. */
+  setDevGodMode(on: boolean): void {
+    this.devGodMode = on;
+  }
+  /** DEV: infinite ammo — relayed to the combat system (no ammo consumption / never empty). */
+  setDevInfiniteAmmo(on: boolean): void {
+    this.combat.setInfiniteAmmo(on);
   }
 
   /** One-shot lethal transition: publish the 'dead' lifecycle phase so the UI can show game-over (V1). */

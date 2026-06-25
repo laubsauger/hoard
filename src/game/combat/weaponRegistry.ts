@@ -39,6 +39,9 @@ export interface WeaponClass {
    *  receives along the shot direction, DECOUPLED from damage so each weapon has its own kinetic signature
    *  (a pistol topples, a shotgun launches). Fed to the death seam as `DeathImpact.force`. */
   readonly knockback: number;
+  /** Min fixed-clock ticks between consecutive shots (refire cooldown / fire rate). 0 = uncapped (click cadence).
+   *  The shotgun's value = its fire+eject sample length so the cadence matches the pump sound (T74-adjacent). */
+  readonly fireIntervalTicks: number;
   // ---- T74 ammo / reload / swap ----
   /** Fixed-clock ready delay after switching TO this class via cycleWeapon; fire is blocked until ready. */
   readonly swapTicks: number;
@@ -66,6 +69,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       pellets: w.pistolPellets,
       armorPenetration: w.pistolArmorPenetration,
       knockback: w.pistolKnockback,
+      fireIntervalTicks: w.pistolFireIntervalTicks,
       swapTicks: w.pistolSwapTicks,
       magazineSize: w.pistolMagazineSize,
       reserveAmmo: w.pistolReserveAmmo,
@@ -82,6 +86,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       pellets: w.riflePellets,
       armorPenetration: w.rifleArmorPenetration,
       knockback: w.rifleKnockback,
+      fireIntervalTicks: w.rifleFireIntervalTicks,
       swapTicks: w.rifleSwapTicks,
       magazineSize: w.rifleMagazineSize,
       reserveAmmo: w.rifleReserveAmmo,
@@ -98,6 +103,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       pellets: w.shotgunPellets,
       armorPenetration: w.shotgunArmorPenetration,
       knockback: w.shotgunKnockback,
+      fireIntervalTicks: w.shotgunFireIntervalTicks,
       swapTicks: w.shotgunSwapTicks,
       magazineSize: w.shotgunMagazineSize,
       reserveAmmo: w.shotgunReserveAmmo,
@@ -114,6 +120,7 @@ export function buildWeaponRegistry(w: Weapons): Readonly<Record<WeaponId, Weapo
       pellets: w.meleeClassPellets,
       armorPenetration: w.meleeClassArmorPenetration,
       knockback: w.meleeClassKnockback,
+      fireIntervalTicks: 0, // melee swings via the timed melee window, not this refire gate
       swapTicks: w.meleeClassSwapTicks,
       // melee is UNLIMITED: no magazine / reserve / reload (T74).
     }),

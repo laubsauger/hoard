@@ -4,8 +4,9 @@
 // (Math.random) is fine for variant choice (audio is not replay-deterministic). Decoding is async + best-effort
 // — a clip that fails to fetch/decode is simply absent (its bank falls back to silent / the synth), never throws.
 
-/** Eagerly-resolved URL of every sfx clip (Vite rewrites these to hashed, base-aware asset URLs at build). */
-const SFX_URLS = import.meta.glob('../assets/sfx/**/*.mp3', {
+/** Eagerly-resolved URL of every sfx clip (Vite rewrites these to hashed, base-aware asset URLs at build).
+ *  Both `.mp3` (most authored clips) and `.wav` (e.g. the shotgun fire+eject) are picked up + decoded. */
+const SFX_URLS = import.meta.glob('../assets/sfx/**/*.{mp3,wav}', {
   eager: true,
   query: '?url',
   import: 'default',
@@ -18,6 +19,8 @@ export const SFX_BANKS = {
   pistolIndoor: ['single-pistol-indoor'],
   pistolOutdoor: ['single-pistol-outdoor'],
   pistolReload: ['pistol-reload'],
+  shotgunFire: ['shotgun_shot_eject'], // single fire+eject clip (its length sets the shotgun fire rate)
+  itemSwing: ['item-swing'], // melee / item swing whoosh
   grunt: ['grunt/grunt-'], // 7 separated variants
   footstepConcrete: ['concrete-footsteps'],
   footstepDirt: ['walking-on-dirt', 'footsteps-dirt-gravel'],

@@ -5,7 +5,7 @@
 // same lifecycle the single effect had inline (V24).
 
 import Stats from 'stats.js';
-import { RendererHost, createWebGpuBackendFactory, type CameraRig } from '../../render/engine';
+import { RendererHost, createWebGpuBackendFactory, type CameraRig, type AoSettings } from '../../render/engine';
 import { resolve } from '../../config/spec';
 import { renderingConfig } from '../../config/domains/rendering';
 import type { QualityTier } from '../../config/types';
@@ -29,10 +29,23 @@ export function createDevStats(): Stats | null {
   return stats;
 }
 
+/** Resolve the per-tier GTAO ambient-occlusion settings (V4 — no magic numbers; lowest tier disables AO). */
+function resolveAoSettings(tier: QualityTier): { enabled: boolean } & AoSettings {
+  return {
+    enabled: resolve(renderingConfig.aoEnabled, tier),
+    radius: resolve(renderingConfig.aoRadius, tier),
+    samples: resolve(renderingConfig.aoSamples, tier),
+    distanceExponent: resolve(renderingConfig.aoDistanceExponent, tier),
+    scale: resolve(renderingConfig.aoScale, tier),
+    thickness: resolve(renderingConfig.aoThickness, tier),
+    intensity: resolve(renderingConfig.aoIntensity, tier),
+  };
+}
+
 /** Construct the renderer host behind the isolated WebGPU backend boundary (no init yet). */
 export function createRendererHost(canvas: HTMLCanvasElement, tier: QualityTier): RendererHost {
   return new RendererHost({
-    factory: createWebGpuBackendFactory({ canvas }),
+    factory: createWebGpuBackendFactory({ canvas, ao: resolveAoSettings(tier) }),
     maxRecoveries: resolve(renderingConfig.deviceLossMaxRecoveries, tier),
   });
 }

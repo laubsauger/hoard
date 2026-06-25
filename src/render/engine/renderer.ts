@@ -22,6 +22,9 @@ export interface RendererBackend {
   compute?(node: ComputeNode): void;
   setSize(width: number, height: number): void;
   setPixelRatio(ratio: number): void;
+  /** Live GTAO ambient-occlusion toggle (the `ao` debug flag). Optional so the non-GPU test fake need not
+   *  implement it; the WebGPU backend ANDs it with the per-tier config base. */
+  setAoEnabled?(enabled: boolean): void;
   /** Register a device-loss listener; returns an unsubscribe fn (V23). */
   onDeviceLost(cb: (reason: string) => void): () => void;
   dispose(): void;
@@ -116,6 +119,12 @@ export class RendererHost {
 
   setPixelRatio(ratio: number): void {
     this.backend?.setPixelRatio(ratio);
+  }
+
+  /** Live GTAO toggle: forward the `ao` debug flag to the backend (combined there with the per-tier config
+   *  base). No-op on the non-GPU fake / before a backend is ready. */
+  setAoEnabled(enabled: boolean): void {
+    this.backend?.setAoEnabled?.(enabled);
   }
 
   /**

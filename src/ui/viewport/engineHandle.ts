@@ -48,6 +48,8 @@ export interface EngineHandle {
   nearestInteraction(): InteractionPrompt | null;
   /** T60: the nearest interactable target (full state) — the wheel resolves its context verbs. */
   nearestInteractable(): InteractionTargetWorld | null;
+  /** T62: label of the nearest CONTAINER in reach + LOS (drives the manual-inventory right pane), or null. */
+  nearestContainer(): string | null;
   /** T59: open a world container's loot panel (the "Search/Loot" verb for a storage target). */
   loot(): void;
   /** T138: USE (consume) one unit of a consumable from the player inventory — eat/drink/treat. Re-publishes the
@@ -138,6 +140,7 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
     climbWindow: () => { getRuntime().climbThroughNearestWindow(); },
     nearestInteraction: () => getRuntime().nearestInteractionPrompt(formatKeyCode(inputStore.getState().bindings.interact)),
     nearestInteractable: () => getRuntime().nearestInteractableTarget(),
+    nearestContainer: () => getRuntime().nearestContainerLabel(),
     loot: () => {
       // Open the dual-pane inventory ON the looted container (was only setting the container, never the
       // panel, so nothing showed — the InventoryMenu is gated on uiStore.activePanel === 'inventory').

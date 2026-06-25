@@ -29,10 +29,20 @@
 export interface RagdollConfig {
   /** Downward acceleration (m/s²). A touch heavier than 9.8 for game-feel. */
   readonly gravity: number;
-  /** Fraction of a body's LINEAR velocity bled per second (air drag). */
+  /** DECOUPLED DAMPING — the fall is split into a whole-body RIGID motion (common COM translation + common tumble) and
+   *  the non-rigid RESIDUAL (each body's deviation = limb flail). The common motion is damped lightly so the knockback
+   *  TRAVELS + the body tumbles; the residual is damped hard so the limbs stay stiff and never mangle. */
+  /** Light: fraction of the WHOLE-BODY COM TRANSLATION velocity bled per second (so the shove travels). */
   readonly linearDamping: number;
-  /** Fraction of a body's ANGULAR velocity bled per second (spin drag → settling). */
+  /** Heavy: fraction of each body's RESIDUAL (relative-to-rigid) linear velocity bled per second (anti-flail). */
+  readonly internalLinearDamping: number;
+  /** Heavy: fraction of each body's RESIDUAL angular velocity (spin minus the common tumble) bled per second. */
   readonly angularDamping: number;
+  /** Light: fraction of the COMMON whole-body tumble (average ω) bled per second (so the tumble survives). */
+  readonly tumbleDamping: number;
+  /** Per-joint fraction of the RELATIVE angular velocity between the joint's two bodies removed each substep
+   *  (the "stiffness like damping" → elbows/knees/shoulders/hips don't flail). */
+  readonly jointAngularDamping: number;
   /** Vertical bounce kept on a ground hit (0 = dead stop, 1 = perfectly elastic). */
   readonly groundRestitution: number;
   /** Coulomb friction coefficient at a ground capsule contact (0 = frictionless). */
@@ -72,6 +82,14 @@ export interface RagdollConfig {
   /** TRUNK STIFFNESS [0..1]: fraction of the pelvis↔chest RELATIVE angular velocity removed each substep so the
    *  two co-rotate like a board (energy-removing → stable; complements the tight spine limit). */
   readonly trunkStiffness: number;
+  /** Extra positional solver iterations on the trunk (spine) joint per substep → the torso stays rigid. */
+  readonly trunkIterations: number;
+  /** Hard cap (m/s) on a body's PBD-recomputed linear speed per substep (a limb whip can spike Δx/h). */
+  readonly maxLinearSpeed: number;
+  /** Hard cap (rad/s) on a body's PBD-recomputed angular speed per substep. */
+  readonly maxAngularSpeed: number;
+  /** Explosion backstop: above this speed (or on non-finite state) a body is reset to rest on the ground. */
+  readonly explodeSpeed: number;
 }
 
 /** Joint kinds — pick the per-joint limit parameters from config + drive the hinge/cone geometry at build. */
@@ -98,6 +116,8 @@ interface JointSpec {
   readonly twistHi: number;
   /** Relative-angular-velocity removal fraction [0..1] (trunk co-rotation stiffness; 0 for floppy joints). */
   readonly coupling: number;
+  /** True for the near-rigid trunk (spine) joint → it gets EXTRA positional solver iterations (stiff torso). */
+  readonly trunk: boolean;
 }
 
 /** The immutable per-archetype ragdoll definition (one entry per rigid body + the joints wiring them). */
@@ -168,9 +188,6 @@ export interface RagdollTopology {
 const EPS = 1e-9;
 /** Cap any single PBD correction rotation so a low-inertia body can't blow up in one iteration. */
 const MAX_CORRECTION_RADIANS = 0.25;
-/** Stability guards on the PBD-recomputed velocities (a fast limb whip can spike (Δx/h); keep it physical). */
-const MAX_LINEAR_SPEED = 14;
-const MAX_ANGULAR_SPEED = 22;
 
 function clampMag(x: number, max: number): number {
   return x > max ? max : x < -max ? -max : x;
@@ -357,6 +374,7 @@ export function buildRagdollSpec(topo: RagdollTopology, cfg: RagdollConfig): Rag
       twistLo: lim.twistLo,
       twistHi: lim.twistHi,
       coupling: lim.coupling,
+      trunk: j.limit === 'spine',
     };
   });
 
@@ -440,13 +458,23 @@ export class Ragdoll {
     this.w.fill(0);
     this.bones.set(spec.m0); // rest pose until first step
 
-    // Body height (max rest center y) drives the height-scaled upper-body launch.
-    let height = 0;
-    for (let i = 0; i < B; i++) height = Math.max(height, spec.restPos[i * 3 + 1]!);
-    const invH = height > EPS ? 1 / height : 0;
+    // Whole-body COM (mass-weighted) + the ground PIVOT below it. Seeding the impact as a RIGID rotation about the
+    // feet (translation + a common tumble) makes the corpse TOPPLE as one board: the decoupled damping then preserves
+    // this common motion (it travels + tumbles) while bleeding only the non-rigid limb flail. The upper body leads the
+    // tip naturally because ω×r grows with height — no per-body "upper leads" hack needed.
+    let comX = 0, comY = 0, comZ = 0, massSum = 0;
+    for (let i = 0; i < B; i++) {
+      const m = spec.invMass[i]! > EPS ? 1 / spec.invMass[i]! : 0;
+      massSum += m;
+      comX += m * spec.restPos[i * 3]!;
+      comY += m * spec.restPos[i * 3 + 1]!;
+      comZ += m * spec.restPos[i * 3 + 2]!;
+    }
+    if (massSum > EPS) { comX /= massSum; comY /= massSum; comZ /= massSum; }
+    const pivotX = comX, pivotY = 0, pivotZ = comZ; // tip over the feet, not the COM
 
     // Launch direction: the shot's local horizontal push. A force-less death (gravity) does NOT travel — it
-    // crumples straight DOWN where it stood; only the buckle below + a faint random tip topple it.
+    // crumples straight DOWN where it stood; only a faint random tip topples it.
     let dx = impactLocalX;
     let dz = impactLocalZ;
     const dmag = Math.hypot(dx, dz);
@@ -465,10 +493,10 @@ export class Ragdoll {
       rand(); // keep the PRNG stream aligned with the shot path (determinism)
     }
     const magJitter = 0.85 + rand() * 0.3; // ±15%
-    // travel = the WHOLE-body forward shove (so the corpse actually TRAVELS + lands ahead of where it stood).
+    // travel = the WHOLE-body forward shove (COM speed); spin = the common tip-over tumble (rad/s).
     const travel = hasShot ? cfg.impulseScale * force * magJitter : 0;
-    const spin = (hasShot ? cfg.torqueScale * force : cfg.torqueScale) * magJitter;
-    // Tip axis = up × pushDir (rotating the body's top toward the push direction). Gravity → a random tip axis.
+    const spin = (hasShot ? cfg.torqueScale * force : cfg.torqueScale * 0.5) * magJitter;
+    // Tip axis = up × pushDir (rolls the body's top toward the push direction). Gravity → a random tip axis.
     let tipX: number, tipZ: number;
     if (hasShot) {
       tipX = dz; // (0,1,0) × (dx,0,dz) = (dz, 0, -dx)
@@ -478,30 +506,24 @@ export class Ragdoll {
       tipX = Math.cos(a);
       tipZ = Math.sin(a);
     }
+    // Common whole-body angular velocity ω = tipAxis · spin (horizontal axis → a pitch-over).
+    const ox = tipX * spin, oy = 0, oz = tipZ * spin;
 
     const v = this.v;
     const w = this.w;
     for (let i = 0; i < B; i++) {
       const b3 = i * 3;
-      const hFrac = invH > 0 ? spec.restPos[b3 + 1]! * invH : 1;
-      let vx = 0, vy = 0, vz = 0, wx = 0, wy = 0, wz = 0;
-      // (1) Travelling shove — EVERY body's COM moves along the shot so the whole corpse slides/topples forward.
-      vx += dx * travel;
-      vz += dz * travel;
-      // (2) Upper bodies (chest=1, head=2) lead the topple: extra forward speed scaled by height → it tips OVER
-      // the planted feet rather than folding in place.
-      if (i === RAGDOLL_BODY_INDEX.chest || i === RAGDOLL_BODY_INDEX.head) {
-        const s = travel * 0.6 * (0.4 + 0.6 * hFrac);
-        vx += dx * s;
-        vz += dz * s;
-        // Gravity crumple: a downward nudge on the upper body so the knees buckle + the trunk slumps straight down
-        // (scaled off gravity so it tracks the configured weight — a seeding heuristic, like the jitter below).
-        if (!hasShot) vy -= 0.04 * cfg.gravity;
-      }
-      // (3) Chest carries the tip-over spin.
-      if (i === RAGDOLL_BODY_INDEX.chest) {
-        wx += tipX * spin;
-        wz += tipZ * spin;
+      // Rigid velocity field about the feet pivot: v = translation + ω × (c − pivot).
+      const rx = spec.restPos[b3]! - pivotX;
+      const ry = spec.restPos[b3 + 1]! - pivotY;
+      const rz = spec.restPos[b3 + 2]! - pivotZ;
+      let vx = dx * travel + (oy * rz - oz * ry);
+      let vy = (oz * rx - ox * rz);
+      let vz = dz * travel + (ox * ry - oy * rx);
+      let wx = ox, wy = oy, wz = oz;
+      // Gravity crumple: a downward nudge on the upper body so the knees buckle + the trunk slumps straight down.
+      if (!hasShot && (i === RAGDOLL_BODY_INDEX.chest || i === RAGDOLL_BODY_INDEX.head)) {
+        vy -= 0.04 * cfg.gravity;
       }
       // Seeded per-body jitter (small) so the fall is unique yet reproducible — kept tiny so gravity stays in place.
       const jb = 0.15 * (1 + travel);
@@ -599,13 +621,13 @@ export class Ragdoll {
     for (let i = 0; i < B; i++) {
       if (im[i]! <= 0) continue;
       const b3 = i * 3;
-      v[b3] = clampMag((c[b3]! - this.cPrev[b3]!) / h, MAX_LINEAR_SPEED);
-      v[b3 + 1] = clampMag((c[b3 + 1]! - this.cPrev[b3 + 1]!) / h, MAX_LINEAR_SPEED);
-      v[b3 + 2] = clampMag((c[b3 + 2]! - this.cPrev[b3 + 2]!) / h, MAX_LINEAR_SPEED);
+      v[b3] = clampMag((c[b3]! - this.cPrev[b3]!) / h, cfg.maxLinearSpeed);
+      v[b3 + 1] = clampMag((c[b3 + 1]! - this.cPrev[b3 + 1]!) / h, cfg.maxLinearSpeed);
+      v[b3 + 2] = clampMag((c[b3 + 2]! - this.cPrev[b3 + 2]!) / h, cfg.maxLinearSpeed);
       angVelFromQuats(w, b3, this.qPrev, i * 4, q, i * 4, h);
-      w[b3] = clampMag(w[b3]!, MAX_ANGULAR_SPEED);
-      w[b3 + 1] = clampMag(w[b3 + 1]!, MAX_ANGULAR_SPEED);
-      w[b3 + 2] = clampMag(w[b3 + 2]!, MAX_ANGULAR_SPEED);
+      w[b3] = clampMag(w[b3]!, cfg.maxAngularSpeed);
+      w[b3 + 1] = clampMag(w[b3 + 1]!, cfg.maxAngularSpeed);
+      w[b3 + 2] = clampMag(w[b3 + 2]!, cfg.maxAngularSpeed);
     }
     // --- Ground at VELOCITY level (restitution + friction at the contact point → tumbles + settles), THEN a
     // positional Baumgarte push-out (AFTER the recompute, so the lift injects NO velocity → no vibration pump). ---

@@ -48,8 +48,21 @@ const GROUPS: readonly ToggleGroup[] = [
     ],
   },
   {
+    title: 'Render',
+    toggles: [
+      { key: 'ao', label: 'Ambient occlusion', hint: 'GTAO contact shadows (default on; off on lowest tier)' },
+    ],
+  },
+  {
     title: 'Sim',
     toggles: [{ key: 'freezeTiers', label: 'Freeze tiers', hint: 'pin tier assignment' }],
+  },
+  {
+    title: 'Cheats',
+    toggles: [
+      { key: 'godMode', label: 'Immortality', hint: 'player takes no damage' },
+      { key: 'infiniteAmmo', label: 'Infinite ammo', hint: 'no reloads, never empty' },
+    ],
   },
 ];
 
