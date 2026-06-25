@@ -54,6 +54,20 @@ const MOVEMENT_PROFILE = 'zombie-walk';
 const MOVEMENT_MASK = layerMask(CollisionLayer.Movement);
 
 /**
+ * Rotate the `current` heading toward `target` by AT MOST `maxStep` radians, the shortest way around. The body's
+ * FACING is driven by its goal direction (the separation-free flow / a beeline to a sealed target) and clamped to
+ * this turn rate so it never SNAPS or flip-flops — a blocked, jostled zombie smoothly keeps looking at the spot it
+ * wants (e.g. the player behind a window) instead of jerking 180° with the neighbour repulsion. Pure (V26).
+ */
+function turnToward(current: number, target: number, maxStep: number): number {
+  let diff = target - current;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff)); // shortest signed delta in (-π, π]
+  if (diff > maxStep) diff = maxStep;
+  else if (diff < -maxStep) diff = -maxStep;
+  return current + diff;
+}
+
+/**
  * Deterministic STUCK-ESCAPE fan (T134/V101): when the desired flow step AND both axis-slides are blocked, the
  * body rotates its desired heading by these signed angle offsets — tried in this FIXED order (nearest the
  * desired heading first, alternating sides) — and takes the first that yields a radius-walkable, non-wall-
@@ -320,6 +334,7 @@ export class HordeSimulation {
     const flowWeight = combatCfg.steerFlowWeight;
     const wallWeight = combatCfg.steerWallClearanceWeight; // T134/V101: bias the heading off nearby walls
     const wallProbe = combatCfg.steerWallClearanceProbeMeters;
+    const maxTurn = combatCfg.hordeMaxTurnRateRadPerSec * dt; // T141: max facing rotation per tick (anti-180°-flip)
     const pos: [number, number, number] = [0, 0, 0];
     // Arrival: once within this radius of the target, STOP steering so the body settles at the ring instead
     // of piling into the target and fighting the separation pass each tick (the jitter, V19/V35).
@@ -383,7 +398,7 @@ export class HordeSimulation {
         const a = spatial.get(id);
         return { dx: a.x - pos[0], dz: a.z - pos[2] };
       });
-      const { dirX, dirZ } = steer(field, {
+      const { dirX, dirZ, flowX, flowZ } = steer(field, {
         x: pos[0],
         z: pos[2],
         neighbors,
@@ -451,15 +466,17 @@ export class HordeSimulation {
           }
         }
       }
+      // FACE the goal, not the move dir: the body looks toward its target (flow, or a beeline to a sealed target)
+      // — DECOUPLED from the separation-blended/escape move dir — turn-rate-clamped so a jostled, blocked body
+      // smoothly keeps looking where it wants (window/wall) instead of flip-flopping 180° with the repulsion.
+      const faceAngle = flowX !== 0 || flowZ !== 0 ? Math.atan2(flowZ, flowX) : Math.atan2(dirZ, dirX);
+      zombies.setHeading(slot, turnToward(zombies.getHeading(slot), faceAngle, maxTurn));
       if (moved) {
         zombies.setPosition(slot, mx, pos[1], mz);
-        zombies.setHeading(slot, Math.atan2(headZ, headX));
         zombies.setVelocity(slot, headX * effSpeed, 0, headZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {
-        // Held in place (blocked). Still FACE the desired heading so a body pressing a window/wall toward its
-        // target reads as pressing, not twitching — and never jitters its facing (anti-wiggle).
-        zombies.setHeading(slot, Math.atan2(dirZ, dirX));
+        // Held in place (blocked) — pressing the obstacle toward the target; facing already set above.
         zombies.setVelocity(slot, 0, 0, 0);
       }
     });
@@ -573,6 +590,7 @@ export class HordeSimulation {
     const flowWeight = combatCfg.steerFlowWeight;
     const wallWeight = combatCfg.steerWallClearanceWeight; // T134/V101: mirror the wall-clearance + escape fix
     const wallProbe = combatCfg.steerWallClearanceProbeMeters;
+    const maxTurn = combatCfg.hordeMaxTurnRateRadPerSec * dt; // T141: max facing rotation per tick (anti-180°-flip)
     const pos: [number, number, number] = [0, 0, 0];
     const arriveR2 = combatCfg.hordeArriveRadiusMeters * combatCfg.hordeArriveRadiusMeters;
 
@@ -652,7 +670,7 @@ export class HordeSimulation {
       // T134/V101: wall-clearance bias on THIS level's grid (resolveLevelMove already supplies the flow vector;
       // the bilinear interpolation is single-floor-only — it routes through `steer`, which this path bypasses).
       const wb = wallWeight > 0 && wallProbe > 0 ? wallClearanceBias(grid, pos[0], pos[2], wallProbe) : null;
-      const { dirX, dirZ } = combineSteer(
+      const { dirX, dirZ, flowX, flowZ } = combineSteer(
         move.flowX,
         move.flowZ,
         { x: pos[0], z: pos[2], neighbors, separation: sep, flowWeight },
@@ -700,9 +718,12 @@ export class HordeSimulation {
           }
         }
       }
+      // FACE the goal (flow / beeline), decoupled from the separation-blended move dir + turn-rate-clamped — the
+      // body keeps looking at its target while blocked/jostled instead of flip-flopping (mirrors the single-floor path).
+      const faceAngle = flowX !== 0 || flowZ !== 0 ? Math.atan2(flowZ, flowX) : Math.atan2(dirZ, dirX);
+      zombies.setHeading(slot, turnToward(zombies.getHeading(slot), faceAngle, maxTurn));
       if (moved) {
         zombies.setPosition(slot, mx, pos[1], mz);
-        zombies.setHeading(slot, Math.atan2(headZ, headX));
         zombies.setVelocity(slot, headX * effSpeed, 0, headZ * effSpeed);
         spatial.update(slot, mx, mz);
       } else {

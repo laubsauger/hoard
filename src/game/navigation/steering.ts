@@ -43,6 +43,13 @@ export interface SteerInputs {
 export interface SteerResult {
   readonly dirX: number;
   readonly dirZ: number;
+  /** Separation-FREE desired/target direction (normalized) — what the body wants to FACE: the flow toward its
+   *  goal, or a beeline to the target when it sits sealed behind a wall. DECOUPLED from dirX/dirZ so facing
+   *  never reads the neighbour-repulsion term — which otherwise flips a blocked, crowded body's heading ~180°
+   *  tick-to-tick (the "jerk out / flip back and forth until another zombie shoves it" bug). Zero ⇒ no desired
+   *  direction (caller faces the move dir or holds). */
+  readonly flowX: number;
+  readonly flowZ: number;
 }
 
 /** A 2-vector — the shape both flow-sampling helpers write into (a reusable scratch in the hot path). */
@@ -272,5 +279,11 @@ export function combineSteer(
     dx /= len;
     dz /= len;
   }
-  return { dirX: dx, dirZ: dz };
+  // The pure flow/target direction (normalized), separation-free — the body's FACING target (decoupled from the
+  // blended move dir above so a crowded, blocked body keeps looking at its goal instead of flipping with the
+  // neighbour repulsion). Zero when there is no flow (an unreachable spot with no beeline).
+  const flen = Math.hypot(flowX, flowZ);
+  const faceX = flen > 0 ? flowX / flen : 0;
+  const faceZ = flen > 0 ? flowZ / flen : 0;
+  return { dirX: dx, dirZ: dz, flowX: faceX, flowZ: faceZ };
 }

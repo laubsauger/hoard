@@ -122,6 +122,18 @@ export const combatConfig = registerDomain('combat', {
     min: 0,
     max: 1,
   }),
+  /** T141: max rate (rad/s) a zombie rotates its FACING toward its goal direction. A body faces its target (the
+   *  flow / a beeline to a sealed target), DECOUPLED from the separation-blended move dir, clamped to this rate —
+   *  so a blocked, jostled body smoothly keeps looking at the spot it wants (e.g. the player behind a window)
+   *  instead of jerking / flip-flopping 180° with the neighbour repulsion. ~10 rad/s ≈ a half-turn in ~0.3 s. */
+  hordeMaxTurnRateRadPerSec: num({
+    owner: 'combat',
+    unit: 'ratio',
+    doc: 'Max facing-rotation rate (rad/s) a zombie turns toward its goal; clamps heading so it never snaps/flips (T141).',
+    default: 10,
+    min: 0.1,
+    max: 100,
+  }),
   /** Separation radius pushing crowd members apart during steering (V19). */
   steerSeparationMeters: num({
     owner: 'combat',
