@@ -11,7 +11,9 @@
 
 import {
   AmbientLight,
+  BoxGeometry,
   Color,
+  CylinderGeometry,
   DirectionalLight,
   Group,
   HemisphereLight,
@@ -38,7 +40,22 @@ interface RagdollInfo {
   bonePosCount: number;
   bbox: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number };
   anyNaN: boolean;
+  /** T134 — the deepest any body capsule sat PAST a world-collider surface (m); ≲ a body radius means no tunneling. */
+  maxPenetration: number;
 }
+
+// ---- T134 STATIC WORLD COLLISION test fixtures (WORLD coords). A vertical WALL running along Z at x=+1.5 (the
+// corpse, launched with kill(1,0,13), piles against its −X face) and a round CAR/obstacle (a cylinder) at z=−2.6
+// (kill(0,-1,13) drives into it). The car sits BEHIND the corpse from the camera so it never occludes the wall
+// pile. The collider source feeds the SAME shape blockScene feeds: world wall SEGMENTS [x1,z1,x2,z2,…] + round
+// CIRCLES [cx,cz,r,…]. ----
+const WALL_X = 1.5;
+const WALL_HALF_W = 0.15; // wall mesh half-thickness; the collider segment sits on the −X face the corpse hits
+const WALL_FACE_X = WALL_X - WALL_HALF_W;
+const CAR_Z = -2.6;
+const CAR_RADIUS = 1.0;
+const WORLD_SEGMENTS = new Float32Array([WALL_FACE_X, -3, WALL_FACE_X, 3]);
+const WORLD_CIRCLES = new Float32Array([0, CAR_Z, CAR_RADIUS]);
 
 declare global {
   interface Window {
@@ -75,6 +92,25 @@ async function main(): Promise<void> {
   ground.receiveShadow = true;
   scene.add(ground);
 
+  // ---- T134 STATIC WORLD COLLISION fixtures: a visible WALL (segment collider) + a round CAR (circle collider). ----
+  const wall = new Mesh(
+    new BoxGeometry(WALL_HALF_W * 2, 1.8, 6),
+    new MeshStandardMaterial({ color: 0x8a8275, roughness: 0.9, metalness: 0 }),
+  );
+  wall.position.set(WALL_X, 0.9, 0);
+  wall.castShadow = true;
+  wall.receiveShadow = true;
+  scene.add(wall);
+
+  const car = new Mesh(
+    new CylinderGeometry(CAR_RADIUS, CAR_RADIUS, 1.2, 24),
+    new MeshStandardMaterial({ color: 0x5a6a8a, roughness: 0.6, metalness: 0.1 }),
+  );
+  car.position.set(0, 0.6, CAR_Z);
+  car.castShadow = true;
+  car.receiveShadow = true;
+  scene.add(car);
+
   scene.add(new AmbientLight(0xffffff, 0.5));
   scene.add(new HemisphereLight(0xaebfce, 0x2a2620, 0.4));
   const key = new DirectionalLight(0xfff2dc, 2.4);
@@ -92,8 +128,9 @@ async function main(): Promise<void> {
   scene.add(key, key.target);
 
   const camera = new PerspectiveCamera(42, 1, 0.1, 100);
-  camera.position.set(3.6, 2.7, 6.2); // angled 3/4 view down the knockback travel lane (origin → several m +Z)
-  camera.lookAt(-0.2, 0.15, 1.7);
+  // 3/4 view from the −X / +Z side so the corpse reads piling against the wall's near (−X) face and the +Z car.
+  camera.position.set(-4.6, 3.0, 5.8);
+  camera.lookAt(0.7, 0.35, 1.0);
 
   const resize = (): void => {
     const w = canvas.clientWidth || window.innerWidth;
@@ -127,6 +164,10 @@ async function main(): Promise<void> {
       crowd.attach(k, gltf, track, corpseCapacity, ragdollConfig);
     }),
   );
+
+  // ---- T134: feed the corpse ragdoll the static world colliders (the SAME shape blockScene supplies: WORLD wall
+  // segments + round-obstacle circles). The tiny scene returns all fixtures regardless of the gather query. ----
+  crowd.setColliderSource(() => ({ segments: WORLD_SEGMENTS, circles: WORLD_CIRCLES }));
 
   // ---- ONE live standing zombie (a single SoA view). ----
   const soa = allocateSoa(ZOMBIE_FIELDS, 1);
@@ -176,6 +217,7 @@ async function main(): Promise<void> {
         bonePosCount: 0,
         bbox: { minX: 0, maxX: 0, minY: 0, maxY: 0, minZ: 0, maxZ: 0 },
         anyNaN: false,
+        maxPenetration: 0,
       };
       if (!activeCorpse) return empty;
       const rag = crowd.debugRagdoll(activeCorpse.entity);
@@ -191,7 +233,7 @@ async function main(): Promise<void> {
       }
       for (let i = 0; i < rag.q.length; i++) if (!Number.isFinite(rag.q[i]!)) anyNaN = true;
       for (let i = 0; i < rag.bones.length; i++) if (!Number.isFinite(rag.bones[i]!)) anyNaN = true;
-      return { settled: rag.settled, bonePosCount: rag.spec.bodyCount, bbox: { minX, maxX, minY, maxY, minZ, maxZ }, anyNaN };
+      return { settled: rag.settled, bonePosCount: rag.spec.bodyCount, bbox: { minX, maxX, minY, maxY, minZ, maxZ }, anyNaN, maxPenetration: rag.maxPenetration };
     },
   };
 

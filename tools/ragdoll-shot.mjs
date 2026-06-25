@@ -5,11 +5,12 @@
 // Env: CDP_BASE (default http://localhost:9223), APP_URL (default http://localhost:5179/ragdoll-test.html),
 //      OUT_DIR (default /tmp), LABEL (default shot), KILL (default "0,1,6" → dx,dz,force).
 
-const BASE = process.env.CDP_BASE ?? 'http://localhost:9223';
-const APP_URL = process.env.APP_URL ?? 'http://localhost:5179/ragdoll-test.html';
+const BASE = process.env.CDP_BASE ?? 'http://localhost:9226';
+const APP_URL = process.env.APP_URL ?? 'http://localhost:5182/ragdoll-test.html';
 const OUT_DIR = process.env.OUT_DIR ?? '/tmp';
 const LABEL = process.env.LABEL ?? 'shot';
-const KILL = (process.env.KILL ?? '0,1,6').split(',').map(Number);
+// T134 STATIC WORLD COLLISION: default drives the corpse INTO the +X wall (kill 1,0,13); KILL=0,1,13 drives the car.
+const KILL = (process.env.KILL ?? '1,0,13').split(',').map(Number);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function findPageTarget() {
@@ -120,6 +121,9 @@ async function main() {
   console.log(`kill: dx=${KILL[0]} dz=${KILL[1]} force=${KILL[2]}`);
   console.log('screenshots:', JSON.stringify(paths, null, 2));
   console.log('info:', JSON.stringify(info));
+  if (info && typeof info.maxPenetration === 'number') {
+    console.log(`maxPenetration: ${info.maxPenetration.toFixed(4)} m  (≲ a body radius ⇒ no tunneling)`);
+  }
   const errs = consoleMsgs.filter((m) => m.level === 'error' || m.level === 'exception');
   console.log(`console errors: ${errs.length}`);
   for (const m of errs.slice(0, 12)) console.log(`  [${m.level}] ${m.text}`);

@@ -95,6 +95,9 @@ export interface RagdollConfig {
   readonly maxAngularSpeed: number;
   /** Explosion backstop: above this speed (or on non-finite state) a body is reset to rest on the ground. */
   readonly explodeSpeed: number;
+  /** Radius (m, WORLD) the render layer gathers static world colliders within, ONCE at corpse spawn. The sim does
+   *  not read it (the gather happens in `rigged.ts`); it rides in this bundle so it resolves tier-correct (V4). */
+  readonly colliderGatherRadius: number;
 }
 
 /** Joint kinds — pick the per-joint limit parameters from config + drive the hinge/cone geometry at build. */
@@ -150,6 +153,19 @@ export interface RagdollSpec {
   readonly joints: readonly JointSpec[];
   /** Baked idle skinning matrices, column-major, length boneCount*16. */
   readonly m0: Float32Array;
+}
+
+/**
+ * Static WORLD colliders the ragdoll de-penetrates its body capsules against, expressed in the corpse's LOCAL
+ * output frame (the same space `c`/`q` live in) — gathered + transformed ONCE at spawn by the render layer (no
+ * per-frame work). Walls are full-height + vertical, so collision is XZ-only (Y stays owned by gravity/ground).
+ *   - `segments`: wall edges as flat [x1,z1, x2,z2, …] (length a multiple of 4). Empty ⇒ no wall collision.
+ *   - `circles`:  round obstacles (cars/trees footprints) as flat [cx,cz,r, …] (length a multiple of 3). Empty ⇒ none.
+ * An all-empty value (or no value) preserves the original ground-plane-only behaviour exactly.
+ */
+export interface RagdollColliders {
+  readonly segments: Float32Array;
+  readonly circles: Float32Array;
 }
 
 /** Body size class → which capsule radius the body uses (volume). */
@@ -425,6 +441,12 @@ export class Ragdoll {
   settled = false;
   /** Liveness generation for the owning pool (set by the caller each frame it is seen). */
   gen = -1;
+  /** Static WORLD colliders (LOCAL frame) captured at spawn; null ⇒ ground-plane-only (original behaviour). Held by
+   *  reference (the render layer owns the arrays) — set in `reset`, never mutated here, no per-frame allocation (V24). */
+  colliders: RagdollColliders | null = null;
+  /** Diagnostic: the deepest a body capsule ever crossed PAST a world-collider surface before being pushed back out
+   *  (m, LOCAL units). Stays ≲ a body radius when the de-penetration holds; exposed for headless assertions. */
+  maxPenetration = 0;
 
   constructor(spec: RagdollSpec) {
     this.spec = spec;
@@ -454,10 +476,15 @@ export class Ragdoll {
     impactLocalZ: number,
     force: number,
     rand: () => number,
+    colliders?: RagdollColliders | null,
   ): void {
     this.spec = spec;
     this.settled = false;
     this.started = false;
+    // Static world colliders (LOCAL frame), captured ONCE here at spawn. Omitted/null ⇒ ground-plane-only (the
+    // original behaviour, unchanged). Stored by reference — the render layer owns + reuses the arrays (V24).
+    this.colliders = colliders ?? null;
+    this.maxPenetration = 0;
     const B = spec.bodyCount;
     // Seed every body at its rest transform; zero velocities.
     this.c.set(spec.restPos);
@@ -673,6 +700,7 @@ export class Ragdoll {
     this.solveGround();
     this.guardExplosion(cfg);
     this.clampGround();
+    this.solveWorldCollision(); // XZ push-out vs nearby static walls/obstacles (after the ground clamp owns Y)
 
     // --- Kinetic proxy: Σ(|v|²+|ω|²). ---
     let energy = 0;
@@ -964,6 +992,97 @@ export class Ragdoll {
   }
 
   /**
+   * STATIC WORLD COLLISION — keep every body capsule OUTSIDE the nearby static colliders (wall segments + round
+   * obstacles) so a launched corpse piles against a wall/car instead of tunneling through. XZ-only (walls are
+   * full-height + vertical; Y is owned by gravity + the ground clamp, which already ran). Mirrors `clampGround`'s
+   * shape: per body, find the DEEPEST penetrating capsule sample (across all colliders), translate the WHOLE body
+   * (rigid, no tear) out along that surface normal so the deepest point clears, and kill the INWARD velocity
+   * component so it can't re-penetrate next substep. A few relaxation passes resolve a body wedged into a corner.
+   * A center that TUNNELLED fully past a thin wall this substep is first clamped back onto the surface (anti-tunnel).
+   * No-op when there are no colliders (the original ground-only behaviour). NaN-safe + allocation-free (V24).
+   */
+  private solveWorldCollision(): void {
+    const col = this.colliders;
+    if (!col) return;
+    const segs = col.segments;
+    const circ = col.circles;
+    const nSeg = segs.length;
+    const nCirc = circ.length;
+    if (nSeg === 0 && nCirc === 0) return;
+    const spec = this.spec;
+    const B = spec.bodyCount;
+    for (let i = 0; i < B; i++) {
+      if (spec.invMass[i]! <= 0) continue;
+      const rad = spec.radius[i]!;
+      const b3 = i * 3;
+      const n = capsuleSampleCount(spec, i);
+      // Sequential per-sample resolution; a few passes converge a corner wedge / multi-wall contact. Each pass moves
+      // the WHOLE body (rigid XZ shift) so the sample clears, then re-evaluates the moved body next pass.
+      for (let pass = 0; pass < 4; pass++) {
+        let moved = false;
+        for (let k = 0; k < n; k++) {
+          capsuleSamplePoint(spec, i, k, this.q, this.c, _pt); // end-of-substep sample (XZ)
+          const px = _pt[0]!, pz = _pt[2]!;
+          let corrX = 0, corrZ = 0, corrMag = 0; // best single correction for this sample this pass
+
+          // --- WALL SEGMENTS ---
+          for (let s = 0; s + 4 <= nSeg; s += 4) {
+            const ax = segs[s]!, az = segs[s + 1]!, bx = segs[s + 2]!, bz = segs[s + 3]!;
+            // SWEPT ANTI-TUNNEL: did this sample cross the wall during THIS substep (start pose → end pose)? Catches a
+            // fast limb tip that skipped fully to the far side (where a static distance test no longer sees it).
+            capsuleSamplePoint(spec, i, k, this.qPrev, this.cPrev, _sp); // substep-start sample
+            if (segIntersectXZ(_sp[0]!, _sp[2]!, px, pz, ax, az, bx, bz, _ix)) {
+              let nx = -(bz - az), nz = bx - ax; // segment perpendicular
+              const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+              if ((_sp[0]! - _ix[0]!) * nx + (_sp[2]! - _ix[1]!) * nz < 0) { nx = -nx; nz = -nz; } // orient toward the near (start) side
+              const dEnd = (px - _ix[0]!) * nx + (pz - _ix[1]!) * nz; // signed dist of the end sample (negative = far side)
+              const need = rad - dEnd; // bring the sample back to `rad` on the near side
+              if (need > corrMag) { corrMag = need; corrX = nx * need; corrZ = nz * need; }
+              continue; // crossed → handled; the static distance test below would mis-read the far side
+            }
+            // STATIC PUSH-OUT: a sample within `rad` of the wall is shoved out to `rad` along the outward normal.
+            closestOnSegXZ(ax, az, bx, bz, px, pz, _cp2);
+            let nx = px - _cp2[0]!, nz = pz - _cp2[1]!;
+            const d = Math.hypot(nx, nz);
+            const pen = rad - d;
+            if (pen > 0) {
+              if (pen > this.maxPenetration) this.maxPenetration = pen;
+              if (d > EPS) { nx /= d; nz /= d; } else {
+                const sdx = bx - ax, sdz = bz - az, sl = Math.hypot(sdx, sdz) || 1; nx = -sdz / sl; nz = sdx / sl;
+              }
+              if (pen > corrMag) { corrMag = pen; corrX = nx * pen; corrZ = nz * pen; }
+            }
+          }
+
+          // --- ROUND OBSTACLES (push radially out to circle radius + body radius). ---
+          for (let s = 0; s + 3 <= nCirc; s += 3) {
+            const ccx = circ[s]!, ccz = circ[s + 1]!, cr = circ[s + 2]!;
+            let nx = px - ccx, nz = pz - ccz;
+            const d = Math.hypot(nx, nz);
+            const pen = cr + rad - d;
+            if (pen > 0) {
+              if (cr - d > this.maxPenetration) this.maxPenetration = cr - d; // how far the sample sank PAST the surface
+              if (d > EPS) { nx /= d; nz /= d; } else { nx = 1; nz = 0; }
+              if (pen > corrMag) { corrMag = pen; corrX = nx * pen; corrZ = nz * pen; }
+            }
+          }
+
+          if (corrMag > EPS) {
+            // Rigid XZ shift so the sample clears; kill the INWARD velocity component (mirrors clampGround's Y clamp).
+            this.c[b3] = this.c[b3]! + corrX;
+            this.c[b3 + 2] = this.c[b3 + 2]! + corrZ;
+            const ux = corrX / corrMag, uz = corrZ / corrMag;
+            const vn = this.v[b3]! * ux + this.v[b3 + 2]! * uz;
+            if (vn < 0) { this.v[b3] = this.v[b3]! - vn * ux; this.v[b3 + 2] = this.v[b3 + 2]! - vn * uz; }
+            moved = true;
+          }
+        }
+        if (!moved) break;
+      }
+    }
+  }
+
+  /**
    * EXPLOSION BACKSTOP — a correctness guard against solver blow-ups (NOT a gameplay fallback). If a body's state is
    * non-finite it is hard-reset to rest on the ground (its rest x/z, on its radius, rest orientation, zero velocity).
    * If it is finite but its speed has blown past `explodeSpeed` (or its spin past `maxAngularSpeed`), the velocity is
@@ -1147,6 +1266,39 @@ const _segB0 = new Float64Array(3);
 const _segB1 = new Float64Array(3);
 const _cpA = new Float64Array(3);
 const _cpB = new Float64Array(3);
+const _cp2 = new Float64Array(2); // closest point on a wall segment (XZ)
+const _ix = new Float64Array(2); // anti-tunnel segment-crossing point (XZ)
+const _sp = new Float64Array(3); // substep-start capsule sample (swept anti-tunnel)
+
+/** Closest point on the XZ segment (x1,z1)-(x2,z2) to (px,pz) → out[0]=x, out[1]=z. Clamped, deterministic. */
+function closestOnSegXZ(x1: number, z1: number, x2: number, z2: number, px: number, pz: number, out: Float64Array): void {
+  const dx = x2 - x1, dz = z2 - z1;
+  const len2 = dx * dx + dz * dz;
+  let t = len2 > EPS ? ((px - x1) * dx + (pz - z1) * dz) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  out[0] = x1 + dx * t;
+  out[1] = z1 + dz * t;
+}
+
+/** Do XZ segments A=(ax,az)-(bx,bz) and B=(cx,cz)-(dx,dz) cross? If so fill out with the crossing point + return
+ *  true (used as the anti-tunnel guard for a body center that skipped past a thin wall). Parallel ⇒ false. NaN-safe. */
+function segIntersectXZ(
+  ax: number, az: number, bx: number, bz: number,
+  cx: number, cz: number, dx: number, dz: number,
+  out: Float64Array,
+): boolean {
+  const r1x = bx - ax, r1z = bz - az;
+  const r2x = dx - cx, r2z = dz - cz;
+  const denom = r1x * r2z - r1z * r2x;
+  if (!(Math.abs(denom) > EPS)) return false; // parallel / degenerate / non-finite
+  const sx = cx - ax, sz = cz - az;
+  const t = (sx * r2z - sz * r2x) / denom; // along A
+  const u = (sx * r1z - sz * r1x) / denom; // along B
+  if (t < 0 || t > 1 || u < 0 || u > 1) return false;
+  out[0] = ax + r1x * t;
+  out[1] = az + r1z * t;
+  return true;
+}
 
 /** Closest points between segments [p1,q1] and [p2,q2] (Ericson, clamped) → outC1, outC2. Deterministic. */
 function closestSeg(

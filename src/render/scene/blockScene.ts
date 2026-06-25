@@ -80,6 +80,8 @@ import type { VisualEvent } from '../../game/core/contracts/events';
 import { resolveRenderAccessibility, type RenderAccessibility } from '../accessibility';
 import type { GameRuntime } from '../../game/runtime';
 import { resolveHouseVariation } from '../../game/scene';
+import { propBlockedCells } from '../../game/scene/propSolidity';
+import { furnitureBlockedCells } from '../../game/scene/furnitureSolidity';
 import { ITEM } from '../../game/inventory';
 
 /** Full-strength accessibility (the reference experience) — the default until the player opts into a reduction. */
@@ -92,6 +94,16 @@ const DEFAULT_ACCESSIBILITY: RenderAccessibility = resolveRenderAccessibility({
   motionReduction: false,
 });
 
+
+/** Squared distance from point (px,pz) to the XZ segment (x1,z1)-(x2,z2) — the wall-edge proximity cull (T134). */
+function segPointDist2(x1: number, z1: number, x2: number, z2: number, px: number, pz: number): number {
+  const dx = x2 - x1, dz = z2 - z1;
+  const len2 = dx * dx + dz * dz;
+  let t = len2 > 1e-9 ? ((px - x1) * dx + (pz - z1) * dz) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const qx = x1 + dx * t - px, qz = z1 + dz * t - pz;
+  return qx * qx + qz * qz;
+}
 
 export class BlockScene {
   readonly scene = new Scene();
@@ -417,6 +429,10 @@ export class BlockScene {
     // T140: crowd.mesh is the Group ROOT; the rigged lane meshes set their own castShadow (B13). The far impostor
     // billboards do not cast (a flat quad shadow reads wrong). So no shadow flags on the root.
     this.scene.add(this.crowd.mesh);
+    // T134 STATIC WORLD COLLISION: feed the rigged corpse ragdoll the SAME static colliders agents collide against
+    // (nav wall edges + solid prop/furniture footprints) near each death spot, so a launched body piles against a
+    // wall/car instead of tunneling. Gathered ONCE per corpse at spawn (read-only over the live nav/solidity data).
+    this.crowd.rigged.setColliderSource((wx, wz, radius) => this.gatherWorldColliders(wx, wz, radius));
 
     // T85: dropped-item floor markers (pooled boxes, tracked for V24).
     this.floorPiles = new FloorPileView((resource, kind, label) => this.res.track(resource, kind, label));
@@ -442,6 +458,75 @@ export class BlockScene {
   /** Narrow build handle handed to the extracted builders (Phase 1 of the decomposition). */
   private buildCtx(): BuildContext {
     return { root: this.scene, res: this.res, town: this.runtime.scene, navCellSize: this.navCellSize };
+  }
+
+  /**
+   * T134 STATIC WORLD COLLISION — gather the static WORLD colliders within `radius` of (wx,wz) for a fresh corpse's
+   * ragdoll: nav WALL EDGES as line segments + SOLID prop/furniture footprint cells as circles. This reads the SAME
+   * nav grid + solidity data agents collide against (one consistent source), so a launched body stops exactly where
+   * an agent would. Walls: emit only each cell's N + W edge (edges are stored symmetrically, so this never duplicates
+   * a shared edge; the scan is widened one cell so a boundary S/E edge is still caught as a neighbour's N/W). Props +
+   * furniture: a circle per blocked footprint cell (circumscribing the square cell), via the public solidity helpers
+   * (which already honour fence decay + non-solid kinds). Read-only, allocation kept to the two returned arrays.
+   */
+  private gatherWorldColliders(wx: number, wz: number, radius: number): { segments: Float32Array; circles: Float32Array } {
+    const navGrid = this.runtime.scene.navGrid;
+    const cs = this.navCellSize;
+    const r2 = radius * radius;
+    const segs: number[] = [];
+    const circ: number[] = [];
+
+    // --- WALLS: nav blocked edges → world segments (kept only when within `radius` of the death spot). ---
+    const center = navGrid.worldToCell(wx, wz);
+    const reach = Math.ceil(radius / cs) + 1;
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) {
+        const cx = center.cx + dx;
+        const cy = center.cy + dy;
+        if (cx < 0 || cy < 0 || cx >= navGrid.width || cy >= navGrid.height) continue;
+        if (navGrid.wallOnEdge(cx, cy, 'n')) { // north edge: z = cy·cs, x ∈ [cx·cs, (cx+1)·cs]
+          const x1 = cx * cs, z = cy * cs, x2 = (cx + 1) * cs;
+          if (segPointDist2(x1, z, x2, z, wx, wz) <= r2) segs.push(x1, z, x2, z);
+        }
+        if (navGrid.wallOnEdge(cx, cy, 'w')) { // west edge: x = cx·cs, z ∈ [cy·cs, (cy+1)·cs]
+          const x = cx * cs, z1 = cy * cs, z2 = (cy + 1) * cs;
+          if (segPointDist2(x, z1, x, z2, wx, wz) <= r2) segs.push(x, z1, x, z2);
+        }
+      }
+    }
+
+    // --- SOLID PROPS (cars/trees/fences) → a circle per blocked footprint cell (circumscribed: radius covers the
+    // square's corners so adjacent cells leave no exposed gap). Cheap per-prop cull before rasterizing its cells. ---
+    const cellR = cs * Math.SQRT1_2 + 1e-3; // half-diagonal → fully covers the cell
+    const cullProp2 = (radius + 3) * (radius + 3); // car half-diagonal ≈ 2.3 m → 3 m margin
+    const props = this.runtime.scene.props;
+    if (props) {
+      const fenceMissingChance = this.world.fenceMissingChance;
+      for (const p of props) {
+        const px = (p.cx + 0.5) * cs, pz = (p.cy + 0.5) * cs;
+        if ((px - wx) * (px - wx) + (pz - wz) * (pz - wz) > cullProp2) continue;
+        for (const cell of propBlockedCells(p, cs, fenceMissingChance)) {
+          const ccx = (cell.cx + 0.5) * cs, ccz = (cell.cy + 0.5) * cs;
+          if ((ccx - wx) * (ccx - wx) + (ccz - wz) * (ccz - wz) <= r2) circ.push(ccx, ccz, cellR);
+        }
+      }
+    }
+
+    // --- SOLID FURNITURE → likewise a circle per blocked footprint cell (interior pieces; same consistent source). ---
+    const cullFurn2 = (radius + 2) * (radius + 2);
+    const furn = this.runtime.scene.placedFurniture;
+    if (furn) {
+      for (const piece of furn) {
+        const fx = (piece.cx + 0.5) * cs, fz = (piece.cy + 0.5) * cs;
+        if ((fx - wx) * (fx - wx) + (fz - wz) * (fz - wz) > cullFurn2) continue;
+        for (const cell of furnitureBlockedCells(piece, cs)) {
+          const ccx = (cell.cx + 0.5) * cs, ccz = (cell.cy + 0.5) * cs;
+          if ((ccx - wx) * (ccx - wx) + (ccz - wz) * (ccz - wz) <= r2) circ.push(ccx, ccz, cellR);
+        }
+      }
+    }
+
+    return { segments: new Float32Array(segs), circles: new Float32Array(circ) };
   }
 
 

@@ -77,6 +77,7 @@ import {
   type RagdollConfig,
   type RagdollSpec,
   type RagdollBodyTopology,
+  type RagdollColliders,
 } from '../corpse/ragdoll';
 import {
   ARCHETYPE_KEYS,
@@ -173,8 +174,20 @@ export function resolveRagdollConfig(tier: QualityTier): RagdollConfig {
     maxLinearSpeed: resolve(renderingConfig.ragdollMaxLinearSpeed, tier),
     maxAngularSpeed: resolve(renderingConfig.ragdollMaxAngularSpeed, tier),
     explodeSpeed: resolve(renderingConfig.ragdollExplodeSpeed, tier),
+    colliderGatherRadius: resolve(renderingConfig.ragdollColliderGatherRadiusMeters, tier),
   };
 }
+
+/**
+ * T134 STATIC WORLD COLLISION — a source of WORLD-space static colliders near a point, supplied by the scene so a
+ * launched corpse collides against the SAME walls/obstacles agents do. Called ONCE per corpse at spawn with the
+ * death spot + gather radius; returns wall `segments` ([x1,z1,x2,z2,…]) + round-obstacle `circles` ([cx,cz,r,…]) in
+ * WORLD meters. The rigged crowd transforms them into the corpse-local frame before handing them to the ragdoll.
+ */
+export type WorldColliderSource = (worldX: number, worldZ: number, radius: number) => {
+  readonly segments: Float32Array;
+  readonly circles: Float32Array;
+};
 
 function requireView<T>(views: FieldViews, name: string): T {
   const v = views[name];
@@ -707,6 +720,9 @@ export class RiggedCrowd {
   private corpseCapacity = 0;
   /** T134 — per-limb death-ragdoll tunables (resolved tier-correct by the caller; set at attach). */
   private ragdollConfig: RagdollConfig | null = null;
+  /** T134 STATIC WORLD COLLISION — optional source of nearby WORLD colliders (walls/obstacles). Null ⇒ corpses only
+   *  collide with the ground plane (the original behaviour). Set once by the scene (`setColliderSource`). */
+  private colliderSource: WorldColliderSource | null = null;
   /** T134 — LIVE ragdolls keyed by dead-entity id (stable across frames as the corpse list re-orders/prunes). */
   private readonly ragdolls = new Map<number, Ragdoll>();
   /** T134 — recycled ragdoll instances (same particle/bone dims across archetypes) — no per-death alloc (V24). */
@@ -761,6 +777,52 @@ export class RiggedCrowd {
     return this.ragdolls.get(entity);
   }
 
+  /**
+   * T134 — install (or clear with `null`) the STATIC WORLD COLLIDER source. When set, each fresh corpse gathers the
+   * nearby world colliders at spawn (within the config gather radius), so a launched body piles against walls/cars
+   * instead of sliding through them. Default null ⇒ ground-plane-only collision (unchanged). The scene wires this
+   * to the SAME nav/solidity data agents collide against (see `blockScene`).
+   */
+  setColliderSource(source: WorldColliderSource | null): void {
+    this.colliderSource = source;
+  }
+
+  /**
+   * Gather the static world colliders near a fresh corpse and transform them from WORLD into the corpse's LOCAL
+   * output frame (the frame the ragdoll sim + the corpse shader use). The transform is the inverse of the shader's
+   * local→world (`world = corpsePos + R(facing)·(scale·local)`): a world POINT p maps to `R(-facing)·(p − corpsePos)/scale`.
+   * Using the SAME (cf,sf) as the impact-dir rotation keeps the colliders aligned with the body exactly. Circle radii
+   * also divide by `scale` (body radii are already local). Returns undefined when no source is set or nothing is near.
+   */
+  private gatherColliders(worldX: number, worldZ: number, cf: number, sf: number, scale: number): RagdollColliders | undefined {
+    const src = this.colliderSource;
+    if (!src) return undefined;
+    const radius = this.ragdollConfig?.colliderGatherRadius ?? 0;
+    if (!(radius > 0)) return undefined;
+    const world = src(worldX, worldZ, radius);
+    const ws = world.segments;
+    const wc = world.circles;
+    if (ws.length === 0 && wc.length === 0) return undefined;
+    const invScale = scale > 1e-6 ? 1 / scale : 1;
+    const segments = new Float32Array(ws.length);
+    for (let s = 0; s + 4 <= ws.length; s += 4) {
+      const a0 = ws[s]! - worldX, a1 = ws[s + 1]! - worldZ; // endpoint 1 offset from corpse origin
+      const b0 = ws[s + 2]! - worldX, b1 = ws[s + 3]! - worldZ; // endpoint 2
+      segments[s] = (cf * a0 + sf * a1) * invScale;
+      segments[s + 1] = (-sf * a0 + cf * a1) * invScale;
+      segments[s + 2] = (cf * b0 + sf * b1) * invScale;
+      segments[s + 3] = (-sf * b0 + cf * b1) * invScale;
+    }
+    const circles = new Float32Array(wc.length);
+    for (let s = 0; s + 3 <= wc.length; s += 3) {
+      const c0 = wc[s]! - worldX, c1 = wc[s + 1]! - worldZ;
+      circles[s] = (cf * c0 + sf * c1) * invScale;
+      circles[s + 1] = (-sf * c0 + cf * c1) * invScale;
+      circles[s + 2] = wc[s + 2]! * invScale;
+    }
+    return { segments, circles };
+  }
+
   /** Hide every rigged mesh (draw 0 instances) — used during the pre-bake gap (no boxes; nothing drawn). */
   hide(): void {
     for (const slot of this.slots.values()) slot.mesh.count = 0;
@@ -791,6 +853,11 @@ export class RiggedCrowd {
       const slot = this.slots.get(archetypeKeyForIndex(c.archetype))!;
       if (slot.corpseLive >= cap) continue;
 
+      // Per-corpse size + seed are stable per dead entity (deterministic V26). Resolved BEFORE the get-or-seed so the
+      // spawn collider gather can divide world distances by this corpse's scale into the local frame.
+      const seed = variationSeed((c.entity >>> 0) ^ CORPSE_SEED_SALT, this.variationCount);
+      const scale = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
+
       // Get-or-seed this corpse's ragdoll (keyed by stable entity id). A fresh corpse is launched from the killing
       // shot: rotate the WORLD impact dir into the corpse's LOCAL frame (the shader re-applies the facing yaw), then
       // seed the impulse + per-corpse jitter from a deterministic PRNG (V26 — same death reproduces the same fall).
@@ -802,14 +869,15 @@ export class RiggedCrowd {
         const sf = Math.sin(facing);
         const localX = cf * c.impactDirX + sf * c.impactDirZ;
         const localZ = -sf * c.impactDirX + cf * c.impactDirZ;
-        rag.reset(slot.ragSpec, cfg, localX, localZ, c.impactForce, mulberry32((c.entity >>> 0) ^ RAGDOLL_SEED_SALT));
+        // STATIC WORLD COLLISION — gather the nearby walls/obstacles ONCE at spawn, transformed into this corpse's
+        // LOCAL frame with the EXACT inverse of the render facing yaw + scale (same cf,sf as the impact dir).
+        const colliders = this.gatherColliders(c.x, c.z, cf, sf, scale);
+        rag.reset(slot.ragSpec, cfg, localX, localZ, c.impactForce, mulberry32((c.entity >>> 0) ^ RAGDOLL_SEED_SALT), colliders);
         this.ragdolls.set(c.entity, rag);
       }
       if (!rag.settled) rag.step(cfg, dtSeconds);
       rag.gen = gen;
 
-      const seed = variationSeed((c.entity >>> 0) ^ CORPSE_SEED_SALT, this.variationCount);
-      const scale = variationScale(seed, this.variationCount, this.scaleMin, this.scaleMax);
       const i = slot.corpseLive;
       // Write the ragdoll's 24 live bone matrices into this corpse's row of the archetype's live bone texture.
       rag.writeBones(slot.liveBoneData, i * slot.boneCount * 16);

@@ -14,6 +14,7 @@ import {
   RP,
   type RagdollConfig,
   type RagdollSpec,
+  type RagdollColliders,
 } from './ragdoll';
 
 const CFG: RagdollConfig = {
@@ -47,6 +48,7 @@ const CFG: RagdollConfig = {
   maxLinearSpeed: 14,
   maxAngularSpeed: 22,
   explodeSpeed: 28,
+  colliderGatherRadius: 6,
 };
 
 /** A small deterministic non-identity quaternion for body `i` (axis-angle), to exercise the orientation-dependent
@@ -433,6 +435,148 @@ describe('ragdoll sim (oriented rigid bodies)', () => {
     // …and it is markedly STIFFER than the articulating limb joints.
     expect(maxSpine).toBeLessThan(maxElbow);
     expect(maxSpine).toBeLessThan(maxHip);
+  });
+
+  // ---- STATIC WORLD COLLISION (T134): a launched corpse must collide against nearby wall segments + round
+  // obstacles (LOCAL frame) instead of tunneling. Empty colliders preserve the ground-only behaviour exactly. ----
+  const NO_COLLIDERS: RagdollColliders = { segments: new Float32Array(), circles: new Float32Array() };
+  const WALL_X = 0.5;
+  const wallColliders = (): RagdollColliders => ({
+    segments: new Float32Array([WALL_X, -5, WALL_X, 5]), // a vertical wall running along Z at local x = +0.5
+    circles: new Float32Array(),
+  });
+
+  function runCol(force: number, dirX: number, dirZ: number, seed: number, colliders: RagdollColliders, maxSteps = 2500): Ragdoll {
+    const spec = buildTestSpec();
+    const rag = new Ragdoll(spec);
+    rag.reset(spec, CFG, dirX, dirZ, force, mulberry32(seed), colliders);
+    for (let i = 0; i < maxSteps && !rag.settled; i++) rag.step(CFG, 1 / 60);
+    return rag;
+  }
+
+  /** Max world X reached by any capsule end-sphere — the wall-crossing probe (a tunneling body overshoots WALL_X). */
+  function maxSampleX(rag: Ragdoll): number {
+    let m = -Infinity;
+    for (let i = 0; i < rag.spec.bodyCount; i++) {
+      for (let k = 0; k < 2; k++) {
+        const lx = k === 0 ? rag.spec.capA[i * 3]! : rag.spec.capB[i * 3]!;
+        const ly = k === 0 ? rag.spec.capA[i * 3 + 1]! : rag.spec.capB[i * 3 + 1]!;
+        const lz = k === 0 ? rag.spec.capA[i * 3 + 2]! : rag.spec.capB[i * 3 + 2]!;
+        m = Math.max(m, rag.c[i * 3]! + rot(rag.q, i * 4, lx, ly, lz)[0]);
+      }
+    }
+    return m;
+  }
+
+  /** Min XZ distance from any capsule end-sphere to a circle centre — the circle-penetration probe. */
+  function minSampleDistToCircle(rag: Ragdoll, cx: number, cz: number): number {
+    let m = Infinity;
+    for (let i = 0; i < rag.spec.bodyCount; i++) {
+      for (let k = 0; k < 2; k++) {
+        const lx = k === 0 ? rag.spec.capA[i * 3]! : rag.spec.capB[i * 3]!;
+        const ly = k === 0 ? rag.spec.capA[i * 3 + 1]! : rag.spec.capB[i * 3 + 1]!;
+        const lz = k === 0 ? rag.spec.capA[i * 3 + 2]! : rag.spec.capB[i * 3 + 2]!;
+        const r = rot(rag.q, i * 4, lx, ly, lz);
+        m = Math.min(m, Math.hypot(rag.c[i * 3]! + r[0] - cx, rag.c[i * 3 + 2]! + r[2] - cz));
+      }
+    }
+    return m;
+  }
+
+  describe('static world collision (walls + obstacles)', () => {
+    it('a body launched into a wall NEVER crosses it — stays on the near side, every step', () => {
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, 1, 0, 40, mulberry32(7), wallColliders());
+      let worst = -Infinity;
+      for (let i = 0; i < 2500 && !rag.settled; i++) {
+        rag.step(CFG, 1 / 60);
+        worst = Math.max(worst, maxSampleX(rag));
+      }
+      // No capsule sample tunnels to the far side, and the body crossed past the surface by at most ~a body radius.
+      expect(worst).toBeLessThan(WALL_X + 0.05);
+      expect(rag.maxPenetration).toBeLessThan(CFG.limbRadius + 0.05);
+      expect(allFinite(rag.c)).toBe(true);
+      expect(allFinite(rag.q)).toBe(true);
+    });
+
+    it('the wall STOPS travel that would otherwise pass straight through (vs no colliders)', () => {
+      const free = runCol(40, 1, 0, 7, NO_COLLIDERS);
+      const blocked = runCol(40, 1, 0, 7, wallColliders());
+      expect(free.c[0]!).toBeGreaterThan(WALL_X); // unobstructed: the pelvis tunnels well past the wall plane
+      expect(blocked.c[0]!).toBeLessThan(WALL_X); // blocked: the pelvis is held on the near side of the wall
+    });
+
+    it('a VERY high force does not tunnel through a thin wall (anti-tunnel holds)', () => {
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, 1, 0, 300, mulberry32(99), wallColliders());
+      let worst = -Infinity;
+      for (let i = 0; i < 1800 && !rag.settled; i++) {
+        rag.step(CFG, 1 / 60);
+        worst = Math.max(worst, maxSampleX(rag));
+      }
+      expect(worst).toBeLessThan(WALL_X + 0.1);
+      expect(allFinite(rag.c)).toBe(true);
+      expect(allFinite(rag.q)).toBe(true);
+    });
+
+    it('a body launched into a round obstacle STOPS at it (circle collider)', () => {
+      const circles = new Float32Array([1.0, 0, 0.4]); // centre (1,0), radius 0.4 ahead in local +X
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, 1, 0, 40, mulberry32(5), { segments: new Float32Array(), circles });
+      let worst = Infinity;
+      for (let i = 0; i < 2500 && !rag.settled; i++) {
+        rag.step(CFG, 1 / 60);
+        worst = Math.min(worst, minSampleDistToCircle(rag, 1.0, 0));
+      }
+      // No sample ever sinks meaningfully inside the obstacle radius.
+      expect(worst).toBeGreaterThan(0.4 - 0.05);
+      expect(rag.maxPenetration).toBeLessThan(CFG.limbRadius + 0.05);
+      expect(allFinite(rag.c)).toBe(true);
+    });
+
+    it('a corpse launched PARALLEL to a wall still slides along it (not blocked)', () => {
+      // Wall along Z at x=0.5; shove along +Z (parallel) → the body travels in Z, unobstructed by the wall.
+      const along = runCol(16, 0, 1, 21, wallColliders());
+      const free = runCol(16, 0, 1, 21, NO_COLLIDERS);
+      // The parallel slide is essentially unchanged by the wall (it is to the side, not in the path).
+      expect(along.c[2]!).toBeGreaterThan(0.3); // travelled forward
+      expect(Math.abs(along.c[2]! - free.c[2]!)).toBeLessThan(0.4);
+    });
+
+    it('empty colliders are byte-identical to the no-collider path (unchanged behaviour)', () => {
+      const a = runCol(40, 1, 0, 7, NO_COLLIDERS);
+      const b = run(40, 1, 0, 7); // the original ground-only reset path (6-arg)
+      for (let i = 0; i < a.c.length; i++) expect(a.c[i]!).toBeCloseTo(b.c[i]!, 9);
+      for (let i = 0; i < a.q.length; i++) expect(a.q[i]!).toBeCloseTo(b.q[i]!, 9);
+    });
+
+    it('never produces NaN with world colliders (corner of two walls + a circle, violent diagonal hit)', () => {
+      const spec = buildTestSpec();
+      const rag = new Ragdoll(spec);
+      rag.reset(spec, CFG, 0.7, 0.7, 300, mulberry32(2024), {
+        segments: new Float32Array([0.4, -5, 0.4, 5, -5, 0.4, 5, 0.4]), // two crossing walls → a corner
+        circles: new Float32Array([1, 1, 0.3]),
+      });
+      const out = new Float32Array(spec.boneCount * 16);
+      for (let i = 0; i < 500; i++) {
+        rag.step(CFG, 1 / 60);
+        rag.writeBones(out, 0);
+        expect(allFinite(rag.c)).toBe(true);
+        expect(allFinite(rag.q)).toBe(true);
+        expect(allFinite(out)).toBe(true);
+      }
+    });
+
+    it('is deterministic with colliders — same seed + colliders reproduce the same fall', () => {
+      const a = runCol(80, 1, 0, 2024, wallColliders(), 600);
+      const b = runCol(80, 1, 0, 2024, wallColliders(), 600);
+      expect(a.settled).toBe(b.settled);
+      for (let i = 0; i < a.c.length; i++) expect(a.c[i]!).toBeCloseTo(b.c[i]!, 10);
+      for (let i = 0; i < a.q.length; i++) expect(a.q[i]!).toBeCloseTo(b.q[i]!, 10);
+    });
   });
 
   it('DECOUPLED damping — the non-rigid residual (limb flail) decays faster than the COM translation', () => {

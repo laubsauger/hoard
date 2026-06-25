@@ -266,4 +266,16 @@ export const ragdollFields = {
     min: 2,
     max: 120,
   }),
+  // ---- STATIC WORLD COLLISION (T134) — a launched corpse must pile against nearby walls / cars instead of sliding
+  // through them. At corpse spawn the render layer gathers the static colliders (nav wall edges + solid prop/furniture
+  // footprints) WITHIN this radius of the death spot and feeds them (transformed into the corpse-local frame) to the
+  // sim, which de-penetrates the body capsules against them each substep. Radius ≈ the max knockback travel + margin. ----
+  ragdollColliderGatherRadiusMeters: num({
+    owner: 'rendering',
+    unit: 'meters',
+    doc: 'Radius (m) around a fresh corpse within which static world colliders (wall edges + solid prop/furniture footprints) are gathered ONCE at spawn for the ragdoll to collide against — sized to the longest knockback travel plus margin so a launched body stops at a wall/car instead of tunneling (T134).',
+    default: 6,
+    min: 1,
+    max: 20,
+  }),
 };
