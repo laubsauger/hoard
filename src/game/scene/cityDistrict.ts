@@ -36,7 +36,7 @@ import {
   type PlacedFurniture,
   type TestBlock,
 } from './testBlock';
-import { placeHouse, SUBDIV, type PlacedHouse } from './placeHouse';
+import { placeHouse, SUBDIV, type PlacedHouse, type PlacedDoor } from './placeHouse';
 import { HOUSE_TEMPLATES, subdivideTemplate, type HouseTemplate, type RoomType, type Edge } from './houseTemplates';
 import { houseStyleForBuilding, type WindowPlacement } from './windows';
 import { resolveHouseVariation, windowState, type HouseVariationParams } from './houseStyle';
@@ -238,6 +238,30 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
     b.playerCell = spawn;
   }
 
+  // T135/T140: for the PLAYER house, choose the dead-end back room to seal the captive zombie in — BEFORE
+  // furnishing — and RESERVE all its cells so furnishHouse leaves it EMPTY (no dresser/bed boxing the zombie into
+  // a corner; a clean "open the door → face the zombie" room). Pure read of the room/door graph (V26).
+  let captiveRoomId = -1;
+  let captiveDoor: PlacedDoor | null = null;
+  if (isPlayerHouse && b.playerCell) {
+    const playerRoom = placed.roomAt(b.playerCell.cx, b.playerCell.cy)?.roomId ?? -1;
+    const doorsPerRoom = new Map<number, number>();
+    for (const dr of placed.doors) {
+      doorsPerRoom.set(dr.fromRoom, (doorsPerRoom.get(dr.fromRoom) ?? 0) + 1);
+      if (dr.toRoom !== null) doorsPerRoom.set(dr.toRoom, (doorsPerRoom.get(dr.toRoom) ?? 0) + 1);
+    }
+    for (const dr of placed.doors) {
+      if (dr.exterior || dr.toRoom === null) continue;
+      // a dead-end room: exactly ONE door, not the player's start room → fully sealed by closing that door.
+      const cand = [dr.fromRoom, dr.toRoom].find((rm) => rm !== null && rm !== playerRoom && (doorsPerRoom.get(rm) ?? 0) === 1);
+      if (cand === undefined || cand === null) continue;
+      captiveRoomId = cand;
+      captiveDoor = dr;
+      for (const rc of placed.rooms) if (rc.roomId === cand) reserved.push({ cx: rc.cx, cy: rc.cy }); // keep the room EMPTY
+      break;
+    }
+  }
+
   // --- furniture (P1b): furnish every room of this house, in WORLD cells, off a deterministic per-house seed
   // (the placer mixes in each room's type + bounds, so one seed varies layouts per room — V26). SOLID pieces are
   // marked blocked in the nav grid below (after stamping), exactly like prop solidity; the renderer + loot pass
@@ -288,73 +312,22 @@ function stampTemplatedHouse(b: DistrictBuild, i: number, j: number): void {
   // fraction start CLOSED for tension. The PLAYER house additionally seals ONE dead-end back room (a room with a
   // single door, not the start room) behind a CLOSED door + records its cell for the lone captive zombie.
   const interiorDoorsOfHouse = placed.doors.filter((dr) => !dr.exterior && dr.toRoom !== null);
-  let captiveDoorCell = -1;
-  if (isPlayerHouse && b.playerCell) {
-    const playerRoom = placed.roomAt(b.playerCell.cx, b.playerCell.cy)?.roomId ?? -1;
-    const doorsPerRoom = new Map<number, number>();
-    for (const dr of placed.doors) {
-      doorsPerRoom.set(dr.fromRoom, (doorsPerRoom.get(dr.fromRoom) ?? 0) + 1);
-      if (dr.toRoom !== null) doorsPerRoom.set(dr.toRoom, (doorsPerRoom.get(dr.toRoom) ?? 0) + 1);
+  // T140: the captive room + door were chosen BEFORE furnishing (so the room is reserved EMPTY). Seal that door
+  // and drop the lone zombie at the room cell FARTHEST from it (Chebyshev) — the room has NO furniture to box it
+  // in, so any cell is reachable; no flood-fill needed.
+  const captiveDoorCell = captiveDoor ? b.navGrid.index(captiveDoor.cx, captiveDoor.cy) : -1;
+  if (captiveDoor && captiveRoomId >= 0) {
+    let best: CellXY | null = null;
+    let bestD = -1;
+    for (const rc of placed.rooms) {
+      if (rc.roomId !== captiveRoomId) continue;
+      const dd = Math.max(Math.abs(rc.cx - captiveDoor.cx), Math.abs(rc.cy - captiveDoor.cy));
+      if (dd > bestD) {
+        bestD = dd;
+        best = { cx: rc.cx, cy: rc.cy };
+      }
     }
-    // A dead-end room (exactly ONE door, not the start room) is fully contained by closing that one door.
-    for (const dr of interiorDoorsOfHouse) {
-      const cand = [dr.fromRoom, dr.toRoom].find(
-        (rm) => rm !== null && rm !== playerRoom && (doorsPerRoom.get(rm) ?? 0) === 1,
-      );
-      if (cand === undefined || cand === null) continue;
-      captiveDoorCell = b.navGrid.index(dr.cx, dr.cy);
-      // Spawn the captive at the room cell FARTHEST (Chebyshev) from its door so it isn't standing in the doorway,
-      // but it MUST be a cell REACHABLE from the door over the live nav grid (furniture is already placed) — else
-      // it lands in a corner BOXED IN by a container/dresser and can never move (the stuck-behind-a-container
-      // bug). Flood the room's WALKABLE cells from the door seam; pick the farthest REACHABLE non-window cell.
-      const candCells = new Set<number>();
-      for (const rc of placed.rooms) if (rc.roomId === cand) candCells.add(b.navGrid.index(rc.cx, rc.cy));
-      const winCells = new Set<number>(placed.windows.map((wn) => b.navGrid.index(wn.cx, wn.cy)));
-      const D: Record<Edge, { dx: number; dy: number }> = { n: { dx: 0, dy: -1 }, s: { dx: 0, dy: 1 }, e: { dx: 1, dy: 0 }, w: { dx: -1, dy: 0 } };
-      const reachable = new Set<number>();
-      const queue: CellXY[] = [];
-      // Seed from the door cell + its cross-edge neighbour — whichever lies inside the dead-end room starts the flood.
-      for (const seed of [{ cx: dr.cx, cy: dr.cy }, { cx: dr.cx + D[dr.dir].dx, cy: dr.cy + D[dr.dir].dy }]) {
-        const idx = b.navGrid.index(seed.cx, seed.cy);
-        if (candCells.has(idx) && !b.navGrid.isBlocked(idx) && !reachable.has(idx)) {
-          reachable.add(idx);
-          queue.push(seed);
-        }
-      }
-      while (queue.length > 0) {
-        const c = queue.shift()!;
-        for (const d of [D.n, D.s, D.e, D.w]) {
-          const nx = c.cx + d.dx;
-          const ny = c.cy + d.dy;
-          const nidx = b.navGrid.index(nx, ny);
-          if (!candCells.has(nidx) || reachable.has(nidx) || b.navGrid.isBlocked(nidx)) continue;
-          if (!b.navGrid.canStep(c.cx, c.cy, d.dx, d.dy)) continue; // respect interior partitions / blocked edges
-          reachable.add(nidx);
-          queue.push({ cx: nx, cy: ny });
-        }
-      }
-      let best: CellXY | null = null;
-      let bestD = -1;
-      let fallback: CellXY | null = null;
-      let fallbackD = -1;
-      for (const rc of placed.rooms) {
-        if (rc.roomId !== cand) continue;
-        const idx = b.navGrid.index(rc.cx, rc.cy);
-        if (!reachable.has(idx)) continue; // never spawn the captive where it can't reach its own door
-        const dd = Math.max(Math.abs(rc.cx - dr.cx), Math.abs(rc.cy - dr.cy));
-        if (dd > fallbackD) {
-          fallbackD = dd;
-          fallback = { cx: rc.cx, cy: rc.cy };
-        }
-        if (winCells.has(idx)) continue; // prefer a non-window cell
-        if (dd > bestD) {
-          bestD = dd;
-          best = { cx: rc.cx, cy: rc.cy };
-        }
-      }
-      b.captiveZombieCell = best ?? fallback;
-      break;
-    }
+    if (best) b.captiveZombieCell = best;
   }
   for (const dr of interiorDoorsOfHouse) {
     const isCaptive = b.navGrid.index(dr.cx, dr.cy) === captiveDoorCell;

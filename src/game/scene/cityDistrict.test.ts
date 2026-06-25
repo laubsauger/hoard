@@ -270,6 +270,17 @@ describe('city district scene (T80 — large multi-building world)', () => {
     expect(block.interiorDoors!.some((x) => x.cx === d.cx && x.cy === d.cy)).toBe(true); // openable
   });
 
+  it('T140: the captive room is left EMPTY — no furniture boxes the zombie into a corner', () => {
+    const { block } = buildCityDistrict();
+    const captive = block.captiveZombieCell!;
+    expect(captive).toBeTruthy();
+    const room = block.roomAt!(captive.cx, captive.cy)!;
+    const furnitureInCaptiveRoom = (block.placedFurniture ?? []).filter(
+      (f) => f.houseIndex === room.houseIndex && f.roomId === room.roomId,
+    );
+    expect(furnitureInCaptiveRoom).toHaveLength(0);
+  });
+
   it('a zombie in one room can only reach the adjacent room via the doorway, never through the wall', () => {
     const { block } = buildCityDistrict();
     const grid = block.navGrid;
