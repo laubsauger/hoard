@@ -90,17 +90,22 @@ export class Crowd {
    * Partition the live crowd by DISTANCE into the rigged (near) + impostor (far) lanes and drive both. The anchor
    * (playerX/playerZ) is the LOD origin. Until the rigged lane is ready (all archetype GLBs baked) NOTHING is drawn
    * (the pre-bake gap shows no boxes; the blob CorpseField covers corpses). Returns the total drawn instance count.
+   *
+   * `slotCount` is the SoA SLOT-SCAN EXTENT (= the zombie capacity), NOT the alive population. The SoA is a sparse
+   * free-list: an alive zombie can occupy ANY slot index < capacity (kills + streaming recycle slots out of order),
+   * so the packers MUST scan every slot (skipping dead ones) — bounding the scan to the alive count would leave any
+   * alive zombie at a slot index >= count undrawn while it is still simulated + attacking (the invisible-enemy bug).
    */
-  update(views: FieldViews, count: number, dtSeconds: number, playerX: number, playerZ: number, visibility?: VisionCull): number {
-    this.maskScratch = computeDistanceBand(views, count, playerX, playerZ, this.settings.riggedMaxDistance, this.maskScratch);
+  update(views: FieldViews, slotCount: number, dtSeconds: number, playerX: number, playerZ: number, visibility?: VisionCull): number {
+    this.maskScratch = computeDistanceBand(views, slotCount, playerX, playerZ, this.settings.riggedMaxDistance, this.maskScratch);
     const mask = this.maskScratch;
     if (!this.rigged.isReady) {
       this.rigged.hide();
       this.impostor.hide();
       return 0;
     }
-    const near = this.rigged.update(views, count, dtSeconds, visibility, mask);
-    const far = this.impostor.update(views, count, visibility, mask);
+    const near = this.rigged.update(views, slotCount, dtSeconds, visibility, mask);
+    const far = this.impostor.update(views, slotCount, visibility, mask);
     return near + far;
   }
 

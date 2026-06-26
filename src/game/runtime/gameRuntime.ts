@@ -690,10 +690,17 @@ export class GameRuntime {
     // room, NOT the player cell — so it reads as an object in the world, not a thing that trails the player.
     const lootRng = mulberry32((opts.scatterSeed ?? 1) ^ 0x10c7);
     let containerSlot = 0;
+    // T40 — the containers whose loot table legitimately includes ITEM.RadioPart (loot.ts). The guaranteed
+    // objective-part seed goes ONLY into these, so a seeded part is always consistent with its container's table
+    // (a Dresser/Fridge never gets a part — that would break the room-type purity invariant, furnitureLoot.test).
+    const PART_BEARING_SOURCES: ReadonlySet<string> = new Set(['garage', 'toolshed', 'gunCabinet']);
+    const partBearingRefs: ContainerRef[] = [];
+    let legacyCupboardRef: ContainerRef | null = null;
     lootableContainerCells(this.scene).forEach((placement) => {
       const ref: ContainerRef = { entity: (WORLD_CONTAINER_ENTITY + containerSlot++) as EntityId, container: placement.label };
       this.inventory.addContainer(ref, { type: 'cupboard' });
       this.namedContainers.set(placement.label, ref);
+      legacyCupboardRef = ref; // always-present fallback seed target for the objective parts
       const center = this.scene.cellCenter(placement.cell);
       this.worldContainers.push({ x: center.x, z: center.z, label: placement.label });
       for (const s of rollLoot('kitchen', lootRng)) this.inventory.seed(ref, s.item, s.count);
@@ -718,6 +725,7 @@ export class GameRuntime {
       const center = this.scene.cellCenter({ cx: piece.cx, cy: piece.cy });
       this.worldContainers.push({ x: center.x, z: center.z, label });
       for (const s of rollLoot(piece.container, lootRng)) this.inventory.seed(ref, s.item, s.count);
+      if (PART_BEARING_SOURCES.has(piece.container)) partBearingRefs.push(ref); // eligible for the guaranteed part seed
     }
 
     // T24 — fill the pure crafting validator with the authored recipe content (molotov / bandage / radio-part).
@@ -728,13 +736,14 @@ export class GameRuntime {
     const radioPt = this.scene.cellCenter(radioCell(this.scene).cell);
     this.radioPos = { x: radioPt.x, z: radioPt.z };
 
-    // T40 — GUARANTEE the objective is solvable: seed exactly `partsRequired` radio parts spread across distinct
-    // world containers (round-robin), so enough are always scavengeable even when the loot-table rolls are unkind
-    // (the table entries are flavour/extra finds on top of this). No brittle fallback — a hard content invariant.
+    // T40 — GUARANTEE the objective is solvable: seed exactly `partsRequired` radio parts (round-robin) into the
+    // part-bearing world containers (garage/toolshed/gunCabinet), so enough are always scavengeable out in the
+    // world even when the loot-table rolls come up empty — and ONLY there, so each container's contents stay
+    // consistent with its own loot table (room-type purity, furnitureLoot.test). Falls back to the always-present
+    // kitchen cupboard for a degenerate district with no part-bearing container (so the seed never silently
+    // vanishes); the cupboard is also a part source then. A hard content invariant — never silently skipped.
     const partsRequired = resolveObjectiveSettings(this.tier).partsRequired;
-    const seedRefs = this.worldContainers
-      .map((c) => this.namedContainers.get(c.label))
-      .filter((r): r is ContainerRef => r !== undefined);
+    const seedRefs = partBearingRefs.length > 0 ? partBearingRefs : (legacyCupboardRef ? [legacyCupboardRef] : []);
     if (seedRefs.length === 0) throw new Error('T40: no world container to seed radio parts into');
     for (let i = 0; i < partsRequired; i++) {
       this.inventory.seed(seedRefs[i % seedRefs.length]!, ITEM.RadioPart as ItemId, 1);

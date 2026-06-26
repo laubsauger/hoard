@@ -94,6 +94,24 @@ describe('computeDistanceBand — rigged (near) vs impostor (far) LOD by distanc
     expect(rigged).toBe(4); // x = 1,5,12,30 within 40
     expect(impostor).toBe(2); // x = 70,200 beyond 40
   });
+
+  // REGRESSION (invisible-enemy bug): the SoA is a SPARSE free-list — an alive zombie can sit at a slot index
+  // >= the alive POPULATION. The render scan extent MUST be the slot capacity, never the alive count, or such a
+  // zombie is never drawn while it is still simulated + attacking.
+  it('scans the full SLOT EXTENT so a high-index alive zombie (slot >= alive-count) is still banded', () => {
+    const s = makeSoa();
+    s.alive[5] = 1; // a SINGLE alive zombie at slot 5 — alive population is 1, but its slot index is 5
+    s.position[5 * 3] = 1; // x = 1 (within rigged distance of the anchor)
+
+    // CORRECT: scanning the full slot extent (capacity) finds + bands it.
+    const full = computeDistanceBand(s.soa.views, CAP, 0, 0, /*riggedMaxDist*/ 3.5);
+    expect(full[5]).toBe(BAND_RIGGED);
+
+    // BUG REPRO: scanning only the alive population (1) bounds the loop + mask to [0,1) → slot 5 is not even in
+    // the output mask (undefined), so the lanes never draw it — invisible despite being alive + attacking.
+    const buggy = computeDistanceBand(s.soa.views, 1, 0, 0, 3.5);
+    expect(buggy[5]).toBeUndefined();
+  });
 });
 
 describe('variationSeed / variationScale stability (V26)', () => {

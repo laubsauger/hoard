@@ -394,7 +394,7 @@ export class CrowdImpostors {
    * by exactly one lane (§B). Vision-cull-hidden members (fade<=0) are skipped; edge members fade via alpha (V65).
    * Returns the total drawn count. No-op (0) until every archetype is baked. Allocation-free per frame (V24).
    */
-  update(views: FieldViews, count: number, visibility: VisionCull | undefined, mask: Uint8Array): number {
+  update(views: FieldViews, slotCount: number, visibility: VisionCull | undefined, mask: Uint8Array): number {
     if (!this.isReady) return 0;
     for (const slot of this.slots.values()) slot.live = 0;
 
@@ -403,7 +403,8 @@ export class CrowdImpostors {
     const heading = requireView<Float32Array>(views, 'heading');
     const archetype = requireView<Uint16Array>(views, 'archetype');
 
-    for (let s = 0; s < count; s++) {
+    // slotCount = SoA slot-scan extent (capacity), NOT alive population — scan all slots, skip dead (sparse free-list).
+    for (let s = 0; s < slotCount; s++) {
       if (alive[s] === 0) continue;
       if (mask[s] === BAND_RIGGED) continue; // claimed by the rigged lane
       let fade = 1;

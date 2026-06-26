@@ -63,7 +63,6 @@ import { GrenadeProjectileView } from './grenadeProjectileView';
 import { FirePoolView } from './firePoolView';
 import { TorchView } from './torchView';
 import { BurningZombieView } from './burningZombieView';
-import { VolumetricFireView } from './volumetricFireView';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
@@ -189,10 +188,8 @@ export class BlockScene {
   private readonly firePools: FirePoolView;
   /** T147: placed-torch props + the held/placed torch warm lights. */
   private readonly torches: TorchView;
-  /** T148: flames on burning zombies (the billboard tier — always present, scales to a burning horde). */
+  /** T148: flames on burning zombies (additive flame billboards — always present, scales to a burning horde). */
   private readonly burningZombies: BurningZombieView;
-  /** T149: raymarched VOLUMETRIC fire on the nearest fire pools (the expensive tier; the rest keep discs). */
-  private readonly volumetricFire: VolumetricFireView;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -479,11 +476,6 @@ export class BlockScene {
     this.scene.add(this.torches.group);
     this.burningZombies = new BurningZombieView((resource, kind, label) => this.res.track(resource, kind, label));
     this.scene.add(this.burningZombies.group);
-    // T149: volumetric fire budget — small (raymarch cost scales with screen pixels); the rest keep the discs.
-    const t = this.tierOf();
-    const maxVolumes = t === 'desktop-high' ? 4 : t === 'mobile-webgpu' ? 1 : 2;
-    this.volumetricFire = new VolumetricFireView((resource, kind, label) => this.res.track(resource, kind, label), maxVolumes);
-    this.scene.add(this.volumetricFire.group);
 
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
     const combatSettings = resolveCombatFeedbackSettings(this.tier);
@@ -707,7 +699,12 @@ export class BlockScene {
     const visibility = flags && this.visionConeCullOn ? this.visionCull.build(this.runtime, dtSeconds, passiveRadiusMeters) : undefined;
     // Player position drives the crowd's distance-ranked figure/box LOD (nearest zombies are figures, far = boxes).
     const playerPos = this.runtime.player();
-    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.count, dtSeconds, playerPos.x, playerPos.z, visibility);
+    // SCAN EXTENT = capacity, NOT alive `count`. The SoA is a SPARSE free-list: an alive zombie can occupy ANY
+    // slot index < capacity (kills + streaming evict/promote recycle slots out of order), exactly like the sim's
+    // `forEachAlive` scans [0, capacity). Passing `count` (alive population) bounded the slot scan to [0, count),
+    // so any alive zombie at a slot index >= count was NEVER drawn yet still simulated + ATTACKING — the
+    // "invisible enemy" bug. Scanning the full slot extent (dead slots are skipped) keeps render ≡ sim.
+    this.crowd.update(this.runtime.zombies.views, this.runtime.zombies.capacity, dtSeconds, playerPos.x, playerPos.z, visibility);
     // T134: render the lingering CORPSE POOL as per-limb RAGDOLLS — each dead body goes limp and falls under
     // physics from its killing shot, stepped by the frame dt until it settles. No-op until all archetype GLBs bake
     // in (the blob CorpseField covers that window). A render-only VIEW (V2) — reads the corpse records read-only.
@@ -747,16 +744,8 @@ export class BlockScene {
       camera ? camera.position.x : p.x,
       camera ? camera.position.z : p.z,
     );
-    // T148: flames on every burning zombie (billboard tier — always visible, scales to a burning horde).
+    // T148: flames on every burning zombie (additive flame billboards — always visible, scales to a burning horde).
     this.burningZombies.sync(this.runtime.burningZombiePositions(), dtSeconds);
-    // T149: volumetric fire on the nearest fire pools (expensive tier; discs cover the rest — no cliff).
-    this.volumetricFire.sync(
-      this.runtime.firePoolMarkers(),
-      groundY,
-      dtSeconds,
-      camera ? camera.position.x : p.x,
-      camera ? camera.position.z : p.z,
-    );
 
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);

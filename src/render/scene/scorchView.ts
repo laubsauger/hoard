@@ -5,6 +5,7 @@
 
 import { CircleGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
 import type { Disposable, ResourceKind } from '../engine/resources';
+import { makeSoftDiscTexture } from './fireTextures';
 
 type TrackFn = (resource: Disposable, kind: ResourceKind, label: string) => void;
 
@@ -17,14 +18,19 @@ export class ScorchView {
 
   constructor(track: TrackFn, radiusMeters: number) {
     this.group.name = 'scorches';
-    const geo = new CircleGeometry(radiusMeters, 24);
+    const geo = new CircleGeometry(radiusMeters, 32);
+    // Soft-alpha map (white centre → transparent rim) drives the opacity so the soot FADES into the ground instead
+    // of a hard-edged disc slapped on top. alphaMap samples .g (white here); darkest at the crater, gone at the rim.
+    const alphaTex = makeSoftDiscTexture();
+    track(alphaTex, 'texture', 'scorch.alpha.tex');
     // Charred near-black, matte, slightly translucent so the floor texture still reads under the soot.
     const mat = new MeshStandardMaterial({
       color: 0x130d08,
       roughness: 1,
       metalness: 0,
       transparent: true,
-      opacity: 0.82,
+      opacity: 0.72,
+      alphaMap: alphaTex,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -2,

@@ -34,22 +34,26 @@ export const BAND_IMPOSTOR = 0;
  * `BAND_IMPOSTOR` (0). Both lanes (rigged + impostor) consult this ONE mask so the live set is partitioned
  * identically and each alive zombie is claimed by EXACTLY ONE lane (§B). Dead slots are 0 but never drawn (both
  * lanes skip alive==0). PURE: the caller owns the anchor; allocation-free when an `out` scratch is reused.
+ *
+ * `slotCount` is the SoA SLOT-SCAN EXTENT (= capacity), NOT the alive population — the SoA is a sparse free-list,
+ * so an alive zombie may sit at any slot index < capacity. Scan the full extent (dead slots are skipped) so a
+ * high-index alive zombie is never silently dropped from the render (the invisible-enemy bug).
  */
 export function computeDistanceBand(
   views: FieldViews,
-  count: number,
+  slotCount: number,
   anchorX: number,
   anchorZ: number,
   riggedMaxDist: number,
   out?: Uint8Array,
 ): Uint8Array {
-  const mask = out && out.length >= count ? out : new Uint8Array(count);
-  mask.fill(BAND_IMPOSTOR, 0, count);
+  const mask = out && out.length >= slotCount ? out : new Uint8Array(slotCount);
+  mask.fill(BAND_IMPOSTOR, 0, slotCount);
   if (riggedMaxDist <= 0) return mask; // everything is an impostor
   const alive = requireView<Uint8Array>(views, 'alive');
   const position = requireView<Float32Array>(views, 'position');
   const r2 = riggedMaxDist * riggedMaxDist;
-  for (let s = 0; s < count; s++) {
+  for (let s = 0; s < slotCount; s++) {
     if (alive[s]! === 0) continue;
     const dx = position[s * 3]! - anchorX;
     const dz = position[s * 3 + 2]! - anchorZ;

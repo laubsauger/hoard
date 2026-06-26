@@ -20,6 +20,29 @@ describe('SimulationZombies SoA store (T8)', () => {
     expect(z.freeCount).toBe(2);
   });
 
+  // The store is a SPARSE free-list: after freeing a LOW slot while higher slots stay alive, the highest alive
+  // slot index exceeds the alive `count`. Any consumer (notably the render crowd) MUST scan [0, capacity) and
+  // skip dead slots — bounding a scan by `count` would skip these high-index alive zombies (the invisible-enemy
+  // bug, where a still-simulated+attacking zombie was never drawn). This pins the invariant render relies on.
+  it('keeps alive zombies at slot indices >= count (sparse free-list) — scan by capacity, not count', () => {
+    const z = mk(8);
+    z.spawn({ archetype: 1, position: [0, 0, 0], health: 100 }); // slot 0
+    z.spawn({ archetype: 1, position: [0, 0, 0], health: 100 }); // slot 1
+    const c = z.spawn({ archetype: 1, position: [0, 0, 0], health: 100 }); // slot 2
+    z.free(0); // free a LOW slot — now alive = {1, 2}, count = 2, but slot 2 is alive AND 2 >= count
+    expect(z.count).toBe(2);
+    expect(z.isAlive(c)).toBe(true);
+    expect(c).toBeGreaterThanOrEqual(z.count); // the high-index alive slot a count-bounded scan would miss
+
+    // forEachAlive (the sim's own scan — and what render must mirror) reaches it; a [0,count) scan would not.
+    const seen: number[] = [];
+    z.forEachAlive((s) => seen.push(s));
+    expect(seen).toContain(c);
+    const countBounded: number[] = [];
+    for (let s = 0; s < z.count; s++) if (z.isAlive(s)) countBounded.push(s);
+    expect(countBounded).not.toContain(c); // demonstrates why scanning by `count` drops it
+  });
+
   it('reuses a freed slot (free-list reuse)', () => {
     const z = mk(4);
     const a = z.spawn({ archetype: 1, position: [0, 0, 0], health: 100 });

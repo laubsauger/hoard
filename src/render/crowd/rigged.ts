@@ -917,6 +917,10 @@ export class RiggedCrowd {
    * Pack the limbed-band live zombies into their archetype's instance buffers for this frame + advance each
    * slot's clip phase. Returns the total drawn count. No-op (returns 0) until every archetype is loaded.
    * Allocation-free per frame (V24): reuses the per-archetype Float32Arrays + the per-slot phase accumulator.
+   *
+   * `count` here is the SoA SLOT-SCAN EXTENT (= capacity, passed down from crowd.update's `slotCount`), NOT the
+   * alive population — the SoA is a sparse free-list, so the loop scans every slot and skips dead ones. Bounding
+   * it to the alive count would drop high-index alive zombies from the draw (the invisible-enemy bug).
    */
   update(views: FieldViews, count: number, dtSeconds: number, visibility?: VisionCull, figureMask?: Uint8Array): number {
     if (!this.isReady) return 0;

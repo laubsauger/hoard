@@ -75,17 +75,19 @@ export class VisionCullSystem {
     };
 
     // Precompute the per-slot reveal once per frame (read by BOTH packing paths so they always agree), folding in
-    // the stateful recently-seen memory. RENDER-side only — no sim state touched (V26). Matches packing's slot
-    // iteration (0..count) exactly so reveal[slot] aligns with the slot each packer reads.
+    // the stateful recently-seen memory. RENDER-side only — no sim state touched (V26). Scans the full SLOT EXTENT
+    // (capacity), NOT the alive `count`: the SoA is a sparse free-list, so an alive zombie can sit at any slot
+    // index < capacity. Must match the crowd packers' scan extent EXACTLY (also capacity) so reveal[slot] aligns
+    // with the slot each packer reads — and so a high-slot zombie is never left unrevealed (the invisible-enemy bug).
     const zombies = runtime.zombies;
-    const count = zombies.count;
+    const slotCount = zombies.capacity;
     const views = zombies.views;
     const position = views.position as Float32Array;
     const alive = views.alive as Uint8Array;
     const state = views.state as Uint8Array;
     const memSec = this.cfg.playerSightMemorySeconds;
     const reveal = this.perceptionReveal;
-    for (let slot = 0; slot < count; slot++) {
+    for (let slot = 0; slot < slotCount; slot++) {
       let inst = 0;
       if (alive[slot] === 1) {
         const x = position[slot * 3]!;
