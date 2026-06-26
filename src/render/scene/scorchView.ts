@@ -1,11 +1,13 @@
-// T142 — charred scorch decals left where a grenade exploded. A ring buffer of dark flat discs laid on the
-// ground (polygon-offset so they sit on the floor without z-fighting); a fresh blast claims the next slot,
-// recycling the oldest once the pool wraps. Persistent discolouration (no fade) — the world remembers the blast.
-// Render-only (V2): placed from blast points, never reads/writes sim state. Shared geometry + material (V24).
+// T142 — charred scorch decals left where a grenade exploded. A ring buffer of RAGGED blast splats laid flat on the
+// ground (polygon-offset so they sit on the floor without z-fighting); a fresh blast claims the next slot, recycling
+// the oldest once the pool wraps. The mark is a baked irregular soot texture (`makeScorchTexture`) on a PLANE — NOT a
+// CircleGeometry, whose rim cut the soft falloff into a hard perfect circle (the prior bug). Each stamp gets a random
+// in-plane spin so repeats don't read identical. Persistent (no fade) — the world remembers the blast. Render-only
+// (V2): placed from blast points, never reads/writes sim state. Shared geometry + material + texture (V24).
 
-import { CircleGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
+import { Group, Mesh, MeshBasicMaterial, PlaneGeometry } from 'three';
 import type { Disposable, ResourceKind } from '../engine/resources';
-import { makeSoftDiscTexture } from './fireTextures';
+import { makeScorchTexture } from './fireTextures';
 
 type TrackFn = (resource: Disposable, kind: ResourceKind, label: string) => void;
 
@@ -18,25 +20,20 @@ export class ScorchView {
 
   constructor(track: TrackFn, radiusMeters: number) {
     this.group.name = 'scorches';
-    const geo = new CircleGeometry(radiusMeters, 32);
-    // Soft-alpha map (white centre → transparent rim) drives the opacity so the soot FADES into the ground instead
-    // of a hard-edged disc slapped on top. alphaMap samples .g (white here); darkest at the crater, gone at the rim.
-    const alphaTex = makeSoftDiscTexture();
-    track(alphaTex, 'texture', 'scorch.alpha.tex');
-    // Charred near-black, matte, slightly translucent so the floor texture still reads under the soot.
-    const mat = new MeshStandardMaterial({
-      color: 0x130d08,
-      roughness: 1,
-      metalness: 0,
+    // Plane spans ~2.7× the blast radius; the baked soot occupies the inner ~⅓ with a transparent, ragged border.
+    const span = radiusMeters * 2.7;
+    const geo = new PlaneGeometry(span, span);
+    const tex = makeScorchTexture();
+    const mat = new MeshBasicMaterial({
+      map: tex,
       transparent: true,
-      opacity: 0.72,
-      alphaMap: alphaTex,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
     });
     track(geo, 'geometry', 'scorch.geo');
+    track(tex, 'texture', 'scorch.tex');
     track(mat, 'material', 'scorch.mat');
     for (let i = 0; i < MAX_SCORCHES; i++) {
       const m = new Mesh(geo, mat);

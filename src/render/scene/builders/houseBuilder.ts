@@ -359,6 +359,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
                 const m = new Mesh(res.geo(`section.upper.${bi}.${cx}.${cy}.${along}.${segIdx}`, mkGeo(h)), sectionMat);
                 m.position.set(px, cyU, pz);
                 m.castShadow = true;
+                m.receiveShadow = true; // upper band must receive shadows like the base band — cutaway state must NOT change lighting
                 tagInteractable(m, idx); // T113/V79: section nav-cell tag for the silhouette GLOW (matches the base-portion tag)
                 wallsGroup.add(m);
                 sectionObjs.push(m);
@@ -427,6 +428,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
         upperMat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
         const upperWall = new Mesh(upperGeoMerged, upperMat);
         upperWall.castShadow = true;
+        upperWall.receiveShadow = true; // upper band must receive shadows like the base band — cutaway state must NOT change lighting
         upperWall.renderOrder = upperOffset.renderOrder;
         root.add(upperWall);
         // World-XZ centre of this side's merged upper wall (its geometry is already in world coords) — the
@@ -559,6 +561,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
         mat.polygonOffsetUnits = upperOffset.polygonOffsetUnits;
         const mesh = new Mesh(merged, mat);
         mesh.castShadow = true;
+        mesh.receiveShadow = true; // upper band must receive shadows like the base band — cutaway state must NOT change lighting
         mesh.renderOrder = upperOffset.renderOrder;
         root.add(mesh);
         merged.computeBoundingBox();
@@ -656,6 +659,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
     const roof = new Mesh(roofGeo, roofMat);
     roof.renderOrder = roofOff.renderOrder;
     roof.castShadow = true;
+    roof.receiveShadow = true; // cutaway-fadeable roof must still receive shadows — cull state must NOT change lighting
     group.add(roof);
 
     // Materials of the roof-group EXTRAS (chimney + decay holes). They use their OWN materials, NOT roofMat, so
@@ -692,6 +696,7 @@ export function buildHouses(ctx: BuildContext, styleResolver: HouseStyleResolver
       const sz = (hash01(style.seed, 72) - 0.5) * (rd - c - 0.6);
       chimney.position.set(sx, chimneyH / 2, sz);
       chimney.castShadow = true;
+      chimney.receiveShadow = true; // cutaway-fadeable chimney must still receive shadows — cull state must NOT change lighting
       group.add(chimney);
     }
 

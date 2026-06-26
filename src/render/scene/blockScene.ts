@@ -63,6 +63,7 @@ import { GrenadeProjectileView } from './grenadeProjectileView';
 import { FirePoolView } from './firePoolView';
 import { TorchView } from './torchView';
 import { BurningZombieView } from './burningZombieView';
+import { FireLightView, type FireEmitter } from './fireLightView';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
@@ -190,6 +191,8 @@ export class BlockScene {
   private readonly torches: TorchView;
   /** T148: flames on burning zombies (additive flame billboards — always present, scales to a burning horde). */
   private readonly burningZombies: BurningZombieView;
+  /** T148: warm orange light emission from fires (pooled no-shadow point lights, nearest-to-camera). */
+  private readonly fireLights: FireLightView;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -476,6 +479,11 @@ export class BlockScene {
     this.scene.add(this.torches.group);
     this.burningZombies = new BurningZombieView((resource, kind, label) => this.res.track(resource, kind, label));
     this.scene.add(this.burningZombies.group);
+    // T148: orange fire light — no-shadow point lights, budget by tier (cheap, but each adds to forward lighting).
+    const fireLightTier = this.tierOf();
+    const maxFireLights = fireLightTier === 'desktop-high' ? 8 : fireLightTier === 'mobile-webgpu' ? 3 : 6;
+    this.fireLights = new FireLightView((resource, kind, label) => this.res.track(resource, kind, label), maxFireLights);
+    this.scene.add(this.fireLights.group);
 
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
     const combatSettings = resolveCombatFeedbackSettings(this.tier);
@@ -734,7 +742,9 @@ export class BlockScene {
     // popped via flashExplosion() (drained by the render loop so the boom + flash pair); a 0-dt rebuild must not drain.
     this.explosions.update(dtSeconds);
     this.grenadeProjectiles.sync(this.runtime.grenadeProjectiles());
-    this.firePools.sync(this.runtime.firePoolMarkers(), groundY, dtSeconds);
+    const firePoolMarkers = this.runtime.firePoolMarkers();
+    const burningPositions = this.runtime.burningZombiePositions();
+    this.firePools.sync(firePoolMarkers, groundY, dtSeconds);
     // T147: placed-torch props + the held/placed warm lights (held torch lights from the player when it's active).
     this.torches.sync(
       this.runtime.placedTorchMarkers(),
@@ -745,7 +755,13 @@ export class BlockScene {
       camera ? camera.position.z : p.z,
     );
     // T148: flames on every burning zombie (additive flame billboards — always visible, scales to a burning horde).
-    this.burningZombies.sync(this.runtime.burningZombiePositions(), dtSeconds);
+    this.burningZombies.sync(burningPositions, dtSeconds);
+    // T148: warm orange light from fires — molotov pools (bright) + burning zombies (dimmer), nearest-to-camera lit.
+    const fireEmitters: FireEmitter[] = [
+      ...firePoolMarkers.map((q) => ({ x: q.x, z: q.z, radius: q.radius, intensity: 9 })),
+      ...burningPositions.map((q) => ({ x: q.x, z: q.z, radius: 1.3, intensity: 4 })),
+    ];
+    this.fireLights.sync(fireEmitters, groundY, dtSeconds, camera ? camera.position.x : p.x, camera ? camera.position.z : p.z);
 
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);
