@@ -97,6 +97,7 @@ export {
 } from './doors';
 export {
   lootableContainerCells,
+  radioCell,
   type ContainerPlacement,
 } from './containers';
 export {

@@ -34,6 +34,9 @@ function contextFromInventory(playerItems: readonly number[]): InteractionContex
     hasPlanks: has(ITEM.WoodPlank),
     hasTool: has(ITEM.Crowbar) || has(ITEM.FireAxe) || has(ITEM.Hammer),
     hasKey: false,
+    // T40 — radio gating: a carried part enables "Install", a screwdriver/hammer enables "Repair".
+    hasRadioPart: has(ITEM.RadioPart),
+    hasRepairTool: has(ITEM.Screwdriver) || has(ITEM.Hammer),
   };
 }
 
@@ -101,6 +104,12 @@ export function InteractionWheel({ handle }: { handle: EngineHandle | null }) {
         else if (verb.action === 'window.board') handle.boardWindow();
         else if (verb.action === 'window.removeBoard') handle.removeWindowBoard();
         else if (verb.action === 'window.climb') handle.climbWindow();
+        break;
+      case 'radio':
+        // T40 — the objective hub: install carried parts → channel the repair → call evacuation.
+        if (verb.action === 'radio.install') handle.installRadioPart();
+        else if (verb.action === 'radio.repair') handle.toggleRadioRepair();
+        else if (verb.action === 'radio.call') handle.callEvacuation();
         break;
     }
   };

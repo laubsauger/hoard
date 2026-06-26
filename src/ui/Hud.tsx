@@ -66,8 +66,11 @@ export function Hud() {
   const nearestThreat = useMapView((s) => s.horde?.nearestThreatMeters ?? null);
   // M2 mission status (objective + decisive event + district streaming) — coarse, throttled (V11).
   const directive = useMapView((s) => s.mission?.directive ?? null);
+  const objectivePhase = useMapView((s) => s.mission?.objectivePhase ?? null);
   const partsFound = useMapView((s) => s.mission?.partsFound ?? null);
   const partsRequired = useMapView((s) => s.mission?.partsRequired ?? null);
+  const repairProgress = useMapView((s) => s.mission?.repairProgressTicks ?? null);
+  const repairRequired = useMapView((s) => s.mission?.repairRequiredTicks ?? null);
   const evacRemaining = useMapView((s) => s.mission?.evacuationTicksRemaining ?? null);
   const eventPhase = useMapView((s) => s.mission?.eventPhase ?? null);
   const eventOutcome = useMapView((s) => s.mission?.eventOutcome ?? null);
@@ -109,9 +112,12 @@ export function Hud() {
       {directive && (
         <div className="hbn-hud__objective" aria-label="objective">
           <span className="hbn-hud__directive">{directive}</span>
-          {partsRequired !== null && partsFound !== null && (
+          {objectivePhase === 'locateParts' && partsRequired !== null && partsFound !== null && (
             <span className="hbn-hud__parts">Parts {partsFound}/{partsRequired}</span>
           )}
+          {objectivePhase === 'repairRadio' && repairRequired ? (
+            <span className="hbn-hud__parts">Repair {Math.floor(((repairProgress ?? 0) / repairRequired) * 100)}%</span>
+          ) : null}
           {evacRemaining !== null && <span className="hbn-hud__evac">Evac in {Math.ceil(evacRemaining)}</span>}
           {eventPhase && eventPhase !== 'idle' && (
             <span className="hbn-hud__event">

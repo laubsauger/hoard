@@ -52,6 +52,7 @@ import { passiveRadiusFromAmbient } from '../world/passiveAwareness';
 import { buildGround, buildGroundRects } from './builders/groundBuilder';
 import { buildProps } from './builders/propsBuilder';
 import { buildContainers } from './builders/containersBuilder';
+import { buildRadio } from './builders/radioBuilder';
 import { buildFurniture } from './builders/furnitureBuilder';
 import { buildPlayer } from './builders/playerBuilder';
 import type { PlayerAvatar } from '../player';
@@ -59,6 +60,10 @@ import { FloorPileView } from './floorPileView';
 import { ExplosionView } from './explosionView';
 import { ScorchView } from './scorchView';
 import { GrenadeProjectileView } from './grenadeProjectileView';
+import { FirePoolView } from './firePoolView';
+import { TorchView } from './torchView';
+import { BurningZombieView } from './burningZombieView';
+import { VolumetricFireView } from './volumetricFireView';
 import { buildHouses } from './builders/houseBuilder';
 import { buildOpenings } from './builders/openingsBuilder';
 import { HouseStyleResolver } from './builders/houseStyle';
@@ -180,6 +185,14 @@ export class BlockScene {
   private readonly scorches: ScorchView;
   /** T142: in-flight thrown-grenade projectiles, synced from `runtime.grenadeProjectiles()` each frame. */
   private readonly grenadeProjectiles: GrenadeProjectileView;
+  /** T146: molotov fire-pool ground visuals, synced from `runtime.firePoolMarkers()` each frame. */
+  private readonly firePools: FirePoolView;
+  /** T147: placed-torch props + the held/placed torch warm lights. */
+  private readonly torches: TorchView;
+  /** T148: flames on burning zombies (the billboard tier — always present, scales to a burning horde). */
+  private readonly burningZombies: BurningZombieView;
+  /** T149: raymarched VOLUMETRIC fire on the nearest fire pools (the expensive tier; the rest keep discs). */
+  private readonly volumetricFire: VolumetricFireView;
   private readonly fadeSurfaces: FadeSurface[] = [];
   /** structuralCell -> the section meshes to hide once that cell is breached. */
   private readonly sectionMeshes: { cell: number; objects: Object3D[] }[] = [];
@@ -422,6 +435,13 @@ export class BlockScene {
       cupboardDepthMeters: this.structures.cupboardDepthMeters,
       floorThicknessMeters: this.world.floorThicknessMeters,
     });
+    // T40 — the objective radio set (its own diegetic hub), anchored at the authored `radioCell`.
+    buildRadio(this.buildCtx(), {
+      cupboardWidthMeters: this.structures.cupboardWidthMeters,
+      cupboardHeightMeters: this.structures.cupboardHeightMeters,
+      cupboardDepthMeters: this.structures.cupboardDepthMeters,
+      floorThicknessMeters: this.world.floorThicknessMeters,
+    });
     // P1c: furniture meshes (interior content — revealed by the cutaway, NOT a fade surface). Stands on the
     // per-room floor slab; one InstancedMesh per colour keeps the whole street's furniture draw-call cheap.
     buildFurniture(this.buildCtx(), { floorThicknessMeters: this.world.floorThicknessMeters });
@@ -453,6 +473,17 @@ export class BlockScene {
     this.scene.add(this.scorches.group);
     this.grenadeProjectiles = new GrenadeProjectileView((resource, kind, label) => this.res.track(resource, kind, label));
     this.scene.add(this.grenadeProjectiles.group);
+    this.firePools = new FirePoolView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.firePools.group);
+    this.torches = new TorchView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.torches.group);
+    this.burningZombies = new BurningZombieView((resource, kind, label) => this.res.track(resource, kind, label));
+    this.scene.add(this.burningZombies.group);
+    // T149: volumetric fire budget — small (raymarch cost scales with screen pixels); the rest keep the discs.
+    const t = this.tierOf();
+    const maxVolumes = t === 'desktop-high' ? 4 : t === 'mobile-webgpu' ? 1 : 2;
+    this.volumetricFire = new VolumetricFireView((resource, kind, label) => this.res.track(resource, kind, label), maxVolumes);
+    this.scene.add(this.volumetricFire.group);
 
     // Combat feedback (B7): pooled gore + muzzle/tracer, tracked for disposal (V24) and added to the graph.
     const combatSettings = resolveCombatFeedbackSettings(this.tier);
@@ -706,6 +737,26 @@ export class BlockScene {
     // popped via flashExplosion() (drained by the render loop so the boom + flash pair); a 0-dt rebuild must not drain.
     this.explosions.update(dtSeconds);
     this.grenadeProjectiles.sync(this.runtime.grenadeProjectiles());
+    this.firePools.sync(this.runtime.firePoolMarkers(), groundY, dtSeconds);
+    // T147: placed-torch props + the held/placed warm lights (held torch lights from the player when it's active).
+    this.torches.sync(
+      this.runtime.placedTorchMarkers(),
+      this.runtime.isTorchEquipped() ? { x: p.x, z: p.z } : null,
+      groundY,
+      dtSeconds,
+      camera ? camera.position.x : p.x,
+      camera ? camera.position.z : p.z,
+    );
+    // T148: flames on every burning zombie (billboard tier — always visible, scales to a burning horde).
+    this.burningZombies.sync(this.runtime.burningZombiePositions(), dtSeconds);
+    // T149: volumetric fire on the nearest fire pools (expensive tier; discs cover the rest — no cliff).
+    this.volumetricFire.sync(
+      this.runtime.firePoolMarkers(),
+      groundY,
+      dtSeconds,
+      camera ? camera.position.x : p.x,
+      camera ? camera.position.z : p.z,
+    );
 
     this.breach.sync(this.runtime.scene);
     this.doors.sync(this.runtime, dtSeconds);

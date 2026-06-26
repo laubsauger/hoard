@@ -90,6 +90,13 @@ export function highlightBoxFor(target: InteractionTargetWorld, dims: HighlightD
       const h = dims.wallHeightMeters * 0.85;
       return { kind: 'door', x: target.x, y: h / 2, z: target.z, sizeX: dims.navCellSize * 0.85, sizeY: h, sizeZ: dims.thinMeters, rotationY: rot };
     }
+    case 'radio': {
+      // T40 — a small table-top appliance box, lifted to roughly waist height so the glow hugs the radio mesh.
+      const w = dims.cupboardWidthMeters * 0.5;
+      const h = dims.cupboardHeightMeters * 0.32;
+      const sill = dims.cupboardHeightMeters * 0.5;
+      return { kind: 'radio', x: target.x, y: sill + h / 2, z: target.z, sizeX: w, sizeY: h, sizeZ: w, rotationY: 0 };
+    }
     default: {
       // structure (the destructible wall section) — a thin full-height slab one cell wide on the wall.
       const h = dims.wallHeightMeters;
@@ -190,6 +197,14 @@ export function interactionActionLabel(target: InteractionTarget): string {
       return 'search body';
     case 'structure':
       return target.boarded ? 'breach' : 'breach wall';
+    case 'radio':
+      // T40 — headline verb tracks the objective stage the radio is in.
+      switch (target.radioStage) {
+        case 'collect': return 'install part';
+        case 'repair': return target.repairing ? 'stop repair' : 'repair radio';
+        case 'call': return 'call evacuation';
+        default: return 'use radio';
+      }
   }
 }
 

@@ -49,8 +49,8 @@ describe('buildWeaponMeshes (T141)', () => {
       expect(meshes[v]).toBeInstanceOf(Group);
       expect(meshes[v].children.length).toBeGreaterThan(0);
     }
-    // two shared materials + several geometries, all tracked (no leaks, V24).
-    expect(tracked.filter((t) => t.kind === 'material').length).toBe(2);
+    // shared materials (steel + wood + torch flame) + several geometries, all tracked (no leaks, V24).
+    expect(tracked.filter((t) => t.kind === 'material').length).toBe(3);
     expect(tracked.filter((t) => t.kind === 'geometry').length).toBeGreaterThan(0);
   });
 });

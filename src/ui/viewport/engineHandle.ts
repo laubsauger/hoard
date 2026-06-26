@@ -9,8 +9,9 @@ import type { GameAudio } from '../../audio-out';
 import type { GameRuntime } from '../../game/runtime';
 import type { PersistenceAdapter } from '../../game/persistence';
 import type { QualityTier } from '../../config/types';
-import type { CommandId, EntityId, ModuleId } from '../../game/core/contracts';
+import type { CommandId, ModuleId } from '../../game/core/contracts';
 import type { EquipSlot } from '../../game/inventory';
+import type { CraftActionView } from '../../stores/craftingView';
 import type { InteractionPrompt, InteractionTargetWorld } from '../../game/interaction';
 import type { WeatherProfile } from '../../config/domains/weather';
 import { inputStore, formatKeyCode } from '../../stores/input';
@@ -74,6 +75,8 @@ export interface EngineHandle {
   drop(item: number): void;
   /** T142: throw a hand grenade toward the player's current facing (the V key throws toward the mouse instead). */
   throwGrenade(): void;
+  /** T147: place a carried torch at the player's feet as a persistent world light source. */
+  placeTorch(): void;
   /** T113: project a world point to viewport CSS px (page coords), or null when off-screen/behind the camera —
    *  reuses the live tactical camera so the world-anchored prompt floats next to the real object (V11). */
   worldToScreen(x: number, y: number, z: number): ScreenPoint | null;
@@ -82,10 +85,20 @@ export interface EngineHandle {
   rotate(dir: 1 | -1): void;
   zoom(delta: number): void;
   setWeather(profile: WeatherProfile): void;
-  // M2 medium-term objective intents (V1 — issued as confirmAction commands).
-  collectPart(): void;
-  repairRadio(): void;
-  advanceObjective(): void;
+  // T40 — diegetic objective hub (the RADIO). The interaction wheel maps the radio's stage verbs to these (V1).
+  /** Install one carried Radio Part into the radio (collect stage); auto-advances to repair once all parts are in. */
+  installRadioPart(): void;
+  /** Start/stop the channeled radio repair (repair stage) — progresses while held in reach with a tool. */
+  toggleRadioRepair(): void;
+  /** Whether the repair channel is currently running (drives HUD feedback). */
+  isRepairing(): boolean;
+  /** Call for evacuation from the radio (call stage) — arms the decisive horde event + countdown. */
+  callEvacuation(): void;
+  // T24 — crafting (recipe assembly from the pack), surfaced as the inventory menu's Craft tab.
+  /** The current recipe list (label + availability + reason), recomputed from the live pack. */
+  craftables(): CraftActionView[];
+  /** Craft a recipe by id: consume inputs, add the output, re-surface the inventory. */
+  craft(recipeId: string): void;
 }
 
 export interface CreateEngineHandleArgs {
@@ -211,7 +224,13 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
     throwGrenade: () => {
       const rt = getRuntime();
       const aim = rt.playerAim();
-      if (rt.throwGrenade(Math.cos(aim), Math.sin(aim))) publishInventory(); // grenade left the pack
+      if (rt.throwThrowable(Math.cos(aim), Math.sin(aim))) publishInventory(); // grenade left the pack
+    },
+    placeTorch: () => {
+      if (getRuntime().placeTorch()) {
+        gameAudio.containerOpen(); // soft confirmation
+        publishInventory();
+      }
     },
     worldToScreen: (x, y, z) => {
       const rect = canvas.getBoundingClientRect();
@@ -224,17 +243,26 @@ export function createEngineHandle(args: CreateEngineHandleArgs): EngineHandle {
     rotate: (dir) => camera.rotate(dir),
     zoom: (delta) => camera.setZoom(camera.state.zoom + delta),
     setWeather: (profile) => getRuntime().setWeather(profile),
-    collectPart: () => {
-      const runtime = getRuntime();
-      runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.collectPart' });
+    installRadioPart: () => {
+      if (getRuntime().installRadioPart()) {
+        gameAudio.containerOpen(); // soft confirmation; a part went in
+        publishInventory(); // the consumed part leaves the pack
+      }
     },
-    repairRadio: () => {
-      const runtime = getRuntime();
-      runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.repair' });
+    toggleRadioRepair: () => {
+      getRuntime().toggleRadioRepair();
+      gameAudio.containerOpen(); // tick on start/stop
     },
-    advanceObjective: () => {
-      const runtime = getRuntime();
-      runtime.dispatch({ kind: 'confirmAction', id: nextCmd(), entity: runtime.playerEntity as EntityId, action: 'objective.advance' });
+    isRepairing: () => getRuntime().isRepairing(),
+    callEvacuation: () => {
+      if (getRuntime().callEvacuation()) gameAudio.containerOpen();
+    },
+    craftables: () => getRuntime().craftActions(),
+    craft: (recipeId) => {
+      if (getRuntime().craftRecipe(recipeId)) {
+        gameAudio.containerOpen();
+        publishInventory(); // inputs consumed → output added
+      }
     },
   };
 }

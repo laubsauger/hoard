@@ -314,4 +314,9 @@ export const weaponsConfig = registerDomain('weapons', {
   grenadeArcHeightMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Peak height of the thrown grenade arc (purely the projectile render — the detonation is at ground level).', default: 2.5, min: 0, max: 20 }),
   grenadeThrowRangeMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Max distance the grenade travels — the aim point is clamped to this from the player.', default: 12, min: 1, max: 60 }),
   grenadeSelfDamageScale: num({ owner: 'weapons', unit: 'ratio', doc: 'Fraction of the blast damage the PLAYER takes if caught in the radius (cook your own grenade at your peril). 0 = player immune.', default: 0.6, min: 0, max: 1 }),
+
+  // ---- Molotov cocktail (T146): thrown like a grenade but detonates ON LANDING into a lingering FIRE POOL that
+  //      sets zombies alight (T145 burn) — reuses the grenade throw range / flight / arc tunables above. ----
+  molotovFireRadiusMeters: num({ owner: 'weapons', unit: 'meters', doc: 'Radius of the molotov fire pool — zombies inside catch fire (T145).', default: 3, min: 0.5, max: 30 }),
+  molotovPoolSeconds: num({ owner: 'weapons', unit: 'seconds', doc: 'How long the molotov fire pool burns on the ground, re-igniting anything that wanders in.', default: 6, min: 0.5, max: 60 }),
 });

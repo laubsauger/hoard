@@ -2,6 +2,7 @@
 export {
   resolveInteractions,
   type TargetKind,
+  type RadioStage,
   type InteractionTarget,
   type InteractionContext,
   type InteractionVerb,

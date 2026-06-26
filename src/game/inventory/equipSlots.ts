@@ -26,7 +26,7 @@ export const SLOT_LABELS: Readonly<Record<EquipSlot, string>> = {
 /** Hand tools + throwables that can be carried on the belt (non-weapon-class items that still equip). */
 const TOOL_ITEMS: ReadonlySet<number> = new Set<number>([ITEM.Hammer, ITEM.Saw, ITEM.Screwdriver, ITEM.Flashlight]);
 /** Throwables — equip to the belt + LEFT-CLICK throws them at the cursor (no ballistics class). */
-const THROWABLE_ITEMS: ReadonlySet<number> = new Set<number>([ITEM.Grenade]);
+const THROWABLE_ITEMS: ReadonlySet<number> = new Set<number>([ITEM.Grenade, ITEM.Molotov]);
 
 /** True when the item can be equipped at all — a weapon (any class), a hand tool, or a throwable. */
 export function isEquippable(item: ItemId | number): boolean {

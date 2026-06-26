@@ -13,3 +13,4 @@ export {
   type RepairOutcome,
   type CraftingSettings,
 } from './crafting';
+export { RECIPE, RECIPES, registerCraftingContent } from './recipes';

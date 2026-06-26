@@ -3,17 +3,18 @@
 // The avatar attaches the matching mesh to its RIGHT-HAND bone (weaponMesh ← skeleton drives it through the
 // animation). PURE geometry construction; the avatar owns attachment + V24 disposal tracking.
 
-import { BoxGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, type Object3D } from 'three';
+import { BoxGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, SphereGeometry, type Object3D } from 'three';
 import { ITEM, weaponClassForItem } from '@/game/inventory';
 import type { Disposable, ResourceKind } from '../engine/resources';
 
 /** The visual archetypes a held item maps to (drives which primitive mesh is shown). */
-export type WeaponVisual = 'pistol' | 'longgun' | 'blade' | 'club';
+export type WeaponVisual = 'pistol' | 'longgun' | 'blade' | 'club' | 'torch';
 
-export const WEAPON_VISUALS: readonly WeaponVisual[] = ['pistol', 'longgun', 'blade', 'club'];
+export const WEAPON_VISUALS: readonly WeaponVisual[] = ['pistol', 'longgun', 'blade', 'club', 'torch'];
 
 /** The held-weapon visual for an item, or null when the item isn't held in-hand (non-equippable). */
 export function weaponVisualForItem(item: number): WeaponVisual | null {
+  if (item === ITEM.Torch) return 'torch'; // a melee weapon, but it reads as a lit torch (T147)
   const cls = weaponClassForItem(item);
   if (cls === 'pistol') return 'pistol';
   if (cls === 'shotgun' || cls === 'rifle' || cls === 'smg') return 'longgun';
@@ -101,5 +102,23 @@ export function buildWeaponMeshes(track: TrackFn): Record<WeaponVisual, Object3D
   club.add(shaft);
   club.name = 'weapon.club';
 
-  return { pistol, longgun, blade, club };
+  // TORCH (T147) — a short wooden handle topped with an emissive flame (the held light/melee weapon).
+  const flameMat = new MeshStandardMaterial({ color: 0xff8a2a, emissive: 0xff7a1a, emissiveIntensity: 3.2, transparent: true, opacity: 0.92 });
+  track(flameMat, 'material', 'weapon.mat.flame');
+  const torch = new Group();
+  const handleGeo = new CylinderGeometry(0.015, 0.02, 0.32, 10);
+  track(handleGeo, 'geometry', `weapon.geo.${geoSeq++}`);
+  const handle = new Mesh(handleGeo, wood);
+  handle.rotation.z = -Math.PI / 2;
+  handle.position.set(0.16, 0, 0);
+  handle.castShadow = true;
+  const flameGeo = new SphereGeometry(0.06, 10, 8);
+  track(flameGeo, 'geometry', `weapon.geo.${geoSeq++}`);
+  const flame = new Mesh(flameGeo, flameMat);
+  flame.position.set(0.35, 0.02, 0);
+  flame.scale.set(1, 1.6, 1); // teardrop flame
+  torch.add(handle, flame);
+  torch.name = 'weapon.torch';
+
+  return { pistol, longgun, blade, club, torch };
 }

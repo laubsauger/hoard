@@ -59,12 +59,17 @@ import {
   slotsForItem,
   slotAccepts,
   isThrowable,
+  type ItemCategory,
+  type ItemCatalog,
 } from '@/game/inventory';
+import { CraftingSystem, registerCraftingContent, RECIPES, type Recipe } from '@/game/crafting';
+import type { CraftActionView } from '@/stores/craftingView';
 import type { CommandId, ContainerRef, ItemId } from '@/game/core/contracts';
 import type { ContainerView } from '@/stores/inventoryView';
 import { resolveDomain } from '@/config/registry';
 import { weaponsConfig } from '@/config/domains/weapons';
 import { combatConfig } from '@/config/domains/combat';
+import { fireConfig } from '@/config/domains/fire';
 import { playerConfig } from '@/config/domains/player';
 import { perceptionConfig } from '@/config/domains/perception';
 import { collisionConfig } from '@/config/domains/collision';
@@ -82,6 +87,7 @@ import {
   levelNavOf,
   gridWalkableRadius,
   lootableContainerCells,
+  radioCell,
   rayDistanceToWall,
   PROP_SOLIDITY,
   propBlockedCells,
@@ -108,6 +114,7 @@ import {
   type InteractionPrompt,
   type InteractionHighlightTarget,
   type HighlightDims,
+  type RadioStage,
 } from '@/game/interaction';
 import { structuresConfig } from '@/config/domains/structures';
 import { worldConfig } from '@/config/domains/world';
@@ -240,6 +247,20 @@ export class GameRuntime {
    *  container contents aren't (consistent with the authored cupboards). */
   private readonly floorPiles = new Map<string, { readonly ref: ContainerRef; readonly label: string }>();
   private floorPileSeq = 0;
+  /** T40 — FIXED world position of the objective RADIO (the diegetic hub: install parts → repair → call evac),
+   *  anchored at `radioCell(scene)` (mirrors the cupboard). Set in the constructor; the render builder draws the
+   *  radio mesh at the same cell. */
+  private readonly radioPos: { readonly x: number; readonly z: number };
+  /** T40 — true while a repair CHANNEL is running at the radio (the `repairRadio` phase). Each sim tick spent
+   *  channeling, standing in reach, applies one tick of repair work; leaving reach (or the phase ending) stops it.
+   *  Not persisted — a transient action, like aiming. */
+  private repairing = false;
+  /** T24 — crafting validator filled with the authored recipe content (recipes.ts). Pure: it reports what to
+   *  consume/produce; `craftRecipe` applies the result via the inventory (V1, crafting never mutates containers). */
+  private readonly crafting = new CraftingSystem(REFERENCE_TIER);
+  /** Item catalog shared with the inventory system — crafting reads it to map item id → category (tool gating)
+   *  and → name (recipe labels). Assigned in the constructor. */
+  private readonly itemCatalog: ItemCatalog;
   /** M2 medium-term objective state machine (find parts -> repair radio -> evacuate). */
   readonly objective: ObjectiveSystem;
   /** M2 decisive horde event shaped by the player's structural mods (§G central promise). */
@@ -258,6 +279,7 @@ export class GameRuntime {
   private readonly collision = resolveDomain(collisionConfig, REFERENCE_TIER);
   private readonly audioCfg = resolveDomain(audioConfig, REFERENCE_TIER);
   private readonly weatherCfg = resolveDomain(weatherConfig, REFERENCE_TIER);
+  private readonly fireCfg = resolveDomain(fireConfig, REFERENCE_TIER);
 
   private readonly slotToEntity = new Map<ZombieSlot, EntityId>();
   private readonly entityToSlot = new Map<EntityId, ZombieSlot>();
@@ -266,6 +288,10 @@ export class GameRuntime {
   private readonly lastAttackTick = new Map<ZombieSlot, number>();
   /** Slots spawned by district streaming, tagged by sector so eviction despawns exactly those (V13). */
   private readonly slotToSector = new Map<ZombieSlot, number>();
+  /** T145: burning zombies → the absolute tick their fire goes out. Takes burn DoT each tick + can spread to a
+   *  neighbour; cleared on despawn. Unbounded cheap data (the render tiers the VISUAL: billboard always, volume
+   *  + light for the nearest few). Set by the torch melee / molotov / contact with fire. */
+  private readonly burningZombies = new Map<ZombieSlot, number>();
   /** Structural cells currently on fire (a horde-event lever — fire reroutes/stalls the mass). */
   private readonly burningRoutes = new Set<number>();
   /** Reference horde mass for the event's pressure normalization (the district's starting total). */
@@ -274,9 +300,16 @@ export class GameRuntime {
   /** T142: thrown grenades in flight — the throw origin + blast TARGET + the tick it lands (ends the arc) + the
    *  tick it detonates (fuse). The render polls `grenadeProjectiles()` to draw the arcing projectile until it blows. */
   private readonly pendingDetonations: {
+    readonly kind: 'grenade' | 'molotov';
     readonly sx: number; readonly sz: number; readonly tx: number; readonly tz: number;
     readonly throwTick: number; readonly landTick: number; readonly detonateTick: number;
   }[] = [];
+  /** T146: active molotov FIRE POOLS — a ground fire at (x,z) of `radius` m that re-ignites zombies in it until
+   *  `untilTick`. Unbounded cheap state; the render draws/ tiers the visual (T145 plan). */
+  private readonly firePools: { readonly x: number; readonly z: number; readonly radius: number; readonly untilTick: number }[] = [];
+  /** T147: torches PLACED in the world — persistent light sources (a flame on a stick). Cheap state; the render
+   *  pools the actual cast light to the nearest few (T145 tiering). */
+  private readonly placedTorches: { readonly x: number; readonly z: number }[] = [];
   /** T142: blast points the render lane polls (drainExplosions) to flash the explosion — one-shot, render-only. */
   private readonly explosionFx: { readonly x: number; readonly z: number }[] = [];
   private targetSlot: ZombieSlot = -1;
@@ -619,8 +652,9 @@ export class GameRuntime {
 
     // Real container inventory (T85): player pack + a lootable kitchen cupboard seeded from the T84 loot
     // tables, so the loot UI shows live data the player can actually transfer.
+    this.itemCatalog = buildDefaultCatalog(this.tier); // captured so crafting can map item id → category/name (T24)
     this.inventory = new InventorySystem({
-      catalog: buildDefaultCatalog(this.tier),
+      catalog: this.itemCatalog,
       nextEventId: () => this.ids.next<EventId>('event'),
     });
     const playerRef: ContainerRef = { entity: this.playerEntity, container: 'player' };
@@ -639,7 +673,7 @@ export class GameRuntime {
     // cycle out of the box), a hammer + planks for window board-up (the hammer doubles as a breaching tool, V43),
     // plus a bandage + water + flashlight. The weapons are seeded + EQUIPPED to belt slots BEFORE the bulky planks
     // are seeded — equipping relocates their weight out of the pack (V103) so the whole kit fits the bag cap.
-    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.SMG, 1], [ITEM.Grenade, 3], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.Flashlight, 1]] as const) {
+    for (const [item, count] of [[ITEM.KitchenKnife, 1], [ITEM.Pistol, 1], [ITEM.Shotgun, 1], [ITEM.SMG, 1], [ITEM.Grenade, 3], [ITEM.Molotov, 2], [ITEM.Torch, 1], [ITEM.Ammo9mm, 21], [ITEM.ShotgunShells, 12], [ITEM.Bandage, 2], [ITEM.WaterBottle, 1], [ITEM.Hammer, 1], [ITEM.Flashlight, 1]] as const) {
       this.inventory.seed(playerRef, item as ItemId, count);
     }
     // T140: stow the starter weapons on the belt + draw the pistol (the default active weapon — matches the
@@ -649,7 +683,7 @@ export class GameRuntime {
     this.equipItem(ITEM.Shotgun, 'back');
     this.equipItem(ITEM.KitchenKnife, 'beltL');
     this.drawSlot('holster');
-    this.inventory.seed(playerRef, ITEM.WoodPlank as ItemId, 6); // bulky — seeded after the weapons moved to slots
+    this.inventory.seed(playerRef, ITEM.WoodPlank as ItemId, 4); // bulky — seeded after the weapons moved to slots; trimmed 6→4 to leave pack headroom (so a weapon can be unequipped back into a starter-loaded bag)
     // World containers use a SYNTHETIC id space (not `this.ids`) + a SEPARATE loot rng, so seeding the world
     // never perturbs the IdFactory counters or the spawn-scatter rng that determinism/replay depend on (V26).
     // Each container is anchored at a FIXED authored cell (lootableContainerCells) — a corner of the player's
@@ -684,6 +718,26 @@ export class GameRuntime {
       const center = this.scene.cellCenter({ cx: piece.cx, cy: piece.cy });
       this.worldContainers.push({ x: center.x, z: center.z, label });
       for (const s of rollLoot(piece.container, lootRng)) this.inventory.seed(ref, s.item, s.count);
+    }
+
+    // T24 — fill the pure crafting validator with the authored recipe content (molotov / bandage / radio-part).
+    registerCraftingContent(this.crafting);
+
+    // T40 — anchor the objective RADIO at its fixed cell (the diegetic hub) — same source of truth the render
+    // builder draws the radio mesh from (radioCell).
+    const radioPt = this.scene.cellCenter(radioCell(this.scene).cell);
+    this.radioPos = { x: radioPt.x, z: radioPt.z };
+
+    // T40 — GUARANTEE the objective is solvable: seed exactly `partsRequired` radio parts spread across distinct
+    // world containers (round-robin), so enough are always scavengeable even when the loot-table rolls are unkind
+    // (the table entries are flavour/extra finds on top of this). No brittle fallback — a hard content invariant.
+    const partsRequired = resolveObjectiveSettings(this.tier).partsRequired;
+    const seedRefs = this.worldContainers
+      .map((c) => this.namedContainers.get(c.label))
+      .filter((r): r is ContainerRef => r !== undefined);
+    if (seedRefs.length === 0) throw new Error('T40: no world container to seed radio parts into');
+    for (let i = 0; i < partsRequired; i++) {
+      this.inventory.seed(seedRefs[i % seedRefs.length]!, ITEM.RadioPart as ItemId, 1);
     }
 
     this.registerSystems();
@@ -831,52 +885,60 @@ export class GameRuntime {
 
   // ---- T142: hand grenade — thrown AoE that LAUNCHES the ragdoll radially from the blast (reuses the death-impact seam) ----
 
-  /** Throw a hand grenade toward (dirX,dirZ — the CURSOR aim point): consume one (from the ACTIVE belt slot if it
-   *  holds grenades — counting the slot down — else anywhere carried) + launch an arcing projectile that LANDS at
-   *  the aim point (clamped to grenadeThrowRangeMeters), rests, then detonates. Returns false when none is carried. */
-  throwGrenade(dirX: number, dirZ: number): boolean {
+  /** Throw the equipped/carried THROWABLE (grenade or molotov) toward (dirX,dirZ — the CURSOR aim point): consume
+   *  one (from the ACTIVE belt slot if it holds one — counting it down — else anywhere carried) + launch an arcing
+   *  projectile that LANDS at the aim point (clamped to grenadeThrowRangeMeters). A grenade rests then detonates
+   *  (blast); a molotov ignites a FIRE POOL on landing. Returns false when no throwable is carried. */
+  throwThrowable(dirX: number, dirZ: number): boolean {
     const len = Math.hypot(dirX, dirZ);
     if (len < 1e-4) return false;
-    // Prefer the active slot (so an equipped grenade stack counts down + empties to unarmed), else anywhere carried.
-    let srcName: string | null = null;
-    if (this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === ITEM.Grenade) srcName = this.activeEquipSlot;
-    else srcName = this.findPlayerHolding(ITEM.Grenade);
+    // Which throwable: the active slot's if it holds one, else the first carried (grenade preferred, then molotov).
+    let item = this.equippedThrowable();
+    if (item === null) item = this.findPlayerHolding(ITEM.Grenade) !== null ? ITEM.Grenade : this.findPlayerHolding(ITEM.Molotov) !== null ? ITEM.Molotov : null;
+    if (item === null) return false;
+    const srcName =
+      this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === item ? this.activeEquipSlot : this.findPlayerHolding(item);
     if (srcName === null) return false;
     const srcRef = this.namedContainers.get(srcName);
-    if (!srcRef || this.inventory.count(srcRef, ITEM.Grenade as ItemId) < 1) return false;
-    this.inventory.take(srcRef, ITEM.Grenade as ItemId, 1);
-    // Threw the last grenade out of the active slot → drop to unarmed (the slot is now empty).
+    if (!srcRef || this.inventory.count(srcRef, item as ItemId) < 1) return false;
+    this.inventory.take(srcRef, item as ItemId, 1);
+    // Threw the last one out of the active slot → drop to unarmed (the slot is now empty).
     if (srcName === this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === null) this.setActiveSlot(null);
     const dist = Math.min(this.weapons.grenadeThrowRangeMeters, len); // land at the cursor, capped at throw range
     const tx = this.playerPos.x + (dirX / len) * dist;
     const tz = this.playerPos.z + (dirZ / len) * dist;
     const throwTick = this.absTick();
+    const landTick = throwTick + this.weapons.grenadeFlightTicks;
+    const kind = item === ITEM.Molotov ? 'molotov' : 'grenade';
     this.pendingDetonations.push({
+      kind,
       sx: this.playerPos.x,
       sz: this.playerPos.z,
       tx,
       tz,
       throwTick,
-      landTick: throwTick + this.weapons.grenadeFlightTicks,
-      detonateTick: throwTick + this.weapons.grenadeFuseTicks,
+      landTick,
+      // a molotov ignites the instant it shatters on the ground; a grenade rests for its fuse first.
+      detonateTick: kind === 'molotov' ? landTick : throwTick + this.weapons.grenadeFuseTicks,
     });
     return true;
   }
 
-  /** Per-tick: detonate any grenade whose fuse has reached the current tick (registered as an everyTick system). */
+  /** Per-tick: resolve any thrown grenade/molotov whose effect tick has arrived (registered everyTick). */
   private stepDetonations(): void {
     if (this.pendingDetonations.length === 0) return;
     const now = this.absTick();
     for (let i = this.pendingDetonations.length - 1; i >= 0; i--) {
       const d = this.pendingDetonations[i]!;
       if (now < d.detonateTick) continue;
-      this.detonateGrenade(d.tx, d.tz);
+      if (d.kind === 'molotov') this.igniteFirePool(d.tx, d.tz);
+      else this.detonateGrenade(d.tx, d.tz);
       this.pendingDetonations.splice(i, 1);
     }
   }
 
-  /** T142: the item the active slot holds if it is THROWN on left-click (a grenade), else null — input uses this
-   *  to throw-at-cursor instead of firing when a grenade is equipped + drawn. */
+  /** T142/T146: the item the active slot holds if it is THROWN on left-click (grenade/molotov), else null — input
+   *  uses this to throw-at-cursor instead of firing when a throwable is equipped + drawn. */
   equippedThrowable(): number | null {
     const item = this.equippedItem();
     return item !== null && isThrowable(item) ? item : null;
@@ -946,6 +1008,157 @@ export class GameRuntime {
     const out = this.explosionFx.slice();
     this.explosionFx.length = 0;
     return out;
+  }
+
+  // ---- T146: molotov fire pool — a lingering ground fire that sets zombies alight (reuses T145 igniteZombie) ----
+
+  /** Light a fire pool at (x,z): every zombie inside catches fire NOW, the pool lingers re-igniting anything that
+   *  wanders in, and a shatter flash pops. */
+  private igniteFirePool(x: number, z: number): void {
+    this.firePools.push({
+      x,
+      z,
+      radius: this.weapons.molotovFireRadiusMeters,
+      untilTick: this.absTick() + Math.round(this.weapons.molotovPoolSeconds / this.clock.tickSeconds),
+    });
+    this.igniteZombiesInRadius(x, z, this.weapons.molotovFireRadiusMeters);
+    this.explosionFx.push({ x, z }); // a shatter pop on impact (the lingering pool draws via firePools())
+  }
+
+  /** Per-tick: re-ignite zombies standing in any active fire pool + expire finished pools (registered everyTick). */
+  private stepFirePools(): void {
+    if (this.firePools.length === 0) return;
+    const now = this.absTick();
+    for (let i = this.firePools.length - 1; i >= 0; i--) {
+      const f = this.firePools[i]!;
+      if (now >= f.untilTick) {
+        this.firePools.splice(i, 1);
+        continue;
+      }
+      this.igniteZombiesInRadius(f.x, f.z, f.radius);
+    }
+  }
+
+  /** Set every alive zombie within `r` m of (x,z) alight (T145). */
+  private igniteZombiesInRadius(x: number, z: number, r: number): void {
+    const r2 = r * r;
+    const p: [number, number, number] = [0, 0, 0];
+    this.zombies.forEachAlive((slot) => {
+      this.zombies.getPosition(slot, p);
+      if ((p[0] - x) * (p[0] - x) + (p[2] - z) * (p[2] - z) <= r2) this.igniteZombie(slot);
+    });
+  }
+
+  /** T146: active fire-pool centres + radii for the render lane (read-only, V2). */
+  firePoolMarkers(): { readonly x: number; readonly z: number; readonly radius: number }[] {
+    return this.firePools.map((f) => ({ x: f.x, z: f.z, radius: f.radius }));
+  }
+
+  /** T147: PLACE a carried torch at the player's feet as a persistent world light source (consumes one torch,
+   *  from the active slot if it holds one, else anywhere carried). Returns false when none is carried. */
+  placeTorch(): boolean {
+    const srcName =
+      this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === ITEM.Torch ? this.activeEquipSlot : this.findPlayerHolding(ITEM.Torch);
+    if (srcName === null) return false;
+    const srcRef = this.namedContainers.get(srcName);
+    if (!srcRef || this.inventory.count(srcRef, ITEM.Torch as ItemId) < 1) return false;
+    this.inventory.take(srcRef, ITEM.Torch as ItemId, 1);
+    if (srcName === this.activeEquipSlot && this.equipSlotItem(this.activeEquipSlot) === null) this.setActiveSlot(null);
+    this.placedTorches.push({ x: this.playerPos.x, z: this.playerPos.z });
+    return true;
+  }
+
+  /** T147: placed-torch positions for the render lane (a flame + a pooled warm light at each). Read-only (V2). */
+  placedTorchMarkers(): { readonly x: number; readonly z: number }[] {
+    return this.placedTorches.map((t) => ({ x: t.x, z: t.z }));
+  }
+
+  /** T147: true when the active equipped item is a TORCH — drives the held-torch flame + carry light. */
+  isTorchEquipped(): boolean {
+    return this.equippedItem() === ITEM.Torch;
+  }
+
+  // ---- T145: zombie burning status — DoT + spread (set by torch melee / molotov / contact with fire) ----
+
+  /** Set a zombie ALIGHT (or re-stoke an already-burning one): it takes burn DoT for `zombieBurnDurationSeconds`
+   *  and can ignite neighbours. No-op on a dead/free slot. */
+  igniteZombie(slot: ZombieSlot): void {
+    if (!this.zombies.isAlive(slot)) return;
+    this.burningZombies.set(slot, this.absTick() + Math.round(this.fireCfg.zombieBurnDurationSeconds / this.clock.tickSeconds));
+  }
+
+  /** True while a zombie is on fire (drives the render flame/glow on it). */
+  isZombieBurning(slot: ZombieSlot): boolean {
+    return this.burningZombies.has(slot);
+  }
+
+  /** T148: world positions of every BURNING zombie — the render lane draws a flame + warm glow on each. Read-only
+   *  (V2). Unbounded count (cheap); the render tiers the visual (billboard always; light + volume for the nearest). */
+  burningZombiePositions(): { readonly x: number; readonly y: number; readonly z: number }[] {
+    if (this.burningZombies.size === 0) return [];
+    const out: { x: number; y: number; z: number }[] = [];
+    const p: [number, number, number] = [0, 0, 0];
+    for (const slot of this.burningZombies.keys()) {
+      if (!this.zombies.isAlive(slot)) continue;
+      this.zombies.getPosition(slot, p);
+      out.push({ x: p[0], y: p[1], z: p[2] });
+    }
+    return out;
+  }
+
+  /** Per-tick: burn every alight zombie (DoT → death routes through `killZombie`), expire finished fires, and
+   *  let a burning body ignite a close neighbour (a fire chain through a packed horde). Registered everyTick. */
+  private stepZombieBurning(): void {
+    if (this.burningZombies.size === 0) return;
+    const now = this.absTick();
+    const dt = this.clock.tickSeconds;
+    const dmg = this.fireCfg.zombieBurnDamagePerSec * dt;
+    const spreadP = this.fireCfg.zombieBurnSpreadChancePerSec * dt;
+    const spreadR2 = this.fireCfg.zombieBurnSpreadRadiusMeters * this.fireCfg.zombieBurnSpreadRadiusMeters;
+    const pos: [number, number, number] = [0, 0, 0];
+    const toIgnite: ZombieSlot[] = [];
+    for (const [slot, until] of this.burningZombies) {
+      if (!this.zombies.isAlive(slot)) {
+        this.burningZombies.delete(slot);
+        continue;
+      }
+      // damage-over-time; a burn death topples with a small upward-ish impulse (no strong direction).
+      const hp = this.zombies.getHealth(slot) - dmg;
+      if (hp <= 0) {
+        this.killZombie(slot, { dirX: 0, dirZ: 0, force: 0 });
+        this.burningZombies.delete(slot);
+        continue;
+      }
+      this.zombies.setHealth(slot, hp);
+      if (now >= until) {
+        this.burningZombies.delete(slot); // burned out
+        continue;
+      }
+      // spread to ONE nearby non-burning zombie (probabilistic, deterministic rng V26).
+      if (spreadP > 0 && this.rand() < spreadP) {
+        this.zombies.getPosition(slot, pos);
+        const victim = this.nearestBurnableZombie(pos[0], pos[2], spreadR2, slot);
+        if (victim >= 0) toIgnite.push(victim);
+      }
+    }
+    for (const v of toIgnite) this.igniteZombie(v);
+  }
+
+  /** The nearest ALIVE, NOT-already-burning zombie within `r2` (squared metres) of (x,z), excluding `self`; or -1. */
+  private nearestBurnableZombie(x: number, z: number, r2: number, self: ZombieSlot): ZombieSlot {
+    let best: ZombieSlot = -1 as ZombieSlot;
+    let bestD = r2;
+    const p: [number, number, number] = [0, 0, 0];
+    this.zombies.forEachAlive((slot) => {
+      if (slot === self || this.burningZombies.has(slot)) return;
+      this.zombies.getPosition(slot, p);
+      const d = (p[0] - x) * (p[0] - x) + (p[2] - z) * (p[2] - z);
+      if (d < bestD) {
+        bestD = d;
+        best = slot;
+      }
+    });
+    return best;
   }
 
   /** Absolute tick (survives reload via tickOffset) — the basis for objective + event timing. */
@@ -1490,6 +1703,24 @@ export class GameRuntime {
     for (const c of this.worldContainers) {
       out.push({ kind: 'container', x: c.x, z: c.z, label: c.label });
     }
+    // T40 — the objective RADIO hub, carrying its live stage + parts so the wheel offers the stage's single verb
+    // (install / repair / call). The label encodes the stage + parts so the wheel's state-change diff (which keys
+    // on `label`) re-resolves the verbs as the objective progresses. Skipped once `done` (evacuating onward) — the
+    // radio is finished with, so it stops surfacing a dead prompt while the player flees to the exit.
+    const stage = this.radioStage();
+    if (stage !== 'done') {
+      const snap = this.objective.snapshot(this.absTick());
+      out.push({
+        kind: 'radio',
+        x: this.radioPos.x,
+        z: this.radioPos.z,
+        label: this.radioLabel(stage, snap.partsFound, snap.partsRequired),
+        radioStage: stage,
+        partsFound: snap.partsFound,
+        partsRequired: snap.partsRequired,
+        repairing: this.repairing,
+      });
+    }
     return out;
   }
 
@@ -1643,6 +1874,158 @@ export class GameRuntime {
       }
     }
     return best;
+  }
+
+  // ---- T40: objective RADIO hub (diegetic) — the player installs carried parts, channels the repair, and calls
+  //      evacuation here, replacing the old debug buttons. The FSM (objective.ts) is unchanged; this wires real
+  //      world interactions to it. ----
+
+  /** Map the objective FSM phase to the radio's interaction stage (which single verb the hub offers). */
+  private radioStage(): RadioStage {
+    switch (this.objective.currentPhase) {
+      case 'locateParts': return 'collect';
+      case 'repairRadio': return 'repair';
+      case 'callEvacuation': return 'call';
+      default: return 'done'; // evacuating / evacuated / failed — the radio is finished with.
+    }
+  }
+
+  /** Dynamic radio label — drives the interaction wheel's state-change refresh (it diffs targets on `label`). */
+  private radioLabel(stage: RadioStage, found: number, required: number): string {
+    switch (stage) {
+      case 'collect': return `Radio · ${found}/${required} parts`;
+      case 'repair': return this.repairing ? 'Radio · repairing…' : 'Radio · needs repair';
+      case 'call': return 'Radio · ready to call';
+      default: return 'Radio';
+    }
+  }
+
+  /** Within interaction reach of the radio (the same range gate as doors/containers, V4 config). */
+  private playerNearRadio(): boolean {
+    return Math.hypot(this.radioPos.x - this.playerPos.x, this.radioPos.z - this.playerPos.z) <= this.structuresCfg.interactionRangeMeters;
+  }
+
+  /** Units of `item` the player carries in the pack. */
+  private playerCount(item: number): number {
+    const ref = this.namedContainers.get('player');
+    return ref ? this.inventory.count(ref, item as ItemId) : 0;
+  }
+
+  /** A repair tool on hand (screwdriver or hammer) — gates the repair channel. */
+  private hasRepairTool(): boolean {
+    return this.playerCount(ITEM.Screwdriver) > 0 || this.playerCount(ITEM.Hammer) > 0;
+  }
+
+  /**
+   * INSTALL one carried Radio Part into the radio (the `collect` stage). Consumes a part, bumps the FSM parts
+   * count, and auto-advances to `repairRadio` once all parts are in. Returns true on a successful install; a no-op
+   * false when not in the collect stage, out of reach, or carrying no part (V1 — explicit, no silent partial).
+   */
+  installRadioPart(): boolean {
+    if (this.radioStage() !== 'collect' || !this.playerNearRadio()) return false;
+    const ref = this.namedContainers.get('player');
+    if (!ref || this.inventory.count(ref, ITEM.RadioPart as ItemId) < 1) return false;
+    this.inventory.take(ref, ITEM.RadioPart as ItemId, 1);
+    this.objective.collectPart();
+    if (this.objective.canAdvance()) this.objective.advance(this.absTick()); // locateParts -> repairRadio
+    return true;
+  }
+
+  /**
+   * Toggle the repair CHANNEL at the radio (`repair` stage). Starting needs a tool + being in reach; thereafter
+   * each sim tick spent in reach applies one tick of repair work (stepDistrict), and leaving reach (or the phase
+   * ending) cancels it. Returns the new channeling state.
+   */
+  toggleRadioRepair(): boolean {
+    if (this.radioStage() !== 'repair') { this.repairing = false; return false; }
+    if (this.repairing) { this.repairing = false; return false; }
+    if (!this.playerNearRadio() || !this.hasRepairTool()) return false;
+    this.repairing = true;
+    return true;
+  }
+
+  /** Whether a repair channel is currently running (HUD readout). */
+  isRepairing(): boolean {
+    return this.repairing;
+  }
+
+  /**
+   * CALL evacuation from the radio (`call` stage): advance the FSM into `evacuating`, which arms the decisive
+   * horde event + starts the countdown (the climax). Returns true if the call went through.
+   */
+  callEvacuation(): boolean {
+    if (this.radioStage() !== 'call' || !this.playerNearRadio()) return false;
+    const advanced = this.objective.advance(this.absTick());
+    if (advanced) this.hordeEvent.arm(this.absTick());
+    return advanced;
+  }
+
+  // ---- T24: crafting (recipe assembly from the pack) ----
+
+  /** Live item counts in the player pack, keyed by item id — the `available` map a craft request validates against. */
+  private playerItemCounts(): Map<number, number> {
+    const ref = this.namedContainers.get('player');
+    const m = new Map<number, number>();
+    if (ref) for (const s of this.inventory.contents(ref)) m.set(s.item as number, s.count);
+    return m;
+  }
+
+  /** The item CATEGORIES the player carries (the granularity recipes gate their tool requirement on). */
+  private playerToolCategories(): Set<ItemCategory> {
+    const ref = this.namedContainers.get('player');
+    const out = new Set<ItemCategory>();
+    if (ref) for (const s of this.inventory.contents(ref)) out.add(this.itemCatalog.get(s.item).category);
+    return out;
+  }
+
+  /** Human label for a recipe row: "Molotov ×3 — Gas Can + Duct Tape". */
+  private recipeLabel(r: Recipe): string {
+    const outName = this.itemCatalog.get(r.output.item).name;
+    const ins = r.inputs.map((i) => `${this.itemCatalog.get(i.item).name}${i.count > 1 ? ` ×${i.count}` : ''}`).join(' + ');
+    return `${outName}${r.output.count > 1 ? ` ×${r.output.count}` : ''} — ${ins}`;
+  }
+
+  /** Turn a craft failure code into a UI reason string. */
+  private craftReason(reason: string): string {
+    switch (reason) {
+      case 'missing-input': return 'missing materials';
+      case 'missing-tool': return 'need a tool';
+      case 'insufficient-skill': return 'need more skill';
+      default: return reason;
+    }
+  }
+
+  /**
+   * T24 — the recipe list for the crafting UI: every authored recipe with whether the player can make it NOW + the
+   * reason if not. Pure read of the live pack (V1 — the UI renders this, then issues a `craft` back).
+   */
+  craftActions(): CraftActionView[] {
+    const available = this.playerItemCounts();
+    const tools = this.playerToolCategories();
+    return RECIPES.map((r) => {
+      const outcome = this.crafting.craft(r.id, { available, tools, skill: 0 });
+      return {
+        id: r.id,
+        label: this.recipeLabel(r),
+        available: outcome.ok,
+        reason: outcome.ok ? null : this.craftReason(outcome.reason),
+      };
+    });
+  }
+
+  /**
+   * CRAFT a recipe: validate against the live pack, then CONSUME the inputs + ADD the output (V1 — the pure system
+   * reports, the runtime applies via the inventory). Returns true on success, false on any validation failure
+   * (no partial consume). The authored recipes are all net-lighter than their inputs, so the output always fits.
+   */
+  craftRecipe(recipeId: string): boolean {
+    const ref = this.namedContainers.get('player');
+    if (!ref) return false;
+    const outcome = this.crafting.craft(recipeId, { available: this.playerItemCounts(), tools: this.playerToolCategories(), skill: 0 });
+    if (!outcome.ok) return false;
+    for (const c of outcome.consumed) this.inventory.take(ref, c.item as ItemId, c.count);
+    this.inventory.seed(ref, outcome.produced.item as ItemId, outcome.produced.count);
+    return true;
   }
 
   /**
@@ -1863,6 +2246,11 @@ export class GameRuntime {
     const result = this.combat.fire(this.playerPos, dirX, dirZ, region, opts);
     // Only a round that actually fired makes noise — a dry click (empty mag) doesn't draw the horde (T74).
     if (result.firedRounds === undefined || result.firedRounds > 0) this.emitGunfire();
+    // T147 fire-melee: a TORCH swing that connects sets the struck zombie alight (burn DoT, T145).
+    if (result.hit && result.targetEntity != null && this.equippedItem() === ITEM.Torch) {
+      const s = this.slotOf(result.targetEntity);
+      if (s !== undefined) this.igniteZombie(s);
+    }
     return result;
   }
 
@@ -2249,6 +2637,10 @@ export class GameRuntime {
     this.scheduler.register('combat-resolve', { bucket: 'everyTick' }, () => this.stepQueuedShots());
     // everyTick: detonate any grenade whose fuse has elapsed (T142).
     this.scheduler.register('grenades', { bucket: 'everyTick' }, () => this.stepDetonations());
+    // everyTick: burn DoT + spread on alight zombies (T145).
+    this.scheduler.register('burning', { bucket: 'everyTick' }, () => this.stepZombieBurning());
+    // everyTick: molotov fire pools re-ignite + expire (T146).
+    this.scheduler.register('firePools', { bucket: 'everyTick' }, () => this.stepFirePools());
     // interval: stimulus-driven per-zombie perception + target selection (V14) — never omniscient player
     // coords. Retires decayed stimuli, then each zombie picks its own target (seen player / loudest heard
     // sound / idle). There is NO global sound lure: a localized sound only retargets zombies that hear it.
@@ -2330,6 +2722,24 @@ export class GameRuntime {
       const plan = this.district.update(this.playerPos.x, this.playerPos.z, ctx.tick);
       for (const p of plan.promotions) this.promoteSector(p.sectorId, p.count, p.centerX, p.centerZ);
       for (const e of plan.evictions) this.evictSector(e.sectorId, e.count);
+    }
+
+    // T40 — channeled radio repair: while the player holds the repair action AT the radio, each tick of standing
+    // in reach (with a tool) is a tick of repair work; auto-advance to `callEvacuation` when the work is done.
+    // Moving out of reach, dropping the tool, or the phase ending cancels the channel (the tension: you must hold
+    // position at the radio while it ticks — exposed to the horde).
+    if (this.repairing) {
+      if (this.objective.currentPhase !== 'repairRadio' || !this.playerNearRadio() || !this.hasRepairTool()) {
+        this.repairing = false;
+      } else {
+        // Credit the sim ticks ELAPSED since the last district step (this runs every DISTRICT_STEP_TICKS), so
+        // `radioRepairTicks` (config) reads as real sim ticks of held repair work, not steps.
+        this.objective.applyRepairTicks(DISTRICT_STEP_TICKS);
+        if (this.objective.canAdvance()) {
+          this.objective.advance(now); // repairRadio -> callEvacuation
+          this.repairing = false;
+        }
+      }
     }
 
     // Auto-complete the objective when the player reaches an exit cell during evacuation (V1 — the engine
@@ -2523,6 +2933,7 @@ export class GameRuntime {
     this.lastDamageTick.delete(slot);
     this.lastAttackTick.delete(slot);
     this.slotToSector.delete(slot);
+    this.burningZombies.delete(slot);
     if (this.targetSlot === slot) this.targetSlot = -1;
   }
 

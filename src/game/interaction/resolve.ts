@@ -6,7 +6,11 @@
 import type { StructureOp } from '@/game/core/contracts';
 
 /** The kind of thing the player is facing. */
-export type TargetKind = 'door' | 'window' | 'container' | 'corpse' | 'structure';
+export type TargetKind = 'door' | 'window' | 'container' | 'corpse' | 'structure' | 'radio';
+
+/** T40 — the radio hub's stage, mapped from the objective FSM phase by the runtime (kept a local narrow union
+ *  so this pure interaction module stays decoupled from the objective system): install parts → repair → call. */
+export type RadioStage = 'collect' | 'repair' | 'call' | 'done';
 
 /** A window's glass state (T108). `open` = authored glassless; `smashed` = a once-intact pane broken. */
 export type WindowGlass = 'intact' | 'open' | 'smashed';
@@ -24,6 +28,13 @@ export interface InteractionTarget {
   readonly glass?: WindowGlass;
   /** Window board count (T108) — boarded windows offer "remove boards" first. */
   readonly boards?: number;
+  /** Radio (T40) — the objective stage this radio is in (gates which radio verb is offered). */
+  readonly radioStage?: RadioStage;
+  /** Radio (T40) — parts installed so far / required (shown on the install verb). */
+  readonly partsFound?: number;
+  readonly partsRequired?: number;
+  /** Radio (T40) — a repair channel is currently running here (flips "Repair" → "Stop repair"). */
+  readonly repairing?: boolean;
 }
 
 /** What the player has on hand / knows — gates tool/material/skill-dependent verbs. */
@@ -32,6 +43,10 @@ export interface InteractionContext {
   readonly hasPlanks?: boolean;
   readonly hasTool?: boolean; // crowbar / axe etc for breaching
   readonly hasKey?: boolean;
+  /** T40 — carrying at least one Radio Part (gates the radio's "Install part" verb). */
+  readonly hasRadioPart?: boolean;
+  /** T40 — carrying a repair tool (screwdriver / hammer) — gates the radio's "Repair" verb. */
+  readonly hasRepairTool?: boolean;
 }
 
 /** A resolved verb. `command` is the contract op to issue when enabled (structure verbs); else an action id. */
@@ -50,6 +65,11 @@ export interface InteractionVerb {
 function gated(id: string, label: string, ok: boolean, missing: string, op?: StructureOp): InteractionVerb {
   const base = op !== undefined ? { op } : {};
   return ok ? { id, label, enabled: true, ...base } : { id, label, enabled: false, reason: missing, ...base };
+}
+
+/** As `gated` but for a non-structural ACTION verb (carries an `action` id instead of a StructureOp). */
+function gatedAction(id: string, label: string, ok: boolean, missing: string, action: string): InteractionVerb {
+  return ok ? { id, label, enabled: true, action } : { id, label, enabled: false, reason: missing, action };
 }
 
 /**
@@ -102,6 +122,28 @@ export function resolveInteractions(target: InteractionTarget, ctx: InteractionC
       if (!target.boarded && !target.breached) {
         verbs.push(gated('board', 'Board', !!(ctx.hasHammer && ctx.hasPlanks), 'need hammer + planks', 'board'));
         verbs.push(gated('reinforce', 'Reinforce', !!(ctx.hasHammer && ctx.hasPlanks), 'need hammer + planks', 'reinforce'));
+      }
+      break;
+    }
+    case 'radio': {
+      // T40 — the single diegetic objective hub. Only ONE verb is live per stage (the FSM gates the rest):
+      // collect → install carried parts; repair → channel the fix (needs a tool); call → arm the evacuation.
+      switch (target.radioStage) {
+        case 'collect':
+          verbs.push(gatedAction('radio.install', `Install part (${target.partsFound ?? 0}/${target.partsRequired ?? 0})`, !!ctx.hasRadioPart, 'need a radio part', 'radio.install'));
+          break;
+        case 'repair':
+          verbs.push(
+            target.repairing
+              ? { id: 'radio.repair', label: 'Stop repair', enabled: true, action: 'radio.repair' }
+              : gatedAction('radio.repair', 'Repair radio', !!ctx.hasRepairTool, 'need a screwdriver or hammer', 'radio.repair'),
+          );
+          break;
+        case 'call':
+          verbs.push({ id: 'radio.call', label: 'Call for evacuation', enabled: true, action: 'radio.call' });
+          break;
+        case 'done':
+          break; // radio is repaired + evac called — nothing more to do here.
       }
       break;
     }

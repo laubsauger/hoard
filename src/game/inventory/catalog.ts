@@ -19,6 +19,7 @@ export const ITEM = {
   HuntingRifle: 12,
   SMG: 13,
   Grenade: 14,
+  Molotov: 15,
   // ammo
   Ammo9mm: 20,
   ShotgunShells: 21,
@@ -33,6 +34,8 @@ export const ITEM = {
   Antibiotics: 41,
   Painkillers: 42,
   Splint: 43,
+  // torch — a melee weapon that also lights + sets the struck zombie alight (T147)
+  Torch: 16,
   // tools
   Hammer: 50,
   Saw: 51,
@@ -49,6 +52,8 @@ export const ITEM = {
   // clothing
   Backpack: 80,
   Jacket: 81,
+  // objective component — the scavenged radio parts the mission FSM (T40) requires to repair the radio.
+  RadioPart: 90,
 } as const;
 
 type ItemDefContent = Omit<ItemDef, 'id'> & { id: number };
@@ -65,6 +70,8 @@ const CONTENT: readonly ItemDefContent[] = [
   { id: ITEM.HuntingRifle, name: 'Hunting Rifle', category: 'weapon', weightKg: 3.9, stackable: false },
   { id: ITEM.SMG, name: 'SMG', category: 'weapon', weightKg: 2.6, stackable: false },
   { id: ITEM.Grenade, name: 'Hand Grenade', category: 'weapon', weightKg: 0.4, stackable: true, maxStack: 6 },
+  { id: ITEM.Molotov, name: 'Molotov', category: 'weapon', weightKg: 0.6, stackable: true, maxStack: 6 },
+  { id: ITEM.Torch, name: 'Torch', category: 'tool', weightKg: 0.5, stackable: false },
   // ammo
   { id: ITEM.Ammo9mm, name: '9mm Rounds', category: 'ammo', weightKg: 0.01, stackable: true, maxStack: 60 },
   { id: ITEM.ShotgunShells, name: 'Shotgun Shells', category: 'ammo', weightKg: 0.05, stackable: true, maxStack: 40 },
@@ -95,6 +102,8 @@ const CONTENT: readonly ItemDefContent[] = [
   // clothing
   { id: ITEM.Backpack, name: 'Backpack', category: 'clothing', weightKg: 1.0, stackable: false },
   { id: ITEM.Jacket, name: 'Jacket', category: 'clothing', weightKg: 1.2, stackable: false },
+  // objective component (T40) — scavenge `objectivePartsRequired` of these, carry them to the radio, install.
+  { id: ITEM.RadioPart, name: 'Radio Part', category: 'misc', weightKg: 0.5, stackable: true, maxStack: 8 },
 ];
 
 /** Build the catalog populated with the full authored item content (T83). Validated at registration (V4). */

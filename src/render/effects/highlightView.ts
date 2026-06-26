@@ -108,6 +108,13 @@ export function resolveHighlightSettings(tier: QualityTier): HighlightSettings {
         g: resolve(renderingConfig.highlightStructureColorG, tier),
         b: resolve(renderingConfig.highlightStructureColorB, tier),
       },
+      // T40 — the objective radio reuses the container glow tint (it's a lootable-style hotspot you interact with);
+      // no separate config key needed.
+      radio: {
+        r: resolve(renderingConfig.highlightContainerColorR, tier),
+        g: resolve(renderingConfig.highlightContainerColorG, tier),
+        b: resolve(renderingConfig.highlightContainerColorB, tier),
+      },
     },
   };
 }

@@ -65,6 +65,7 @@ const TABLES: Record<LootSource, readonly LootEntry[]> = {
     { item: ITEM.Nails, chance: 0.5, min: 5, max: 40 },
     { item: ITEM.GasCan, chance: 0.2, min: 1, max: 1 },
     { item: ITEM.Crowbar, chance: 0.15, min: 1, max: 1 },
+    { item: ITEM.RadioPart, chance: 0.18, min: 1, max: 1 }, // T40 component (extra finds; solvability guaranteed by the runtime seed)
   ],
   toolshed: [
     { item: ITEM.Saw, chance: 0.45, min: 1, max: 1 },
@@ -73,6 +74,7 @@ const TABLES: Record<LootSource, readonly LootEntry[]> = {
     { item: ITEM.Nails, chance: 0.5, min: 5, max: 50 },
     { item: ITEM.FireAxe, chance: 0.12, min: 1, max: 1 },
     { item: ITEM.MetalSheet, chance: 0.18, min: 1, max: 2 },
+    { item: ITEM.RadioPart, chance: 0.18, min: 1, max: 1 }, // T40 component (see garage)
   ],
   gunCabinet: [
     { item: ITEM.Pistol, chance: 0.4, min: 1, max: 1 },
@@ -81,6 +83,7 @@ const TABLES: Record<LootSource, readonly LootEntry[]> = {
     { item: ITEM.Ammo9mm, chance: 0.6, min: 6, max: 30 },
     { item: ITEM.ShotgunShells, chance: 0.5, min: 4, max: 16 },
     { item: ITEM.RifleRounds, chance: 0.4, min: 4, max: 16 },
+    { item: ITEM.RadioPart, chance: 0.25, min: 1, max: 1 }, // T40 component (see garage)
   ],
   corpse: [
     { item: ITEM.Painkillers, chance: 0.12, min: 1, max: 1 },

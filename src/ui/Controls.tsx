@@ -133,11 +133,8 @@ export function Controls({ handle }: { handle: EngineHandle | null }) {
         <button onClick={run('board', () => handle.board())}>Board wall</button>
         <button onClick={run('ignite', () => handle.ignite())}>Ignite route</button>
       </div>
-      <div className="hbn-controls__group" aria-label="objective">
-        <button onClick={run('part', () => handle.collectPart())}>Find part</button>
-        <button onClick={run('repair', () => handle.repairRadio())}>Repair radio</button>
-        <button onClick={run('advance', () => handle.advanceObjective())}>Advance objective</button>
-      </div>
+      {/* T40 — the radio objective is now fully diegetic (scavenge parts → install/repair/call at the radio
+          in-world). The old Find-part / Repair / Advance debug buttons were removed. */}
       <div className="hbn-controls__group">
         <button onClick={run('save', () => handle.save())} disabled={busy !== null}>
           {busy === 'save' ? 'Saving…' : 'Save'}

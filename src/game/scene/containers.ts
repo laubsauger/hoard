@@ -148,3 +148,44 @@ export function lootableContainerCells(scene: ContainerScene): ContainerPlacemen
   const cell = inRoom ?? nearestWalkableInterior(scene.navGrid, bounds, farthestInteriorCorner(bounds, scene.playerCell), avoid);
   return [{ cell, label: 'Kitchen Cupboard' }];
 }
+
+/** The WALKABLE cell of the player's OWN room NEAREST the player (the mirror of `farthestWalkableInPlayerRoom`).
+ *  Used to anchor the radio close to the spawn (your safehouse base) so the objective hub is found immediately. */
+function nearestWalkableInPlayerRoom(scene: ContainerScene, b: CellRect, avoid: Set<number>): CellXY | null {
+  if (!scene.roomAt) return null;
+  const pr = scene.roomAt(scene.playerCell.cx, scene.playerCell.cy);
+  if (!pr) return null;
+  const grid = scene.navGrid;
+  let best: CellXY | null = null;
+  let bestD = Number.POSITIVE_INFINITY;
+  for (let cy = b.minCy; cy <= b.maxCy; cy++) {
+    for (let cx = b.minCx; cx <= b.maxCx; cx++) {
+      const idx = grid.index(cx, cy);
+      if (grid.isBlocked(idx) || avoid.has(idx)) continue;
+      const r = scene.roomAt(cx, cy);
+      if (!r || r.houseIndex !== pr.houseIndex || r.roomId !== pr.roomId) continue; // stay inside the player's room
+      const d = (cx - scene.playerCell.cx) ** 2 + (cy - scene.playerCell.cy) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = { cx, cy };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * The FIXED cell of the objective RADIO (T40) — the single diegetic hub the player installs parts into, repairs,
+ * and calls evacuation from. Anchored on a walkable cell of the player's OWN room NEAREST the spawn (the
+ * safehouse base), kept DISTINCT from the kitchen cupboard cell + any door/window opening so its mesh + glow
+ * never merge with another interactable. Same single-source-of-truth pattern as `lootableContainerCells`: the
+ * runtime anchors the interactable here and the renderer draws the radio mesh at the same cell.
+ */
+export function radioCell(scene: ContainerScene): ContainerPlacement {
+  const bounds = playerBuildingBounds(scene);
+  const avoid = openingCells(scene);
+  for (const c of lootableContainerCells(scene)) avoid.add(scene.navGrid.index(c.cell.cx, c.cell.cy));
+  const inRoom = nearestWalkableInPlayerRoom(scene, bounds, avoid);
+  const cell = inRoom ?? nearestWalkableInterior(scene.navGrid, bounds, scene.playerCell, avoid);
+  return { cell, label: 'Radio' };
+}

@@ -33,10 +33,10 @@ describe('hand grenade (T142)', () => {
     const pack: ContainerRef = { entity: rt.playerEntity, container: 'player' };
     const start = rt.inventory.count(pack, ITEM.Grenade as ItemId);
     expect(start).toBeGreaterThan(0);
-    expect(rt.throwGrenade(1, 0)).toBe(true);
+    expect(rt.throwThrowable(1, 0)).toBe(true);
     expect(rt.inventory.count(pack, ITEM.Grenade as ItemId)).toBe(start - 1);
-    while (rt.inventory.count(pack, ITEM.Grenade as ItemId) > 0) rt.throwGrenade(1, 0);
-    expect(rt.throwGrenade(1, 0)).toBe(false); // none left
+    while (rt.throwThrowable(1, 0)) { /* drain every throwable (grenades then molotovs) */ }
+    expect(rt.throwThrowable(1, 0)).toBe(false); // no throwable left
   });
 
   it('detonation kills a zombie at the blast + radially launches its corpse', () => {
@@ -71,7 +71,7 @@ describe('hand grenade (T142)', () => {
     const entity = rt.spawnZombie({ x: p.x + 4, y: 0, z: p.z });
     const slot = rt.slotOf(entity)!;
     const [zx, , zz] = posOf(rt, slot);
-    rt.throwGrenade(zx - p.x, zz - p.z); // aim at the zombie (within throw range)
+    rt.throwThrowable(zx - p.x, zz - p.z); // aim at the zombie (within throw range)
     expect(rt.zombies.isAlive(slot)).toBe(true); // fuse still burning
     for (let i = 0; i < 45; i++) rt.update(1 / 30); // past the ~30-tick fuse
     expect(rt.zombies.isAlive(slot)).toBe(false); // detonated → killed

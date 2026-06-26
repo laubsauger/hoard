@@ -86,7 +86,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
       const pp = rt.player();
       const gdx = hp ? hp.x - pp.x : Math.cos(rt.playerAim());
       const gdz = hp ? hp.z - pp.z : Math.sin(rt.playerAim());
-      if (rt.throwGrenade(gdx, gdz)) publishInventory();
+      if (rt.throwThrowable(gdx, gdz)) publishInventory();
     }
     // T98: L toggles the player flashlight (the dev-tools panel exposes the same flag). NOT F — F is the
     // interact key (InteractionWheel); double-binding F toggled the light every time you interacted.
@@ -201,7 +201,7 @@ export function registerInput(args: RegisterInputArgs): () => void {
       const pp = rt.player();
       const gdx = hp ? hp.x - pp.x : Math.cos(rt.playerAim());
       const gdz = hp ? hp.z - pp.z : Math.sin(rt.playerAim());
-      if (rt.throwGrenade(gdx, gdz)) publishInventory();
+      if (rt.throwThrowable(gdx, gdz)) publishInventory();
       return;
     }
     mouseHeld = true;

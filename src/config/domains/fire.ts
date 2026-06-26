@@ -61,4 +61,26 @@ export const fireConfig = registerDomain('fire', {
     doc: 'Residual structural damage per second from embers after fuel is exhausted (intensity decay).',
     default: 2, min: 0, max: 100000,
   }),
+
+  // ---- T145: a zombie can CATCH FIRE (burn status) — DoT + spread to neighbours (torch melee / molotov / fire) ----
+  zombieBurnDamagePerSec: num({
+    owner: 'fire', unit: 'count',
+    doc: 'Health removed per second from a BURNING zombie (fire damage-over-time). At ~baseline health this kills over a few seconds.',
+    default: 16, min: 0, max: 100000,
+  }),
+  zombieBurnDurationSeconds: num({
+    owner: 'fire', unit: 'seconds',
+    doc: 'How long a zombie stays alight after being ignited (re-stoked each time it is re-ignited).',
+    default: 7, min: 0.1, max: 120,
+  }),
+  zombieBurnSpreadChancePerSec: num({
+    owner: 'fire', unit: 'ratio',
+    doc: 'Per-second probability a burning zombie ignites another zombie within the spread radius (a fire chain through a packed horde).',
+    default: 0.5, min: 0, max: 1,
+  }),
+  zombieBurnSpreadRadiusMeters: num({
+    owner: 'fire', unit: 'meters',
+    doc: 'Distance (m) within which a burning zombie can set a neighbour alight.',
+    default: 1.6, min: 0, max: 20,
+  }),
 });

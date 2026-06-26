@@ -4,10 +4,11 @@
 // from the T83 catalog. The player + container contents are the sim's LIVE inventory (runtime.inventorySnapshot()
 // published by GameViewport) — NO UI mock seed; a container shows only when actually opened via the loot verb.
 
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useUi, useInventoryView } from '../stores/react';
 import { uiStore } from '../stores/ui';
 import { inventoryViewStore, type ContainerView } from '../stores/inventoryView';
+import type { CraftActionView } from '../stores/craftingView';
 import { buildDefaultCatalog, isConsumable, isEquippable, ITEM } from '../game/inventory';
 import type { EngineHandle } from './viewport/engineHandle';
 
@@ -106,10 +107,45 @@ function Pane({
   );
 }
 
+/** T24 — the Craft tab: the recipe list the engine computes from the live pack (label + availability + reason).
+ *  Polls `handle.craftables()` on open + after each craft so the list reflects the consumed/produced items. */
+function CraftPanel({ handle }: { handle: EngineHandle | null }) {
+  const [rows, setRows] = useState<readonly CraftActionView[]>([]);
+  const refresh = useCallback(() => setRows(handle?.craftables() ?? []), [handle]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+  return (
+    <div className="hbn-inv__craft">
+      {rows.length === 0 && <p className="hbn-inv__empty">no recipes</p>}
+      <ul className="hbn-inv__craftlist">
+        {rows.map((r) => (
+          <li key={r.id} className="hbn-inv__craftrow">
+            <span className="hbn-inv__craftlabel">{r.label}</span>
+            <button
+              type="button"
+              className="hbn-inv__use hbn-inv__craftbtn"
+              disabled={!r.available}
+              title={r.available ? 'craft this' : r.reason ?? 'unavailable'}
+              onClick={() => {
+                handle?.craft(r.id);
+                refresh();
+              }}
+            >
+              {r.available ? 'craft' : r.reason ?? 'n/a'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
   const open = useUi((s) => s.activePanel === 'inventory');
   const containers = useInventoryView((s) => s.containers);
   const openContainer = useInventoryView((s) => s.openContainer);
+  const [tab, setTab] = useState<'items' | 'craft'>('items');
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -149,26 +185,43 @@ export function InventoryMenu({ handle }: { handle: EngineHandle | null }) {
 
   return (
     <div className="hbn-inv" role="dialog" aria-label="Inventory">
-      <div className="hbn-inv__frame">
-        <Pane
-          view={player}
-          action="store ▸"
-          onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)}
-          extraAction={(item) => {
-            if (isConsumable(item)) return { label: 'use', onClick: () => handle?.useItem(item) };
-            if (item === ITEM.Grenade) return { label: 'throw', onClick: () => handle?.throwGrenade() };
-            if (item === ITEM.Backpack) {
-              const worn = handle?.isBackpackEquipped() ?? false;
-              return { label: worn ? 'remove' : 'wear', onClick: () => (worn ? handle?.unequipBackpack() : handle?.equipBackpack()) };
-            }
-            return null;
-          }}
-          onEquip={(item) => handle?.equipAndDraw(item)}
-          onDrop={(item) => handle?.drop(item)}
-        />
-        <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />
+      <div className="hbn-inv__tabs" role="tablist">
+        <button type="button" role="tab" aria-selected={tab === 'items'} className={`hbn-inv__tab${tab === 'items' ? ' is-active' : ''}`} onClick={() => setTab('items')}>
+          Inventory
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'craft'} className={`hbn-inv__tab${tab === 'craft' ? ' is-active' : ''}`} onClick={() => setTab('craft')}>
+          Craft
+        </button>
       </div>
-      <p className="hbn-inv__hint">I / Esc to close · click to transfer · “equip” readies a weapon/grenade in hand (swap with 1–4 or [ ]) · “use” / “throw” / “drop”</p>
+      {tab === 'items' ? (
+        <div className="hbn-inv__frame">
+          <Pane
+            view={player}
+            action="store ▸"
+            onItemClick={(item) => other && inventoryViewStore.getState().transfer('player', other.container, item)}
+            extraAction={(item) => {
+              if (isConsumable(item)) return { label: 'use', onClick: () => handle?.useItem(item) };
+              if (item === ITEM.Grenade || item === ITEM.Molotov) return { label: 'throw', onClick: () => handle?.throwGrenade() };
+              if (item === ITEM.Torch) return { label: 'place', onClick: () => handle?.placeTorch() };
+              if (item === ITEM.Backpack) {
+                const worn = handle?.isBackpackEquipped() ?? false;
+                return { label: worn ? 'remove' : 'wear', onClick: () => (worn ? handle?.unequipBackpack() : handle?.equipBackpack()) };
+              }
+              return null;
+            }}
+            onEquip={(item) => handle?.equipAndDraw(item)}
+            onDrop={(item) => handle?.drop(item)}
+          />
+          <Pane view={other} action="◂ take" onItemClick={(item) => player && inventoryViewStore.getState().transfer(other!.container, 'player', item)} />
+        </div>
+      ) : (
+        <CraftPanel handle={handle} />
+      )}
+      <p className="hbn-inv__hint">
+        {tab === 'items'
+          ? 'I / Esc to close · click to transfer · “equip” readies a weapon/grenade · “use” / “throw” / “drop”'
+          : 'I / Esc to close · craft assembles items from your pack (needs the listed materials + any tool)'}
+      </p>
     </div>
   );
 }

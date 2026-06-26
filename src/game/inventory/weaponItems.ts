@@ -24,6 +24,7 @@ export function weaponClassForItem(item: ItemId | number): WeaponClassName | nul
     case ITEM.BaseballBat:
     case ITEM.Crowbar:
     case ITEM.FireAxe:
+    case ITEM.Torch:
       return 'melee';
     default:
       return null;
